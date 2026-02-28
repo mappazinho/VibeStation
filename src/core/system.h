@@ -1,0 +1,160 @@
+#pragma once
+#include "bios.h"
+#include "cdrom.h"
+#include "cpu.h"
+#include "dma.h"
+#include "gpu.h"
+#include "interrupt.h"
+#include "ram.h"
+#include "sio.h"
+#include "spu.h"
+#include "timer.h"
+#include "types.h"
+#include <string>
+#include <vector>
+
+// System container for all PS1 core devices and memory bus dispatch.
+
+class System {
+public:
+  struct BootDiagnostics {
+    bool saw_cd_io = false;
+    bool saw_sio_io = false;
+    bool saw_pad_cmd42 = false;
+    bool saw_tx_cmd42 = false;
+    bool saw_pad_id = false;
+    bool saw_pad_button = false;
+    bool saw_full_pad_poll = false;
+    bool saw_cd_read_cmd = false;
+    bool saw_cd_sector_visible = false;
+    bool saw_cd_getid = false;
+    bool saw_cd_setloc = false;
+    bool saw_cd_seekl = false;
+    bool saw_cd_readn_or_reads = false;
+    bool saw_logo_present = false;
+    bool logo_visible_persisted = false;
+    bool fell_back_to_bios_after_non_bios = false;
+    u64 first_cd_io_cycle = 0;
+    u64 first_sio_io_cycle = 0;
+    u32 first_cd_io_addr = 0;
+    u32 first_sio_io_addr = 0;
+    u64 cd_io_count = 0;
+    u64 sio_io_count = 0;
+    u64 pad_cmd42_count = 0;
+    u64 pad_poll_count = 0;
+    u64 pad_packet_count = 0;
+    u64 ch0_poll_count = 0;
+    u64 ch1_poll_count = 0;
+    u64 sio_invalid_seq_count = 0;
+    u16 last_pad_buttons = 0xFFFF;
+    u8 last_sio_tx = 0;
+    u8 last_sio_rx = 0xFF;
+    u16 last_joy_stat = 0;
+    u16 last_joy_ctrl = 0;
+    u64 sio_irq_assert_count = 0;
+    u64 sio_irq_ack_count = 0;
+    u64 cd_read_command_count = 0;
+    u64 cd_irq_int1_count = 0;
+    u64 cd_irq_int3_count = 0;
+    u32 frame_counter = 0;
+    u32 logo_visible_run_frames = 0;
+    s32 first_black_after_logo_frame = -1;
+    u64 display_non_black_pixels = 0;
+    u32 display_hash = 0;
+    u16 display_width = 0;
+    u16 display_height = 0;
+  };
+
+  System() = default;
+
+  // Initialization (called when user loads BIOS)
+  void init_hardware();
+  bool load_bios(const std::string &path);
+  bool load_game(const std::string &bin_path, const std::string &cue_path);
+  bool boot_disc();
+  void reset();
+  void shutdown();
+
+  // Emulation control
+  void run_frame();
+  void step();
+  double target_fps() const;
+
+  // State
+  bool is_running() const { return running_; }
+  void set_running(bool r) { running_ = r; }
+  bool bios_loaded() const { return bios_.is_loaded(); }
+  bool disc_loaded() const { return cdrom_.is_disc_inserted(); }
+  bool hardware_ready() const { return hw_init_; }
+  const BootDiagnostics &boot_diag() const { return boot_diag_; }
+  u64 irq_request_count(Interrupt irq) const { return irq_.request_count(irq); }
+  const Spu::AudioDiag &spu_audio_diag() const { return spu_.audio_diag(); }
+  void set_spu_audio_capture(bool enabled) { spu_.set_audio_capture(enabled); }
+  bool spu_audio_capture_enabled() const { return spu_.audio_capture_enabled(); }
+  void clear_spu_audio_capture() { spu_.clear_audio_capture(); }
+  const std::vector<s16> &spu_audio_capture_samples() const {
+    return spu_.audio_capture_samples();
+  }
+
+  // Memory bus interface
+  u8 read8(u32 addr);
+  u16 read16(u32 addr);
+  u32 read32(u32 addr);
+  void write8(u32 addr, u8 val);
+  void write16(u32 addr, u16 val);
+  void write32(u32 addr, u32 val);
+
+  // Component access (for DMA)
+  bool irq_pending() { return irq_.pending(); }
+  void gpu_gp0(u32 val) { gpu_.gp0(val); }
+  u32 gpu_read() { return gpu_.read_data(); }
+  bool gpu_dma_request() const { return gpu_.dma_request(); }
+  u32 cdrom_dma_read() { return cdrom_.dma_read(); }
+  bool cdrom_dma_request() const { return cdrom_.dma_request(); }
+  void spu_dma_write(u32 val) { spu_.dma_write(val); }
+  u32 spu_dma_read() { return spu_.dma_read(); }
+  bool spu_dma_request() const { return spu_.dma_request(); }
+
+  // Public component access
+  Gpu &gpu() { return gpu_; }
+  Cpu &cpu() { return cpu_; }
+  Sio &sio() { return sio_; }
+  const Spu &spu() const { return spu_; }
+  const CdRom &cdrom() const { return cdrom_; }
+  const Bios &bios() const { return bios_; }
+  InterruptController &irq() { return irq_; }
+
+private:
+  // Hardware components
+  Bios bios_;
+  Ram ram_;
+  InterruptController irq_;
+  Timers timers_;
+  Spu spu_;
+  Sio sio_;
+  CdRom cdrom_;
+  DmaController dma_;
+  Gpu gpu_;
+  Cpu cpu_;
+
+  bool running_ = false;
+  bool hw_init_ = false;
+  u64 frame_cycles_ = 0;
+  std::string last_disc_bin_path_;
+  std::string last_disc_cue_path_;
+
+  // Memory control registers (written by BIOS, mostly ignored)
+  u32 mem_ctrl_[9] = {};
+  u32 ram_size_ = 0;
+  u32 cache_ctrl_ = 0;
+  u8 post_reg_ = 0;
+  BootDiagnostics boot_diag_ = {};
+  bool saw_non_bios_exec_ = false;
+  u32 bios_menu_streak_after_non_bios_ = 0;
+
+  void note_cdrom_io(u32 phys_addr);
+  void note_sio_io(u32 phys_addr);
+};
+
+// Timer IRQ helper (called from timer.cpp)
+void timer_fire_irq(System *sys, int index);
