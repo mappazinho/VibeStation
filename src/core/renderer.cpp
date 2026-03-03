@@ -1,5 +1,4 @@
 #include "renderer.h"
-#include "gpu.h"
 #include <algorithm>
 #include <vector>
 
@@ -174,11 +173,16 @@ bool Renderer::create_shader() {
   return true;
 }
 
-void Renderer::render(const Gpu &gpu) {
-  std::vector<u32> rgba;
-  const DisplaySampleInfo sample = gpu.build_display_rgba(rgba);
-  const int w = (std::max)(1, sample.width);
-  const int h = (std::max)(1, sample.height);
+void Renderer::upload_frame(const std::vector<u32> &rgba, int width,
+                            int height) {
+  const int w = (std::max)(1, width);
+  const int h = (std::max)(1, height);
+  const size_t expected =
+      static_cast<size_t>(w) * static_cast<size_t>(h);
+  if (rgba.size() < expected) {
+    return;
+  }
+
   last_frame_width_ = w;
   last_frame_height_ = h;
 
