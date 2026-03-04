@@ -941,6 +941,25 @@ void App::draw_sound_status_content() {
   ImGui::Text("KEY ON/OFF Events: %llu / %llu",
               static_cast<unsigned long long>(diag.key_on_events),
               static_cast<unsigned long long>(diag.key_off_events));
+  ImGui::Text("Voice offs (END/RELEASE): %llu / %llu",
+              static_cast<unsigned long long>(diag.off_due_to_end_flag),
+              static_cast<unsigned long long>(diag.release_to_off_events));
+  ImGui::Text("Ignored while SPU disabled (KON/KOFF): %llu / %llu",
+              static_cast<unsigned long long>(diag.keyon_ignored_while_disabled),
+              static_cast<unsigned long long>(diag.keyoff_ignored_while_disabled));
+  ImGui::Text("SPUCNT disable events / forced-off voices: %llu / %llu",
+              static_cast<unsigned long long>(diag.spucnt_enable_clear_events),
+              static_cast<unsigned long long>(diag.spu_disable_forced_off_voices));
+  ImGui::Text("KON writes L/H: %llu / %llu | bits collected: %llu | multiwrite windows: %llu",
+              static_cast<unsigned long long>(diag.kon_write_events_low),
+              static_cast<unsigned long long>(diag.kon_write_events_high),
+              static_cast<unsigned long long>(diag.kon_bits_collected),
+              static_cast<unsigned long long>(diag.kon_multiwrite_same_sample_events));
+  ImGui::Text("KOFF writes L/H: %llu / %llu | bits collected: %llu | multiwrite windows: %llu",
+              static_cast<unsigned long long>(diag.koff_write_events_low),
+              static_cast<unsigned long long>(diag.koff_write_events_high),
+              static_cast<unsigned long long>(diag.koff_bits_collected),
+              static_cast<unsigned long long>(diag.koff_multiwrite_same_sample_events));
   ImGui::Text("ENDX Mask: 0x%06X",
               static_cast<unsigned>(runtime_snapshot_.spu_endx_mask & 0x00FFFFFFu));
 
