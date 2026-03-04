@@ -114,7 +114,8 @@ void Spu::init(System *sys) {
   desired.freq = SAMPLE_RATE;
   desired.format = AUDIO_S16SYS;
   desired.channels = 2;
-  desired.samples = 1024;
+  const u32 requested_samples = std::clamp<u32>(g_spu_desired_samples, 64u, 65535u);
+  desired.samples = static_cast<Uint16>(requested_samples);
   desired.callback = nullptr;
 
   SDL_AudioSpec obtained{};
@@ -132,9 +133,24 @@ void Spu::init(System *sys) {
     return;
   }
 
+  host_buffer_bytes_ = static_cast<u32>(obtained.samples) *
+                       static_cast<u32>(obtained.channels) * sizeof(s16);
+  host_target_queue_bytes_ =
+      std::max(HOST_TARGET_QUEUE_BYTES_MIN, host_buffer_bytes_ * 2u);
+  host_max_queue_bytes_ =
+      std::max(HOST_MAX_QUEUE_BYTES_MIN, host_buffer_bytes_ * 4u);
+  if (host_max_queue_bytes_ <= host_target_queue_bytes_) {
+    host_max_queue_bytes_ = host_target_queue_bytes_ + host_buffer_bytes_;
+  }
+
   audio_enabled_ = true;
-  SDL_PauseAudioDevice(audio_device_, 0);
-  LOG_INFO("SPU: Audio initialized (%d Hz)", obtained.freq);
+  audio_started_ = false;
+  opened_audio_samples_ = requested_samples;
+  SDL_PauseAudioDevice(audio_device_, 1);
+  LOG_INFO("SPU: Audio initialized (%d Hz, device samples=%u, queue target/max=%u/%u bytes)",
+           obtained.freq, static_cast<unsigned>(obtained.samples),
+           static_cast<unsigned>(host_target_queue_bytes_),
+           static_cast<unsigned>(host_max_queue_bytes_));
 }
 
 void Spu::shutdown() {
@@ -143,13 +159,25 @@ void Spu::shutdown() {
     audio_device_ = 0;
   }
   audio_enabled_ = false;
+  audio_started_ = false;
+  host_buffer_bytes_ = 0;
+  opened_audio_samples_ = 0;
+  host_target_queue_bytes_ = HOST_TARGET_QUEUE_BYTES_MIN;
+  host_max_queue_bytes_ = HOST_MAX_QUEUE_BYTES_MIN;
 }
 
 void Spu::clear_audio_capture() { capture_samples_.clear(); }
 
 void Spu::reset() {
+  const u32 requested_samples = std::clamp<u32>(g_spu_desired_samples, 64u, 65535u);
+  if (audio_device_ != 0 && requested_samples != opened_audio_samples_) {
+    shutdown();
+    init(sys_);
+  }
   if (audio_device_ != 0) {
+    SDL_PauseAudioDevice(audio_device_, 1);
     SDL_ClearQueuedAudio(audio_device_);
+    audio_started_ = false;
   }
 
   regs_.fill(0);
@@ -188,6 +216,9 @@ void Spu::reset() {
 
   audio_diag_ = {};
   host_staging_samples_.clear();
+  host_staging_read_pos_ = 0;
+  mix_buffer_.clear();
+  host_silence_samples_.clear();
   capture_samples_.clear();
   cd_input_samples_.clear();
   cd_input_read_pos_ = 0;
@@ -1370,53 +1401,100 @@ void Spu::queue_host_audio(const std::vector<s16> &samples) {
     return;
   }
 
-  host_staging_samples_.insert(host_staging_samples_.end(), samples.begin(),
-                               samples.end());
-  if (host_staging_samples_.size() > HOST_STAGING_MAX_SAMPLES) {
-    size_t drop = host_staging_samples_.size() - HOST_STAGING_MAX_SAMPLES;
+  if (host_staging_read_pos_ >= host_staging_samples_.size()) {
+    host_staging_samples_.clear();
+    host_staging_read_pos_ = 0;
+  } else if (host_staging_read_pos_ > 0 &&
+             (host_staging_read_pos_ >= 16384u ||
+              host_staging_samples_.size() >= (HOST_STAGING_MAX_SAMPLES * 2u))) {
+    const size_t unread = host_staging_samples_.size() - host_staging_read_pos_;
+    std::move(host_staging_samples_.begin() +
+                  static_cast<s64>(host_staging_read_pos_),
+              host_staging_samples_.end(), host_staging_samples_.begin());
+    host_staging_samples_.resize(unread);
+    host_staging_read_pos_ = 0;
+  }
+
+  const size_t unread = host_staging_samples_.size() - host_staging_read_pos_;
+  if (unread + samples.size() > HOST_STAGING_MAX_SAMPLES) {
+    size_t drop = unread + samples.size() - HOST_STAGING_MAX_SAMPLES;
+    drop = std::min(drop, unread);
     drop &= ~static_cast<size_t>(1);
     if (drop > 0) {
-      host_staging_samples_.erase(host_staging_samples_.begin(),
-                                  host_staging_samples_.begin() +
-                                      static_cast<s64>(drop));
+      host_staging_read_pos_ += drop;
       audio_diag_.dropped_frames += drop / 2;
       ++audio_diag_.overrun_events;
     }
+    if (host_staging_read_pos_ >= host_staging_samples_.size()) {
+      host_staging_samples_.clear();
+      host_staging_read_pos_ = 0;
+    }
   }
 
-  while (!host_staging_samples_.empty()) {
+  host_staging_samples_.insert(host_staging_samples_.end(), samples.begin(),
+                               samples.end());
+
+  while (host_staging_read_pos_ < host_staging_samples_.size()) {
     const u32 queued = SDL_GetQueuedAudioSize(audio_device_);
     audio_diag_.queue_last_bytes = queued;
     audio_diag_.queue_peak_bytes = std::max(audio_diag_.queue_peak_bytes, queued);
 
-    if (queued >= HOST_MAX_QUEUE_BYTES) {
+    if (queued >= host_max_queue_bytes_) {
       break;
     }
 
     u32 room = 0;
-    if (queued < HOST_TARGET_QUEUE_BYTES) {
-      room = HOST_TARGET_QUEUE_BYTES - queued;
+    if (queued < host_target_queue_bytes_) {
+      room = host_target_queue_bytes_ - queued;
     } else {
-      room = HOST_MAX_QUEUE_BYTES - queued;
+      room = host_max_queue_bytes_ - queued;
     }
     if (room < sizeof(s16) * 2u) {
       break;
     }
 
+    const size_t unread_samples =
+        host_staging_samples_.size() - host_staging_read_pos_;
     size_t sample_room = room / sizeof(s16);
     sample_room &= ~static_cast<size_t>(1);
-    size_t to_queue = std::min(sample_room, host_staging_samples_.size());
+    size_t to_queue = std::min(sample_room, unread_samples);
     to_queue &= ~static_cast<size_t>(1);
     if (to_queue == 0) {
       break;
     }
 
-    SDL_QueueAudio(audio_device_, host_staging_samples_.data(),
+    SDL_QueueAudio(audio_device_,
+                   host_staging_samples_.data() + host_staging_read_pos_,
                    static_cast<Uint32>(to_queue * sizeof(s16)));
     audio_diag_.queued_frames += to_queue / 2;
-    host_staging_samples_.erase(host_staging_samples_.begin(),
-                                host_staging_samples_.begin() +
-                                    static_cast<s64>(to_queue));
+    host_staging_read_pos_ += to_queue;
+  }
+
+  if (host_staging_read_pos_ >= host_staging_samples_.size()) {
+    host_staging_samples_.clear();
+    host_staging_read_pos_ = 0;
+  }
+
+  u32 queued = SDL_GetQueuedAudioSize(audio_device_);
+  audio_diag_.queue_last_bytes = queued;
+  audio_diag_.queue_peak_bytes = std::max(audio_diag_.queue_peak_bytes, queued);
+
+  // Queue starvation hysteresis: if queue starves while running, pause
+  // playback and re-enter prebuffer mode. Resume only after refilled.
+  if (audio_started_) {
+    const u32 starve_threshold = std::max(host_buffer_bytes_ / 8u, 1024u);
+    if (queued <= starve_threshold) {
+      SDL_PauseAudioDevice(audio_device_, 1);
+      audio_started_ = false;
+    }
+  }
+
+  if (!audio_started_) {
+    const u32 startup_threshold = std::max(host_target_queue_bytes_, 16384u);
+    if (queued >= startup_threshold) {
+      SDL_PauseAudioDevice(audio_device_, 0);
+      audio_started_ = true;
+    }
   }
 }
 
@@ -1439,10 +1517,12 @@ void Spu::push_cd_audio_samples(const std::vector<s16> &samples,
     cd_input_samples_.clear();
     cd_input_read_pos_ = 0;
   } else if (cd_input_read_pos_ > 0 &&
-             cd_input_read_pos_ >= cd_input_samples_.size() / 2u) {
-    cd_input_samples_.erase(cd_input_samples_.begin(),
-                            cd_input_samples_.begin() +
-                                static_cast<s64>(cd_input_read_pos_));
+             (cd_input_read_pos_ >= 8192u ||
+              cd_input_samples_.size() >= (CD_INPUT_MAX_SAMPLES * 2u))) {
+    const size_t unread = cd_input_samples_.size() - cd_input_read_pos_;
+    std::move(cd_input_samples_.begin() + static_cast<s64>(cd_input_read_pos_),
+              cd_input_samples_.end(), cd_input_samples_.begin());
+    cd_input_samples_.resize(unread);
     cd_input_read_pos_ = 0;
   }
 
@@ -1603,7 +1683,10 @@ void Spu::tick(u32 cycles) {
   const bool enabled = (spucnt_eff & 0x8000u) != 0u;
   const bool muted = (spucnt_eff & 0x4000u) == 0u;
 
-  std::vector<s16> out(static_cast<size_t>(samples_to_generate) * 2u, 0);
+  const size_t out_samples = static_cast<size_t>(samples_to_generate) * 2u;
+  mix_buffer_.resize(out_samples);
+  std::fill(mix_buffer_.begin(), mix_buffer_.end(), 0);
+  auto &out = mix_buffer_;
 
   if (!enabled) {
     for (int i = 0; i < samples_to_generate; ++i) {
@@ -1620,6 +1703,7 @@ void Spu::tick(u32 cycles) {
     return;
   }
 
+  const bool track_sample_diag = g_profile_detailed_timing;
   audio_diag_.gaussian_active = true;
   audio_diag_.reverb_enabled = (spucnt_eff & 0x0080u) != 0u;
   for (int s = 0; s < samples_to_generate; ++s) {
@@ -1696,10 +1780,10 @@ void Spu::tick(u32 cycles) {
 
       const float out_l = signal * voice_vol_l;
       const float out_r = signal * voice_vol_r;
-      vs.current_vol_l = sat16(static_cast<s32>(
-          std::lround(std::clamp(out_l, -1.0f, 1.0f) * 32767.0f)));
-      vs.current_vol_r = sat16(static_cast<s32>(
-          std::lround(std::clamp(out_r, -1.0f, 1.0f) * 32767.0f)));
+      const float out_l_clamped = std::clamp(out_l, -1.0f, 1.0f);
+      const float out_r_clamped = std::clamp(out_r, -1.0f, 1.0f);
+      vs.current_vol_l = static_cast<s16>(out_l_clamped * 32767.0f);
+      vs.current_vol_r = static_cast<s16>(out_r_clamped * 32767.0f);
 
       if (vs.env_level > 0u) {
         ++env_voices;
@@ -1723,44 +1807,46 @@ void Spu::tick(u32 cycles) {
       }
     }
 
-    audio_diag_.logical_voice_samples += 1;
-    audio_diag_.logical_voice_accum += logical_voices;
-    if (logical_voices > audio_diag_.logical_voice_peak) {
-      audio_diag_.logical_voice_peak = logical_voices;
-      audio_diag_.logical_voice_peak_sample = sample_clock_;
-      audio_diag_.logical_voice_peak_key_on_events = audio_diag_.key_on_events;
-      audio_diag_.logical_voice_peak_key_off_events = audio_diag_.key_off_events;
-      audio_diag_.logical_voice_peak_endx_mask = endx_mask_ & 0x00FFFFFFu;
-    }
+    if (track_sample_diag) {
+      audio_diag_.logical_voice_samples += 1;
+      audio_diag_.logical_voice_accum += logical_voices;
+      if (logical_voices > audio_diag_.logical_voice_peak) {
+        audio_diag_.logical_voice_peak = logical_voices;
+        audio_diag_.logical_voice_peak_sample = sample_clock_;
+        audio_diag_.logical_voice_peak_key_on_events = audio_diag_.key_on_events;
+        audio_diag_.logical_voice_peak_key_off_events = audio_diag_.key_off_events;
+        audio_diag_.logical_voice_peak_endx_mask = endx_mask_ & 0x00FFFFFFu;
+      }
 
-    audio_diag_.env_voice_samples += 1;
-    audio_diag_.env_voice_accum += env_voices;
-    if (env_voices > audio_diag_.env_voice_peak) {
-      audio_diag_.env_voice_peak = env_voices;
-      audio_diag_.env_voice_peak_sample = sample_clock_;
-      audio_diag_.env_voice_peak_key_on_events = audio_diag_.key_on_events;
-      audio_diag_.env_voice_peak_key_off_events = audio_diag_.key_off_events;
-      audio_diag_.env_voice_peak_endx_mask = endx_mask_ & 0x00FFFFFFu;
-    }
+      audio_diag_.env_voice_samples += 1;
+      audio_diag_.env_voice_accum += env_voices;
+      if (env_voices > audio_diag_.env_voice_peak) {
+        audio_diag_.env_voice_peak = env_voices;
+        audio_diag_.env_voice_peak_sample = sample_clock_;
+        audio_diag_.env_voice_peak_key_on_events = audio_diag_.key_on_events;
+        audio_diag_.env_voice_peak_key_off_events = audio_diag_.key_off_events;
+        audio_diag_.env_voice_peak_endx_mask = endx_mask_ & 0x00FFFFFFu;
+      }
 
-    audio_diag_.audible_voice_samples += 1;
-    audio_diag_.audible_voice_accum += audible_voices;
-    if (audible_voices > audio_diag_.audible_voice_peak) {
-      audio_diag_.audible_voice_peak = audible_voices;
-      audio_diag_.audible_voice_peak_sample = sample_clock_;
-      audio_diag_.audible_voice_peak_key_on_events = audio_diag_.key_on_events;
-      audio_diag_.audible_voice_peak_key_off_events = audio_diag_.key_off_events;
-      audio_diag_.audible_voice_peak_endx_mask = endx_mask_ & 0x00FFFFFFu;
-    }
+      audio_diag_.audible_voice_samples += 1;
+      audio_diag_.audible_voice_accum += audible_voices;
+      if (audible_voices > audio_diag_.audible_voice_peak) {
+        audio_diag_.audible_voice_peak = audible_voices;
+        audio_diag_.audible_voice_peak_sample = sample_clock_;
+        audio_diag_.audible_voice_peak_key_on_events = audio_diag_.key_on_events;
+        audio_diag_.audible_voice_peak_key_off_events = audio_diag_.key_off_events;
+        audio_diag_.audible_voice_peak_endx_mask = endx_mask_ & 0x00FFFFFFu;
+      }
 
-    audio_diag_.active_voice_samples = audio_diag_.audible_voice_samples;
-    audio_diag_.active_voice_accum = audio_diag_.audible_voice_accum;
-    audio_diag_.active_voice_peak = audio_diag_.audible_voice_peak;
-    if (audible_voices >= NUM_VOICES) {
-      ++audio_diag_.voice_cap_frames;
-    }
-    if (audible_voices == 0u) {
-      ++audio_diag_.no_voice_frames;
+      audio_diag_.active_voice_samples = audio_diag_.audible_voice_samples;
+      audio_diag_.active_voice_accum = audio_diag_.audible_voice_accum;
+      audio_diag_.active_voice_peak = audio_diag_.audible_voice_peak;
+      if (audible_voices >= NUM_VOICES) {
+        ++audio_diag_.voice_cap_frames;
+      }
+      if (audible_voices == 0u) {
+        ++audio_diag_.no_voice_frames;
+      }
     }
 
     if ((spucnt_eff & 0x0001u) != 0u) {
@@ -1770,7 +1856,9 @@ void Spu::tick(u32 cycles) {
         cd_l = q15_to_float(cd_input_samples_[cd_input_read_pos_ + 0u]);
         cd_r = q15_to_float(cd_input_samples_[cd_input_read_pos_ + 1u]);
         cd_input_read_pos_ += 2u;
-        ++audio_diag_.cd_frames_mixed;
+        if (track_sample_diag) {
+          ++audio_diag_.cd_frames_mixed;
+        }
       }
 
       const float cd_mix_l = cd_l * q15_to_float(cd_vol_l_);
@@ -1784,10 +1872,12 @@ void Spu::tick(u32 cycles) {
       }
     }
 
-    audio_diag_.peak_dry_l = std::max(audio_diag_.peak_dry_l, std::abs(dry_l));
-    audio_diag_.peak_dry_r = std::max(audio_diag_.peak_dry_r, std::abs(dry_r));
-    if (std::abs(dry_l) > 1.0f || std::abs(dry_r) > 1.0f) {
-      ++audio_diag_.clip_events_dry;
+    if (track_sample_diag) {
+      audio_diag_.peak_dry_l = std::max(audio_diag_.peak_dry_l, std::abs(dry_l));
+      audio_diag_.peak_dry_r = std::max(audio_diag_.peak_dry_r, std::abs(dry_r));
+      if (std::abs(dry_l) > 1.0f || std::abs(dry_r) > 1.0f) {
+        ++audio_diag_.clip_events_dry;
+      }
     }
 
     float wet_l = 0.0f;
@@ -1797,10 +1887,12 @@ void Spu::tick(u32 cycles) {
       wet_l = wet[0];
       wet_r = wet[1];
     }
-    audio_diag_.peak_wet_l = std::max(audio_diag_.peak_wet_l, std::abs(wet_l));
-    audio_diag_.peak_wet_r = std::max(audio_diag_.peak_wet_r, std::abs(wet_r));
-    if (std::abs(wet_l) > 0.98f || std::abs(wet_r) > 0.98f) {
-      ++audio_diag_.clip_events_wet;
+    if (track_sample_diag) {
+      audio_diag_.peak_wet_l = std::max(audio_diag_.peak_wet_l, std::abs(wet_l));
+      audio_diag_.peak_wet_r = std::max(audio_diag_.peak_wet_r, std::abs(wet_r));
+      if (std::abs(wet_l) > 0.98f || std::abs(wet_r) > 0.98f) {
+        ++audio_diag_.clip_events_wet;
+      }
     }
 
     float mix_l = dry_l + wet_l;
@@ -1808,10 +1900,12 @@ void Spu::tick(u32 cycles) {
     mix_l *= q15_to_float(master_vol_l_);
     mix_r *= q15_to_float(master_vol_r_);
 
-    audio_diag_.peak_mix_l = std::max(audio_diag_.peak_mix_l, std::abs(mix_l));
-    audio_diag_.peak_mix_r = std::max(audio_diag_.peak_mix_r, std::abs(mix_r));
-    if (std::abs(mix_l) > 1.0f || std::abs(mix_r) > 1.0f) {
-      ++audio_diag_.clip_events_out;
+    if (track_sample_diag) {
+      audio_diag_.peak_mix_l = std::max(audio_diag_.peak_mix_l, std::abs(mix_l));
+      audio_diag_.peak_mix_r = std::max(audio_diag_.peak_mix_r, std::abs(mix_r));
+      if (std::abs(mix_l) > 1.0f || std::abs(mix_r) > 1.0f) {
+        ++audio_diag_.clip_events_out;
+      }
     }
 
     mix_l = std::clamp(mix_l, -1.0f, 1.0f);
@@ -1832,10 +1926,12 @@ void Spu::tick(u32 cycles) {
     cd_input_samples_.clear();
     cd_input_read_pos_ = 0;
   } else if (cd_input_read_pos_ > 0 &&
-             cd_input_read_pos_ >= cd_input_samples_.size() / 2u) {
-    cd_input_samples_.erase(cd_input_samples_.begin(),
-                            cd_input_samples_.begin() +
-                                static_cast<s64>(cd_input_read_pos_));
+             (cd_input_read_pos_ >= 8192u ||
+              cd_input_samples_.size() >= (CD_INPUT_MAX_SAMPLES * 2u))) {
+    const size_t unread = cd_input_samples_.size() - cd_input_read_pos_;
+    std::move(cd_input_samples_.begin() + static_cast<s64>(cd_input_read_pos_),
+              cd_input_samples_.end(), cd_input_samples_.begin());
+    cd_input_samples_.resize(unread);
     cd_input_read_pos_ = 0;
   }
 

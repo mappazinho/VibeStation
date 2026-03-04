@@ -122,6 +122,7 @@ private:
   // Status register fields
   DisplayMode display_;
   u8 dma_direction_ = 0;
+  bool dither_enabled_ = false;
   bool draw_to_display_ = false;
   bool texture_disable_ = false;
   bool semi_transparency_mode_ = false;

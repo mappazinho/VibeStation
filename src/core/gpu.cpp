@@ -16,6 +16,22 @@ int horizontal_divisor(u8 hres_mode) {
   return 10;
 }
 
+constexpr int kDitherTable[4][4] = {
+    {-4, 0, -3, 1},
+    {2, -2, 3, -1},
+    {-3, 1, -4, 0},
+    {3, -1, 2, -2},
+};
+
+inline int clamp_u8_i(int value) {
+  return std::max(0, std::min(value, 255));
+}
+
+inline int dither_bias(s16 x, s16 y) {
+  return kDitherTable[static_cast<u16>(y) & 0x3u]
+                     [static_cast<u16>(x) & 0x3u];
+}
+
 u16 modulate_texel_15bit(u16 texel, u8 mr, u8 mg, u8 mb) {
   const int tr = texel & 0x1F;
   const int tg = (texel >> 5) & 0x1F;
@@ -28,6 +44,37 @@ u16 modulate_texel_15bit(u16 texel, u8 mr, u8 mg, u8 mb) {
 
   return static_cast<u16>((rr & 0x1F) | ((rg & 0x1F) << 5) |
                           ((rb & 0x1F) << 10) | (texel & 0x8000u));
+}
+
+u16 modulate_texel_dithered_15bit(u16 texel, u8 mr, u8 mg, u8 mb, s16 x, s16 y) {
+  const int tr = texel & 0x1F;
+  const int tg = (texel >> 5) & 0x1F;
+  const int tb = (texel >> 10) & 0x1F;
+
+  const int rr5 = std::min(31, (tr * static_cast<int>(mr)) >> 7);
+  const int rg5 = std::min(31, (tg * static_cast<int>(mg)) >> 7);
+  const int rb5 = std::min(31, (tb * static_cast<int>(mb)) >> 7);
+
+  const int d = dither_bias(x, y);
+  const int rr = clamp_u8_i((rr5 << 3) + d) >> 3;
+  const int rg = clamp_u8_i((rg5 << 3) + d) >> 3;
+  const int rb = clamp_u8_i((rb5 << 3) + d) >> 3;
+
+  return static_cast<u16>((rr & 0x1F) | ((rg & 0x1F) << 5) |
+                          ((rb & 0x1F) << 10) | (texel & 0x8000u));
+}
+
+u16 pack_rgb15_dithered(u8 r, u8 g, u8 b, u16 preserve_bits, s16 x, s16 y,
+                        bool dither) {
+  if (dither) {
+    const int d = dither_bias(x, y);
+    r = static_cast<u8>(clamp_u8_i(static_cast<int>(r) + d));
+    g = static_cast<u8>(clamp_u8_i(static_cast<int>(g) + d));
+    b = static_cast<u8>(clamp_u8_i(static_cast<int>(b) + d));
+  }
+  return static_cast<u16>(((r >> 3) & 0x1F) | (((g >> 3) & 0x1F) << 5) |
+                          (((b >> 3) & 0x1F) << 10) |
+                          (preserve_bits & 0x8000u));
 }
 } // namespace
 
@@ -185,6 +232,7 @@ void Gpu::reset() {
   texpage_ = 0;
   clut_ = 0;
   dma_direction_ = 0;
+  dither_enabled_ = false;
   draw_to_display_ = false;
   texture_disable_ = false;
   semi_transparency_mode_ = false;
@@ -751,8 +799,16 @@ void Gpu::gp0_textured_rect() {
         continue; // Color 0 transparent in many textured modes.
       }
 
-      const u16 out15 =
-          raw_texture ? texel : modulate_texel_15bit(texel, c.r, c.g, c.b);
+      u16 out15 = texel;
+      if (!raw_texture) {
+        if (dither_enabled_) {
+          out15 = modulate_texel_dithered_15bit(
+              texel, c.r, c.g, c.b, static_cast<s16>(x + dx),
+              static_cast<s16>(y + dy));
+        } else {
+          out15 = modulate_texel_15bit(texel, c.r, c.g, c.b);
+        }
+      }
       const bool texel_semi = semi_transparency_mode_ && ((texel & 0x8000u) != 0);
       set_pixel(static_cast<s16>(x + dx), static_cast<s16>(y + dy), out15,
                 texel_semi);
@@ -784,6 +840,8 @@ void Gpu::gp0_mono_rect_16() {
 void Gpu::gp0_draw_mode() {
   u32 val = gp0_buffer_[0];
   texpage_ = static_cast<u16>(val & 0x1FF);
+  dither_enabled_ = ((val >> 9) & 0x1u) != 0;
+  draw_to_display_ = ((val >> 10) & 0x1u) != 0;
   semi_transparency_ = static_cast<u8>((val >> 5) & 0x3);
   texture_disable_ = (val >> 11) & 1;
   tex_rect_x_flip_ = ((val >> 12) & 0x1u) != 0;
@@ -1028,6 +1086,8 @@ u32 Gpu::gp1_info_value(u32 index) const {
   switch (index & 0x0Fu) {
   case 0x00: { // Draw mode setting
     u32 value = texpage_ & 0x1FFu;
+    value |= (dither_enabled_ ? 1u : 0u) << 9;
+    value |= (draw_to_display_ ? 1u : 0u) << 10;
     value |= (texture_disable_ ? 1u : 0u) << 11;
     value |= (tex_rect_x_flip_ ? 1u : 0u) << 12;
     value |= (tex_rect_y_flip_ ? 1u : 0u) << 13;
@@ -1114,6 +1174,8 @@ u32 Gpu::read_stat() const {
   stat |= ((texpage_ >> 4) & 1) << 4; // Texture page Y base
   stat |= (semi_transparency_ & 3) << 5;
   stat |= ((texpage_ >> 7) & 3) << 7; // Texture page colors
+  stat |= (dither_enabled_ ? 1u : 0u) << 9;
+  stat |= (draw_to_display_ ? 1u : 0u) << 10;
   stat |= (force_set_mask_bit_ ? 1u : 0u) << 11;
   stat |= (check_mask_before_draw_ ? 1u : 0u) << 12;
   stat |= (texture_disable_ ? 1 : 0) << 15;
@@ -1190,8 +1252,23 @@ DisplaySampleInfo Gpu::build_display_rgba(std::vector<u32> *rgba) const {
     }
   }
 
-  info.width = width;
-  info.height = height;
+  const int src_width = width;
+  const int src_height = height;
+  switch (g_output_resolution_mode) {
+  case OutputResolutionMode::R1024x768:
+    info.width = 1024;
+    info.height = 768;
+    break;
+  case OutputResolutionMode::R640x480:
+    info.width = 640;
+    info.height = 480;
+    break;
+  case OutputResolutionMode::R320x240:
+  default:
+    info.width = 320;
+    info.height = 240;
+    break;
+  }
 
   if (rgba != nullptr) {
     rgba->assign(static_cast<size_t>(info.width) * static_cast<size_t>(info.height),
@@ -1254,24 +1331,25 @@ DisplaySampleInfo Gpu::build_display_rgba(std::vector<u32> *rgba) const {
   };
 
   for (int y = 0; y < info.height; ++y) {
-    int vram_y0 = info.y_start + y;
+    const int src_y = (src_height > 0) ? ((y * src_height) / info.height) : 0;
+    int vram_y0 = info.y_start + src_y;
     int vram_y1 = vram_y0;
     bool blend_fields = false;
 
     if (interlaced_field_output) {
       switch (deinterlace_mode) {
       case DeinterlaceMode::Bob:
-        vram_y0 = info.y_start + ((y >> 1) * 2) + field_parity;
+        vram_y0 = info.y_start + ((src_y >> 1) * 2) + field_parity;
         break;
       case DeinterlaceMode::Blend:
-        vram_y0 = info.y_start + ((y >> 1) * 2) + field_parity;
+        vram_y0 = info.y_start + ((src_y >> 1) * 2) + field_parity;
         vram_y1 = vram_y0 + (field_parity ? -1 : 1);
         blend_fields = true;
         break;
       case DeinterlaceMode::Weave:
       default:
         // Stable placement: map output lines directly to source scanlines.
-        vram_y0 = info.y_start + y;
+        vram_y0 = info.y_start + src_y;
         break;
       }
     }
@@ -1290,14 +1368,15 @@ DisplaySampleInfo Gpu::build_display_rgba(std::vector<u32> *rgba) const {
       u8 r = 0;
       u8 g = 0;
       u8 b = 0;
-      if (!read_rgb(vram_y0, x, r, g, b)) {
+      const int src_x = (src_width > 0) ? ((x * src_width) / info.width) : 0;
+      if (!read_rgb(vram_y0, src_x, r, g, b)) {
         continue;
       }
       if (blend_fields) {
         u8 r1 = 0;
         u8 g1 = 0;
         u8 b1 = 0;
-        if (read_rgb(vram_y1, x, r1, g1, b1)) {
+        if (read_rgb(vram_y1, src_x, r1, g1, b1)) {
           r = static_cast<u8>((static_cast<u16>(r) + r1) / 2u);
           g = static_cast<u8>((static_cast<u16>(g) + g1) / 2u);
           b = static_cast<u8>((static_cast<u16>(b) + b1) / 2u);
@@ -1486,15 +1565,17 @@ void Gpu::draw_shaded_triangle(Vertex v0, Vertex v1, Vertex v2) {
       s32 w1 = edge(v2, v0, x, y);
       s32 w2 = edge(v0, v1, x, y);
       if ((w0 >= 0 && w1 >= 0 && w2 >= 0) || (w0 <= 0 && w1 <= 0 && w2 <= 0)) {
-        // Interpolate color
-        u8 r = static_cast<u8>(
-            (w0 * v0.color.r + w1 * v1.color.r + w2 * v2.color.r) / area);
-        u8 g = static_cast<u8>(
-            (w0 * v0.color.g + w1 * v1.color.g + w2 * v2.color.g) / area);
-        u8 b = static_cast<u8>(
-            (w0 * v0.color.b + w1 * v1.color.b + w2 * v2.color.b) / area);
-        Color c(r, g, b);
-        set_pixel(x, y, c.to_15bit(), semi_transparency_mode_);
+        const s32 r_mix =
+            (w0 * v0.color.r + w1 * v1.color.r + w2 * v2.color.r) / area;
+        const s32 g_mix =
+            (w0 * v0.color.g + w1 * v1.color.g + w2 * v2.color.g) / area;
+        const s32 b_mix =
+            (w0 * v0.color.b + w1 * v1.color.b + w2 * v2.color.b) / area;
+        const u8 r = static_cast<u8>(clamp_u8_i(r_mix));
+        const u8 g = static_cast<u8>(clamp_u8_i(g_mix));
+        const u8 b = static_cast<u8>(clamp_u8_i(b_mix));
+        const u16 out15 = pack_rgb15_dithered(r, g, b, 0, x, y, dither_enabled_);
+        set_pixel(x, y, out15, semi_transparency_mode_);
       }
     }
   }
@@ -1532,8 +1613,14 @@ void Gpu::draw_textured_triangle(Vertex v0, Vertex v1, Vertex v2, Color /*c*/) {
             static_cast<u8>((w0 * v0.v + w1 * v1.v + w2 * v2.v) / area);
         const u16 texel = read_texel(u, v_coord);
         if ((texel & 0x7FFF) != 0) { // Transparent texel index/color 0.
-          const u16 out15 =
-              raw_texture ? texel : modulate_texel_15bit(texel, mr, mg, mb);
+          u16 out15 = texel;
+          if (!raw_texture) {
+            if (dither_enabled_) {
+              out15 = modulate_texel_dithered_15bit(texel, mr, mg, mb, x, y);
+            } else {
+              out15 = modulate_texel_15bit(texel, mr, mg, mb);
+            }
+          }
           const bool texel_semi =
               semi_transparency_mode_ && ((texel & 0x8000u) != 0);
           set_pixel(x, y, out15, texel_semi);
@@ -1586,8 +1673,14 @@ void Gpu::draw_shaded_textured_triangle(Vertex v0, Vertex v1, Vertex v2) {
       const u8 mg = static_cast<u8>(std::clamp(g_mix, 0, 255));
       const u8 mb = static_cast<u8>(std::clamp(b_mix, 0, 255));
 
-      const u16 out15 =
-          raw_texture ? texel : modulate_texel_15bit(texel, mr, mg, mb);
+      u16 out15 = texel;
+      if (!raw_texture) {
+        if (dither_enabled_) {
+          out15 = modulate_texel_dithered_15bit(texel, mr, mg, mb, x, y);
+        } else {
+          out15 = modulate_texel_15bit(texel, mr, mg, mb);
+        }
+      }
       const bool texel_semi = semi_transparency_mode_ && ((texel & 0x8000u) != 0);
       set_pixel(x, y, out15, texel_semi);
     }
@@ -1602,3 +1695,4 @@ void Gpu::draw_rect(s16 x, s16 y, u16 w, u16 h, Color c) {
     }
   }
 }
+
