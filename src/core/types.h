@@ -95,6 +95,7 @@ inline u32 g_trace_stride_sio = 2048;
 inline bool g_experimental_bios_size_mode = false;
 inline bool g_unsafe_ps2_bios_mode = false;
 inline bool g_low_spec_mode = false;
+inline u32 g_spu_desired_samples = 64u;
 inline bool g_profile_detailed_timing =
 #if defined(NDEBUG)
     false;
@@ -108,7 +109,15 @@ enum class DeinterlaceMode : u8 {
   Blend = 2,
 };
 
+enum class OutputResolutionMode : u8 {
+  R320x240 = 0,
+  R640x480 = 1,
+  R1024x768 = 2,
+};
+
 inline DeinterlaceMode g_deinterlace_mode = DeinterlaceMode::Weave;
+inline OutputResolutionMode g_output_resolution_mode =
+    OutputResolutionMode::R320x240;
 
 inline constexpr u32 log_category_bit(LogCategory cat) {
   return static_cast<u32>(cat);
@@ -353,3 +362,4 @@ inline u32 mask_address(u32 addr) {
   return addr & REGION_MASK[addr >> 29];
 }
 } // namespace psx
+

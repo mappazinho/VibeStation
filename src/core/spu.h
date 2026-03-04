@@ -171,8 +171,8 @@ private:
   static constexpr u32 SPU_RAM_MASK = 0x7FFFFu;
   static constexpr u32 SPU_RAM_WORD_MASK = 0x7FFFEu;
   static constexpr u32 SPUCNT_MODE_APPLY_DELAY_CYCLES = 0x100u;
-  static constexpr u32 HOST_TARGET_QUEUE_BYTES = 8192u;
-  static constexpr u32 HOST_MAX_QUEUE_BYTES = 24576u;
+  static constexpr u32 HOST_TARGET_QUEUE_BYTES_MIN = 8192u;
+  static constexpr u32 HOST_MAX_QUEUE_BYTES_MIN = 32768u;
   static constexpr size_t HOST_STAGING_MAX_SAMPLES =
       static_cast<size_t>(SAMPLE_RATE) * 2 * 4;
   static constexpr size_t CAPTURE_MAX_SAMPLES =
@@ -272,7 +272,12 @@ private:
   System *sys_ = nullptr;
   SDL_AudioDeviceID audio_device_ = 0;
   bool audio_enabled_ = false;
+  bool audio_started_ = false;
   bool capture_enabled_ = false;
+  u32 host_buffer_bytes_ = 0;
+  u32 opened_audio_samples_ = 0;
+  u32 host_target_queue_bytes_ = HOST_TARGET_QUEUE_BYTES_MIN;
+  u32 host_max_queue_bytes_ = HOST_MAX_QUEUE_BYTES_MIN;
 
   std::array<u16, 0x200> regs_ = {};
   std::array<u8, 512 * 1024> spu_ram_ = {};
@@ -315,6 +320,9 @@ private:
 
   AudioDiag audio_diag_ = {};
   std::vector<s16> host_staging_samples_;
+  size_t host_staging_read_pos_ = 0;
+  std::vector<s16> mix_buffer_;
+  std::vector<s16> host_silence_samples_;
   std::vector<s16> capture_samples_;
   std::vector<s16> cd_input_samples_;
   size_t cd_input_read_pos_ = 0;

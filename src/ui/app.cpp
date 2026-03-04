@@ -7,7 +7,9 @@
 #include <algorithm>
 #include <cctype>
 #include <chrono>
+#include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <vector>
 
 #ifdef _WIN32
@@ -15,6 +17,10 @@
 #include <commdlg.h>
 #include <shobjidl.h>
 #endif
+
+namespace {
+constexpr const char *kAppConfigFileName = "vibestation_config.ini";
+}
 
 bool App::init() {
   printf("[App::init] Initializing SDL...\n");
@@ -28,6 +34,8 @@ bool App::init() {
   }
   printf("[App::init] SDL OK\n");
   fflush(stdout);
+
+  load_persistent_config();
 
   SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
   SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 3);
@@ -130,6 +138,8 @@ bool App::init_runtime() {
   system_ = std::make_unique<System>();
   renderer_ = std::make_unique<Renderer>();
   input_ = std::make_unique<InputManager>();
+
+  try_autoload_bios_from_config();
 
   if (!renderer_->init(window_)) {
     LOG_ERROR("Renderer init failed");
@@ -361,6 +371,7 @@ void App::menu_bar() {
           emu_runner_.pause_and_wait_idle();
           if (system_->load_bios(path)) {
             bios_path_ = path;
+            save_persistent_config();
             has_started_emulation_ = false;
             status_message_ = "BIOS loaded: " + system_->bios().get_info();
           } else {
@@ -604,6 +615,15 @@ void App::panel_settings() {
           g_deinterlace_mode =
               static_cast<DeinterlaceMode>(deinterlace_index);
         }
+
+        const char *resolution_modes[] = {"320x240", "640x480", "1024x768"};
+        int resolution_index = static_cast<int>(g_output_resolution_mode);
+        if (ImGui::Combo("Output Resolution", &resolution_index,
+                         resolution_modes, IM_ARRAYSIZE(resolution_modes))) {
+          resolution_index = std::max(0, std::min(2, resolution_index));
+          g_output_resolution_mode =
+              static_cast<OutputResolutionMode>(resolution_index);
+        }
         ImGui::Text("Internal Upscaling: 1x (native)");
         ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.3f, 1.0f),
                            "PGXP: Not yet implemented");
@@ -613,6 +633,14 @@ void App::panel_settings() {
         ImGui::Text("SPU emulation: Gaussian + reverb core (stage 2)");
         ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.3f, 1.0f),
                            "XA/CDDA baseline is live; advanced modulation is still in progress.");
+
+        int desired_samples = static_cast<int>(g_spu_desired_samples);
+        if (ImGui::InputInt("Desired Samples", &desired_samples, 256, 1024)) {
+          desired_samples = std::max(64, std::min(65535, desired_samples));
+          g_spu_desired_samples = static_cast<u32>(desired_samples);
+        }
+        ImGui::TextDisabled("Applied on next audio device init.");
+
         ImGui::EndTabItem();
       }
       if (ImGui::BeginTabItem("Sound Status")) {
@@ -966,12 +994,24 @@ void App::draw_sound_status_content() {
   ImGui::Spacing();
   ImGui::Text("Voice Levels");
   ImGuiTableFlags table_flags =
-      ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp;
+      ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg |
+      ImGuiTableFlags_SizingStretchSame;
+  const float voice_row_height =
+      (ImGui::GetTextLineHeight() * 2.0f) + ImGui::GetFrameHeight() +
+      (ImGui::GetStyle().ItemSpacing.y * 3.0f);
   if (ImGui::BeginTable("SPUSoundStatusVoices", 4, table_flags)) {
+    ImGui::TableSetupColumn("##voice_col_0", ImGuiTableColumnFlags_WidthStretch,
+                            1.0f);
+    ImGui::TableSetupColumn("##voice_col_1", ImGuiTableColumnFlags_WidthStretch,
+                            1.0f);
+    ImGui::TableSetupColumn("##voice_col_2", ImGuiTableColumnFlags_WidthStretch,
+                            1.0f);
+    ImGui::TableSetupColumn("##voice_col_3", ImGuiTableColumnFlags_WidthStretch,
+                            1.0f);
     for (size_t voice = 0; voice < runtime_snapshot_.spu_voice_level_l.size();
          ++voice) {
       if ((voice % 4u) == 0u) {
-        ImGui::TableNextRow();
+        ImGui::TableNextRow(ImGuiTableRowFlags_None, voice_row_height);
       }
       ImGui::TableSetColumnIndex(static_cast<int>(voice % 4u));
 
@@ -1278,7 +1318,119 @@ std::string App::open_file_dialog(const char *filter, const char *title) {
   return "";
 }
 
+void App::load_persistent_config() {
+  std::ifstream in(kAppConfigFileName);
+  if (!in.is_open()) {
+    return;
+  }
+
+  auto trim = [](std::string &s) {
+    const size_t begin = s.find_first_not_of(" \t\r\n");
+    if (begin == std::string::npos) {
+      s.clear();
+      return;
+    }
+    const size_t end = s.find_last_not_of(" \t\r\n");
+    s = s.substr(begin, end - begin + 1);
+  };
+  auto parse_bool = [](const std::string &v, bool fallback) {
+    if (v == "1" || v == "true" || v == "TRUE" || v == "on" || v == "ON") {
+      return true;
+    }
+    if (v == "0" || v == "false" || v == "FALSE" || v == "off" || v == "OFF") {
+      return false;
+    }
+    return fallback;
+  };
+
+  std::string line;
+  while (std::getline(in, line)) {
+    if (line.empty() || line[0] == '#') {
+      continue;
+    }
+    const size_t eq = line.find('=');
+    if (eq == std::string::npos) {
+      continue;
+    }
+
+    std::string key = line.substr(0, eq);
+    std::string value = line.substr(eq + 1);
+    trim(key);
+    trim(value);
+
+    if (key == "bios_path") {
+      bios_path_ = value;
+    } else if (key == "vsync") {
+      config_vsync_ = parse_bool(value, config_vsync_);
+    } else if (key == "low_spec_mode") {
+      config_low_spec_mode_ = parse_bool(value, config_low_spec_mode_);
+      g_low_spec_mode = config_low_spec_mode_;
+    } else if (key == "spu_desired_samples") {
+      const unsigned long parsed = std::strtoul(value.c_str(), nullptr, 10);
+      const u32 clamped = static_cast<u32>(std::max(64ul, std::min(65535ul, parsed)));
+      g_spu_desired_samples = clamped;
+    } else if (key == "detailed_profiling") {
+      g_profile_detailed_timing = parse_bool(value, g_profile_detailed_timing);
+    } else if (key == "experimental_bios_size_mode") {
+      g_experimental_bios_size_mode = parse_bool(value, g_experimental_bios_size_mode);
+    } else if (key == "unsafe_ps2_bios_mode") {
+      g_unsafe_ps2_bios_mode = parse_bool(value, g_unsafe_ps2_bios_mode);
+    } else if (key == "deinterlace_mode") {
+      const unsigned long mode = std::strtoul(value.c_str(), nullptr, 10);
+      const int idx = static_cast<int>(std::max(0ul, std::min(2ul, mode)));
+      g_deinterlace_mode = static_cast<DeinterlaceMode>(idx);
+    } else if (key == "output_resolution_mode") {
+      const unsigned long mode = std::strtoul(value.c_str(), nullptr, 10);
+      const int idx = static_cast<int>(std::max(0ul, std::min(2ul, mode)));
+      g_output_resolution_mode = static_cast<OutputResolutionMode>(idx);
+    }
+  }
+
+  if (g_unsafe_ps2_bios_mode) {
+    g_experimental_bios_size_mode = true;
+  }
+}
+
+void App::save_persistent_config() const {
+  std::ofstream out(kAppConfigFileName, std::ios::out | std::ios::trunc);
+  if (!out.is_open()) {
+    return;
+  }
+
+  out << "bios_path=" << bios_path_ << "\n";
+  out << "vsync=" << (config_vsync_ ? 1 : 0) << "\n";
+  out << "low_spec_mode=" << (config_low_spec_mode_ ? 1 : 0) << "\n";
+  out << "spu_desired_samples=" << static_cast<unsigned>(g_spu_desired_samples) << "\n";
+  out << "detailed_profiling=" << (g_profile_detailed_timing ? 1 : 0) << "\n";
+  out << "experimental_bios_size_mode=" << (g_experimental_bios_size_mode ? 1 : 0) << "\n";
+  out << "unsafe_ps2_bios_mode=" << (g_unsafe_ps2_bios_mode ? 1 : 0) << "\n";
+  out << "deinterlace_mode=" << static_cast<int>(g_deinterlace_mode) << "\n";
+  out << "output_resolution_mode=" << static_cast<int>(g_output_resolution_mode) << "\n";
+}
+
+void App::try_autoload_bios_from_config() {
+  if (!system_ || system_->bios_loaded()) {
+    return;
+  }
+
+  if (bios_path_.empty()) {
+    return;
+  }
+
+  if (!std::filesystem::exists(bios_path_)) {
+    status_message_ = "Saved BIOS path not found. Load BIOS manually.";
+    return;
+  }
+
+  if (system_->load_bios(bios_path_)) {
+    has_started_emulation_ = false;
+    status_message_ = "Auto-loaded BIOS: " + system_->bios().get_info();
+  } else {
+    status_message_ = "Failed to auto-load saved BIOS. Load BIOS manually.";
+  }
+}
 void App::shutdown() {
+  save_persistent_config();
   emu_runner_.stop();
   if (renderer_) {
     renderer_->shutdown();
@@ -1309,6 +1461,7 @@ void App::shutdown() {
   }
   SDL_Quit();
 }
+
 
 
 

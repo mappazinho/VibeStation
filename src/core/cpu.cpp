@@ -982,3 +982,4 @@ void Cpu::op_swc2(u32 i) {
   u32 val = gte.read_data(rt(i));
   store32(addr, val);
 }
+

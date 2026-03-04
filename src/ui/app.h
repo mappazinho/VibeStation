@@ -89,4 +89,7 @@ private:
 
   // Deferred heavy initialization to avoid large stack allocations on startup.
   bool init_runtime();
+  void load_persistent_config();
+  void save_persistent_config() const;
+  void try_autoload_bios_from_config();
 };
