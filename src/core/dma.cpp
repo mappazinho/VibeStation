@@ -91,11 +91,11 @@ void DmaController::write(u32 offset, u32 value) {
         static u64 chcr_log_count = 0;
         if (trace_should_log(chcr_log_count, g_trace_burst_dma,
                              g_trace_stride_dma)) {
-          LOG_INFO("DMA: CH%d CHCR=0x%08X (enabled=%d trigger=%d sync=%d "
-                   "dpcr_en=%d)",
-                   channel, ch.channel_ctrl, ch.enabled() ? 1 : 0,
-                   ch.trigger() ? 1 : 0, static_cast<int>(ch.sync_mode()),
-                   channel_enabled(channel) ? 1 : 0);
+          LOG_DEBUG("DMA: CH%d CHCR=0x%08X (enabled=%d trigger=%d sync=%d "
+                    "dpcr_en=%d)",
+                    channel, ch.channel_ctrl, ch.enabled() ? 1 : 0,
+                    ch.trigger() ? 1 : 0, static_cast<int>(ch.sync_mode()),
+                    channel_enabled(channel) ? 1 : 0);
         }
       }
       if (ch.is_active() && channel_enabled(channel) && request_active(channel)) {
@@ -117,7 +117,7 @@ void DmaController::write(u32 offset, u32 value) {
       static u64 dpcr_log_count = 0;
       if (trace_should_log(dpcr_log_count, g_trace_burst_dma,
                            g_trace_stride_dma)) {
-        LOG_INFO("DMA: DPCR=0x%08X", dpcr_);
+        LOG_DEBUG("DMA: DPCR=0x%08X", dpcr_);
       }
     }
     break;
@@ -144,24 +144,29 @@ void DmaController::execute_dma(int channel) {
     static u64 exec_log_count = 0;
     if (trace_should_log(exec_log_count, g_trace_burst_dma,
                          g_trace_stride_dma)) {
-      LOG_INFO("DMA: Execute ch=%d madr=0x%08X bcr=0x%08X chcr=0x%08X sync=%d "
-               "from_ram=%d",
-               channel, ch.base_addr, ch.block_ctrl, ch.channel_ctrl,
-               static_cast<int>(ch.sync_mode()), ch.from_ram() ? 1 : 0);
+      LOG_DEBUG("DMA: Execute ch=%d madr=0x%08X bcr=0x%08X chcr=0x%08X sync=%d "
+                "from_ram=%d",
+                channel, ch.base_addr, ch.block_ctrl, ch.channel_ctrl,
+                static_cast<int>(ch.sync_mode()), ch.from_ram() ? 1 : 0);
     }
   }
 
   switch (ch.sync_mode()) {
   case DmaChannel::SyncMode::Immediate:
+    dma_block(channel);
+    transfer_complete(channel);
+    break;
   case DmaChannel::SyncMode::Block:
     dma_block(channel);
+    if (ch.block_count() == 0) {
+      transfer_complete(channel);
+    }
     break;
   case DmaChannel::SyncMode::LinkedList:
     dma_linked_list(channel);
+    transfer_complete(channel);
     break;
   }
-
-  transfer_complete(channel);
 }
 
 void DmaController::dma_block(int channel) {
@@ -175,7 +180,10 @@ void DmaController::dma_block(int channel) {
     if (word_count == 0)
       word_count = 0x10000;
   } else {
-    word_count = ch.block_size() * ch.block_count();
+    word_count = ch.block_size();
+    if (word_count == 0) {
+      word_count = 0x10000;
+    }
   }
 
   s32 step;
@@ -247,6 +255,13 @@ void DmaController::dma_block(int channel) {
     }
 
     addr = static_cast<u32>(static_cast<s32>(addr) + step);
+  }
+
+  ch.base_addr = addr & 0x00FFFFFF;
+  if (ch.sync_mode() == DmaChannel::SyncMode::Block) {
+    const u16 remaining = ch.block_count();
+    const u16 next = (remaining > 0) ? static_cast<u16>(remaining - 1) : 0;
+    ch.block_ctrl = (ch.block_ctrl & 0x0000FFFFu) | (static_cast<u32>(next) << 16);
   }
 }
 

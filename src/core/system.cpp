@@ -166,6 +166,7 @@ void System::reset() {
     std::memset(mem_ctrl_, 0, sizeof(mem_ctrl_));
     ram_size_ = 0;
     cache_ctrl_ = 0;
+    mdec_control_shadow_ = 0;
     post_reg_ = 0;
 }
 
@@ -681,7 +682,17 @@ void System::write8(u32 addr, u8 val) {
             return;
         }
         if (io >= 0x820 && io < 0x828) {
-            // MDEC is normally programmed via 32-bit accesses; ignore byte writes.
+            // Games can update the MDEC control register with partial writes.
+            if ((io & ~0x3u) == 0x824) {
+                const u32 shift = (io & 0x3u) * 8u;
+                const u32 mask = 0xFFu << shift;
+                mdec_control_shadow_ =
+                    (mdec_control_shadow_ & ~mask) | (static_cast<u32>(val) << shift);
+                mdec_.write_control(mdec_control_shadow_);
+                if ((mdec_control_shadow_ & 0x80000000u) != 0) {
+                    mdec_control_shadow_ = 0;
+                }
+            }
             return;
         }
         // Expansion 2 (POST register, etc.)
@@ -758,7 +769,16 @@ void System::write16(u32 addr, u16 val) {
             return;
         }
         if (io >= 0x820 && io < 0x828) {
-            // MDEC is normally programmed via 32-bit accesses; ignore halfword writes.
+            if ((io & ~0x3u) == 0x824) {
+                const u32 shift = (io & 0x2u) * 8u;
+                const u32 mask = 0xFFFFu << shift;
+                mdec_control_shadow_ =
+                    (mdec_control_shadow_ & ~mask) | (static_cast<u32>(val) << shift);
+                mdec_.write_control(mdec_control_shadow_);
+                if ((mdec_control_shadow_ & 0x80000000u) != 0) {
+                    mdec_control_shadow_ = 0;
+                }
+            }
             return;
         }
         if (io >= 0xC00 && io < 0x1000) {
@@ -859,6 +879,7 @@ void System::write32(u32 addr, u32 val) {
             return;
         }
         if (io == 0x824) {
+            mdec_control_shadow_ = ((val & 0x80000000u) != 0) ? 0u : val;
             mdec_.write_control(val);
             return;
         }

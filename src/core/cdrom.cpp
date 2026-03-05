@@ -423,9 +423,9 @@ u8 CdRom::read8(u32 offset) {
     if (g_trace_cdrom) {
       static u64 io_read_count = 0;
       if (trace_should_log(io_read_count, g_trace_burst_cdrom, g_trace_stride_cdrom)) {
-        LOG_INFO("CDROM: R8 off=%u idx=%u -> 0x%02X", offset,
-                 static_cast<unsigned>(index_reg_),
-                 static_cast<unsigned>(value));
+        LOG_DEBUG("CDROM: R8 off=%u idx=%u -> 0x%02X", offset,
+                  static_cast<unsigned>(index_reg_),
+                  static_cast<unsigned>(value));
       }
     }
     return value;
@@ -503,9 +503,9 @@ void CdRom::write8(u32 offset, u8 value) {
   if (g_trace_cdrom) {
     static u64 io_write_count = 0;
     if (trace_should_log(io_write_count, g_trace_burst_cdrom, g_trace_stride_cdrom)) {
-      LOG_INFO("CDROM: W8 off=%u idx=%u val=0x%02X", offset,
-               static_cast<unsigned>(index_reg_),
-               static_cast<unsigned>(value));
+      LOG_DEBUG("CDROM: W8 off=%u idx=%u val=0x%02X", offset,
+                static_cast<unsigned>(index_reg_),
+                static_cast<unsigned>(value));
     }
   }
 
@@ -566,12 +566,14 @@ void CdRom::write8(u32 offset, u8 value) {
   case 3:
     switch (index_reg_) {
     case 0:
-        // Bit7 gates host/DMA visibility of the data FIFO.
-        // Do not rewind data_index_ here: games may toggle this bit between
-        // multiple DMA bursts while expecting a continuous stream.
+      // Bit7 gates host/DMA visibility of the data FIFO.
+      // Do not rewind data_index_ here: games may toggle this bit between
+      // multiple DMA bursts while expecting a continuous stream.
       data_request_ = (value & 0x80) != 0;
       if (data_request_) {
-          data_ready_ = (data_index_ < static_cast<int>(data_buffer_.size()));
+        data_ready_ = (data_index_ < static_cast<int>(data_buffer_.size()));
+      } else {
+        data_ready_ = false;
       }
       break;
     case 1: {
@@ -1418,9 +1420,9 @@ void CdRom::fire_irq(u8 irq_num) {
       (command_counter_ <= static_cast<u64>(g_trace_burst_cdrom) ||
        (g_trace_stride_cdrom > 0 &&
         (command_counter_ % static_cast<u64>(g_trace_stride_cdrom)) == 0))) {
-    LOG_INFO("CDROM: IRQ INT%u flag=0x%02X enable=0x%02X",
-             static_cast<unsigned>(irq_num), static_cast<unsigned>(interrupt_flag_),
-             static_cast<unsigned>(interrupt_enable_));
+    LOG_DEBUG("CDROM: IRQ INT%u flag=0x%02X enable=0x%02X",
+              static_cast<unsigned>(irq_num), static_cast<unsigned>(interrupt_flag_),
+              static_cast<unsigned>(interrupt_enable_));
   }
 }
 

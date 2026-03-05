@@ -1057,8 +1057,9 @@ void Gpu::gp1_dma_direction(u32 val) {
 }
 
 void Gpu::gp1_display_area(u32 val) {
-  display_.x_start = val & 0x3FE; // 10 bits, aligned to 2
-  display_.y_start = (val >> 10) & 0x1FF;
+  const u32 value = val & 0x00FFFFFFu;
+  display_.x_start = value & 0x3FE; // 10 bits, aligned to 2
+  display_.y_start = (value >> 10) & 0x1FF;
 }
 
 void Gpu::gp1_horizontal_range(u32 val) {
