@@ -47,6 +47,14 @@ private:
   bool has_started_emulation_ = false;
   bool emu_input_focused_ = false;
   u16 last_button_state_ = 0xFFFF;
+  bool show_fast_mode_notice_ = false;
+  std::array<u32, 5> underrun_notice_buckets_ = {};
+  u32 underrun_notice_bucket_index_ = 0;
+  u32 underrun_notice_bucket_count_ = 0;
+  u32 underrun_notice_bucket_sum_ = 0;
+  u32 underrun_notice_last_tick_ms_ = 0;
+  u64 underrun_notice_last_events_ = 0;
+  int pending_bind_index_ = -1;
 
   // Frame timing
   float fps_ = 0.0f;
@@ -69,6 +77,7 @@ private:
   u32 grim_reaper_last_mutations_ = 0;
   std::string grim_reaper_last_output_path_;
   bool grim_reaper_mode_active_ = false;
+  bool grim_reaper_keep_console_logs_ = false;
   bool grim_reaper_logs_suppressed_ = false;
   u32 grim_reaper_saved_log_mask_ = 0xFFFFFFFFu;
   LogLevel grim_reaper_saved_log_level_ = LogLevel::Info;

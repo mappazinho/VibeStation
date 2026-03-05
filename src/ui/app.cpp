@@ -11,6 +11,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <random>
 #include <vector>
 
@@ -38,6 +39,32 @@ constexpr GrimReaperRange kGrimReaperRanges[] = {
 
 constexpr int kGrimReaperRangeCount =
     static_cast<int>(sizeof(kGrimReaperRanges) / sizeof(kGrimReaperRanges[0]));
+
+struct KeyboardBindEntry {
+  const char *label;
+  const char *config_key;
+  PsxButton button;
+};
+
+constexpr KeyboardBindEntry kKeyboardBindEntries[] = {
+    {"Cross", "bind_cross", PsxButton::Cross},
+    {"Circle", "bind_circle", PsxButton::Circle},
+    {"Square", "bind_square", PsxButton::Square},
+    {"Triangle", "bind_triangle", PsxButton::Triangle},
+    {"L1", "bind_l1", PsxButton::L1},
+    {"R1", "bind_r1", PsxButton::R1},
+    {"L2", "bind_l2", PsxButton::L2},
+    {"R2", "bind_r2", PsxButton::R2},
+    {"Start", "bind_start", PsxButton::Start},
+    {"Select", "bind_select", PsxButton::Select},
+    {"D-Pad Up", "bind_up", PsxButton::Up},
+    {"D-Pad Down", "bind_down", PsxButton::Down},
+    {"D-Pad Left", "bind_left", PsxButton::Left},
+    {"D-Pad Right", "bind_right", PsxButton::Right},
+};
+
+constexpr int kKeyboardBindEntryCount =
+    static_cast<int>(sizeof(kKeyboardBindEntries) / sizeof(kKeyboardBindEntries[0]));
 }
 
 bool App::init() {
@@ -53,6 +80,9 @@ bool App::init() {
   printf("[App::init] SDL OK\n");
   fflush(stdout);
 
+  if (!input_) {
+    input_ = std::make_unique<InputManager>();
+  }
   load_persistent_config();
 
   SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
@@ -155,7 +185,9 @@ bool App::init_runtime() {
 
   system_ = std::make_unique<System>();
   renderer_ = std::make_unique<Renderer>();
-  input_ = std::make_unique<InputManager>();
+  if (!input_) {
+    input_ = std::make_unique<InputManager>();
+  }
 
   try_autoload_bios_from_config();
 
@@ -292,6 +324,22 @@ void App::process_events(bool &quit) {
     if (event.type == SDL_QUIT) {
       quit = true;
     }
+    if (pending_bind_index_ >= 0 && event.type == SDL_KEYDOWN &&
+        !event.key.repeat) {
+      const int bind_index = pending_bind_index_;
+      const SDL_Scancode scancode = event.key.keysym.scancode;
+      pending_bind_index_ = -1;
+      if (scancode == SDL_SCANCODE_ESCAPE) {
+        status_message_ = "Keyboard rebinding canceled";
+      } else {
+        input_->set_key_binding(scancode, kKeyboardBindEntries[bind_index].button);
+        save_persistent_config();
+        status_message_ = std::string("Bound ") +
+                          kKeyboardBindEntries[bind_index].label + " to " +
+                          SDL_GetScancodeName(scancode);
+      }
+      continue;
+    }
     if (event.type == SDL_KEYDOWN && !event.key.repeat) {
       const SDL_Keycode key = event.key.keysym.sym;
       const u16 mods = static_cast<u16>(event.key.keysym.mod);
@@ -419,6 +467,44 @@ void App::update() {
   emu_input_focused_ = emu_runner_.is_running() &&
                        ((SDL_GetWindowFlags(window_) & SDL_WINDOW_INPUT_FOCUS) !=
                         0);
+  if (has_started_emulation_) {
+    static constexpr u32 kUnderrunNoticeSamplePeriodMs = 1000;
+    static constexpr u64 kUnderrunNoticeThreshold = 3;
+    const u64 underruns = runtime_snapshot_.spu_audio.underrun_events;
+    const u32 now_ms = SDL_GetTicks();
+    if (underrun_notice_last_tick_ms_ == 0) {
+      underrun_notice_last_tick_ms_ = now_ms;
+      underrun_notice_last_events_ = underruns;
+    } else if ((now_ms - underrun_notice_last_tick_ms_) >=
+               kUnderrunNoticeSamplePeriodMs) {
+      const u32 bucket_value =
+          static_cast<u32>(std::min<u64>(underruns - underrun_notice_last_events_,
+                                         std::numeric_limits<u32>::max()));
+      if (underrun_notice_bucket_count_ < underrun_notice_buckets_.size()) {
+        ++underrun_notice_bucket_count_;
+      } else {
+        underrun_notice_bucket_sum_ -=
+            underrun_notice_buckets_[underrun_notice_bucket_index_];
+      }
+      underrun_notice_buckets_[underrun_notice_bucket_index_] = bucket_value;
+      underrun_notice_bucket_sum_ += bucket_value;
+      underrun_notice_bucket_index_ =
+          (underrun_notice_bucket_index_ + 1u) % underrun_notice_buckets_.size();
+      show_fast_mode_notice_ =
+          (underrun_notice_bucket_count_ >= underrun_notice_buckets_.size()) &&
+          (underrun_notice_bucket_sum_ >= kUnderrunNoticeThreshold);
+      underrun_notice_last_tick_ms_ = now_ms;
+      underrun_notice_last_events_ = underruns;
+    }
+  } else {
+    show_fast_mode_notice_ = false;
+    underrun_notice_buckets_.fill(0);
+    underrun_notice_bucket_index_ = 0;
+    underrun_notice_bucket_count_ = 0;
+    underrun_notice_bucket_sum_ = 0;
+    underrun_notice_last_tick_ms_ = 0;
+    underrun_notice_last_events_ = 0;
+  }
 }
 
 void App::render_ui() {
@@ -737,6 +823,14 @@ void App::panel_emulator_screen() {
       ImGui::EndDisabled();
     }
   } else {
+    if (show_fast_mode_notice_) {
+      ImGui::TextColored(ImVec4(0.95f, 0.3f, 0.3f, 1.0f),
+                         "%s",
+                         g_gpu_fast_mode
+                             ? "Increase in underruns with Fast Mode, disable unnecessary logging!"
+                             : "Increase in underruns, enable Fast Mode!");
+      ImGui::Spacing();
+    }
     ImVec2 avail = ImGui::GetContentRegionAvail();
     // Safe presentation baseline for BIOS/logo recovery: fixed 4:3 letterbox.
     const float display_aspect = 4.0f / 3.0f;
@@ -775,6 +869,11 @@ void App::panel_settings() {
         ImGui::TextWrapped("Default: Arrows=D-Pad, Z/X/A/S=Face, "
                            "Q/W/E/R=Shoulders, Enter=Start, Backspace=Select");
         ImGui::Spacing();
+        if (pending_bind_index_ >= 0) {
+          ImGui::TextColored(ImVec4(0.95f, 0.8f, 0.3f, 1.0f),
+                             "Press a key for %s (Esc to cancel)",
+                             kKeyboardBindEntries[pending_bind_index_].label);
+        }
         ImGui::Text("Input Focus: %s", emu_input_focused_ ? "Active" : "Inactive");
         ImGui::Text("Buttons (active-low): 0x%04X", last_button_state_);
         const auto &diag = runtime_snapshot_.boot_diag;
@@ -788,6 +887,35 @@ void App::panel_settings() {
 
         if (ImGui::Button("Reset to Defaults")) {
           input_->set_default_bindings();
+          pending_bind_index_ = -1;
+          save_persistent_config();
+        }
+
+        ImGui::Spacing();
+        for (int i = 0; i < kKeyboardBindEntryCount; ++i) {
+          const SDL_Scancode scancode =
+              input_->key_for_button(kKeyboardBindEntries[i].button);
+          const char *key_name =
+              (scancode != SDL_SCANCODE_UNKNOWN) ? SDL_GetScancodeName(scancode)
+                                                 : "Unbound";
+          ImGui::Text("%s", kKeyboardBindEntries[i].label);
+          ImGui::SameLine(140.0f);
+          std::string assign_label =
+              std::string((key_name && key_name[0] != '\0') ? key_name : "Unbound") +
+              "##bind_" + kKeyboardBindEntries[i].config_key;
+          if (ImGui::Button(assign_label.c_str(), ImVec2(120.0f, 0.0f))) {
+            pending_bind_index_ = i;
+          }
+          ImGui::SameLine();
+          std::string clear_label =
+              std::string("Clear##") + kKeyboardBindEntries[i].config_key;
+          if (ImGui::Button(clear_label.c_str())) {
+            input_->clear_key_binding(kKeyboardBindEntries[i].button);
+            if (pending_bind_index_ == i) {
+              pending_bind_index_ = -1;
+            }
+            save_persistent_config();
+          }
         }
 
         ImGui::Spacing();
@@ -810,6 +938,10 @@ void App::panel_settings() {
         ImGui::Text("Display Area: %ux%u",
                     static_cast<unsigned>(runtime_snapshot_.boot_diag.display_width),
                     static_cast<unsigned>(runtime_snapshot_.boot_diag.display_height));
+        ImGui::Checkbox("Fast Mode", &g_gpu_fast_mode);
+        ImGui::TextColored(
+            ImVec4(0.7f, 0.7f, 0.7f, 1.0f),
+            "Uses optimized GPU paths for lower CPU usage at the cost of possible artifacting.");
         const char *deinterlace_modes[] = {"Weave (Stable)", "Bob (Field)",
                                            "Blend (Soft)"};
         int deinterlace_index = static_cast<int>(g_deinterlace_mode);
@@ -842,6 +974,9 @@ void App::panel_settings() {
           g_spu_desired_samples = static_cast<u32>(desired_samples);
         }
         ImGui::TextDisabled("Applied on next audio device init.");
+        ImGui::Checkbox("Advanced Sound Status Logging", &g_spu_advanced_sound_status);
+        ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f),
+                           "Enables per-sample SPU diagnostics and per-frame voice snapshots.");
 
         ImGui::EndTabItem();
       }
@@ -1157,10 +1292,18 @@ void App::draw_sound_status_content() {
   ImGui::Text("Generated/Queued Frames: %llu / %llu",
               static_cast<unsigned long long>(diag.generated_frames),
               static_cast<unsigned long long>(diag.queued_frames));
-  ImGui::Text("Dropped Frames: %llu (Overruns: %llu)",
+  ImGui::Text("Dropped Frames: %llu (Overruns: %llu, Underruns: %llu)",
               static_cast<unsigned long long>(diag.dropped_frames),
-              static_cast<unsigned long long>(diag.overrun_events));
+              static_cast<unsigned long long>(diag.overrun_events),
+              static_cast<unsigned long long>(diag.underrun_events));
   ImGui::Text("Audio Queue: %.1f KB (peak %.1f KB)", queue_kb, queue_peak_kb);
+  if (!g_spu_advanced_sound_status) {
+    ImGui::Spacing();
+    ImGui::TextColored(ImVec4(0.85f, 0.75f, 0.35f, 1.0f),
+                       "Advanced sound status logging is disabled.");
+    ImGui::TextDisabled("Enable it in Settings > Audio for voice peaks, ENDX, and detailed SPU counters.");
+    return;
+  }
   ImGui::Text("Voices Logical (phase!=off): avg %.2f / peak %u",
               avg_logical, static_cast<unsigned>(diag.logical_voice_peak));
   ImGui::Text("Voices Env>0: avg %.2f / peak %u",
@@ -1324,12 +1467,13 @@ void App::panel_performance() {
     };
 
     if (g_profile_detailed_timing) {
-      row("CPU", stats.cpu_ms, ImVec4(0.4f, 0.8f, 0.4f, 1.0f));
+      row("CPU*", stats.cpu_ms, ImVec4(0.4f, 0.8f, 0.4f, 1.0f));
       row("GPU", stats.gpu_ms, ImVec4(0.8f, 0.4f, 0.4f, 1.0f));
       row("SPU", stats.spu_ms, ImVec4(0.4f, 0.4f, 0.8f, 1.0f));
       row("DMA", stats.dma_ms, ImVec4(0.8f, 0.8f, 0.4f, 1.0f));
       row("Timers", stats.timers_ms, ImVec4(0.4f, 0.8f, 0.8f, 1.0f));
       row("CDROM", stats.cdrom_ms, ImVec4(0.8f, 0.4f, 0.8f, 1.0f));
+      ImGui::TextDisabled("*CPU excludes time already attributed to GPU.");
     } else {
       ImGui::TextDisabled("Detailed subsystem timings are disabled.");
     }
@@ -1407,6 +1551,24 @@ void App::panel_grim_reaper() {
   ImGui::Checkbox("Use Custom Seed", &grim_use_custom_seed_);
   if (grim_use_custom_seed_) {
     ImGui::InputScalar("Seed", ImGuiDataType_U32, &grim_seed_);
+  }
+  if (ImGui::Checkbox(
+          "Do not suppress console logs when corrupting (may freeze emulator!)",
+          &grim_reaper_keep_console_logs_)) {
+    if (grim_reaper_mode_active_) {
+      if (grim_reaper_keep_console_logs_ && grim_reaper_logs_suppressed_) {
+        g_log_category_mask = grim_reaper_saved_log_mask_;
+        g_log_level = grim_reaper_saved_log_level_;
+        grim_reaper_logs_suppressed_ = false;
+      } else if (!grim_reaper_keep_console_logs_ &&
+                 !grim_reaper_logs_suppressed_) {
+        grim_reaper_saved_log_mask_ = g_log_category_mask;
+        grim_reaper_saved_log_level_ = g_log_level;
+        grim_reaper_logs_suppressed_ = true;
+        g_log_category_mask = 0;
+        g_log_level = LogLevel::Error;
+      }
+    }
   }
   ImGui::Text("Last Used Seed: %u", static_cast<unsigned>(grim_last_used_seed_));
   if (!system_->bios_loaded() || bios_path_.empty()) {
@@ -1531,7 +1693,7 @@ void App::panel_grim_reaper() {
   ImGui::TextColored(grim_reaper_mode_active_ ? ImVec4(0.9f, 0.6f, 0.3f, 1.0f)
                                                : ImVec4(0.6f, 0.6f, 0.6f, 1.0f),
                      "Console logging: %s",
-                     grim_reaper_mode_active_ ? "Suppressed" : "Normal");
+                     grim_reaper_logs_suppressed_ ? "Suppressed" : "Normal");
 
   ImGui::End();
 }
@@ -1746,6 +1908,9 @@ bool App::boot_disc_from_ui() {
 void App::set_grim_reaper_mode(bool enabled) {
   if (enabled) {
     grim_reaper_mode_active_ = true;
+    if (grim_reaper_keep_console_logs_) {
+      return;
+    }
     if (!grim_reaper_logs_suppressed_) {
       grim_reaper_saved_log_mask_ = g_log_category_mask;
       grim_reaper_saved_log_level_ = g_log_level;
@@ -2116,10 +2281,28 @@ void App::load_persistent_config() {
     } else if (key == "low_spec_mode") {
       config_low_spec_mode_ = parse_bool(value, config_low_spec_mode_);
       g_low_spec_mode = config_low_spec_mode_;
+    } else if (key == "gpu_fast_mode") {
+      g_gpu_fast_mode = parse_bool(value, g_gpu_fast_mode);
+    } else if (key.rfind("bind_", 0) == 0) {
+      const unsigned long parsed = std::strtoul(value.c_str(), nullptr, 10);
+      const SDL_Scancode scancode = static_cast<SDL_Scancode>(parsed);
+      for (const auto &entry : kKeyboardBindEntries) {
+        if (key == entry.config_key) {
+          if (scancode == SDL_SCANCODE_UNKNOWN) {
+            input_->clear_key_binding(entry.button);
+          } else {
+            input_->set_key_binding(scancode, entry.button);
+          }
+          break;
+        }
+      }
     } else if (key == "spu_desired_samples") {
       const unsigned long parsed = std::strtoul(value.c_str(), nullptr, 10);
       const u32 clamped = static_cast<u32>(std::max(64ul, std::min(65535ul, parsed)));
       g_spu_desired_samples = clamped;
+    } else if (key == "advanced_sound_status_logging") {
+      g_spu_advanced_sound_status =
+          parse_bool(value, g_spu_advanced_sound_status);
     } else if (key == "detailed_profiling") {
       g_profile_detailed_timing = parse_bool(value, g_profile_detailed_timing);
     } else if (key == "experimental_bios_size_mode") {
@@ -2154,7 +2337,13 @@ void App::save_persistent_config() const {
   out << "bios_path=" << bios_path_ << "\n";
   out << "vsync=" << (config_vsync_ ? 1 : 0) << "\n";
   out << "low_spec_mode=" << (config_low_spec_mode_ ? 1 : 0) << "\n";
+  out << "gpu_fast_mode=" << (g_gpu_fast_mode ? 1 : 0) << "\n";
+  for (const auto &entry : kKeyboardBindEntries) {
+    out << entry.config_key << "="
+        << static_cast<int>(input_->key_for_button(entry.button)) << "\n";
+  }
   out << "spu_desired_samples=" << static_cast<unsigned>(g_spu_desired_samples) << "\n";
+  out << "advanced_sound_status_logging=" << (g_spu_advanced_sound_status ? 1 : 0) << "\n";
   out << "detailed_profiling=" << (g_profile_detailed_timing ? 1 : 0) << "\n";
   out << "experimental_bios_size_mode=" << (g_experimental_bios_size_mode ? 1 : 0) << "\n";
   out << "unsafe_ps2_bios_mode=" << (g_unsafe_ps2_bios_mode ? 1 : 0) << "\n";

@@ -76,9 +76,11 @@ public:
   // VRAM access
   const u16 *vram() const { return vram_.data(); }
   const DisplayMode &display_mode() const { return display_; }
-  DisplaySampleInfo build_display_rgba(std::vector<u32> *rgba) const;
-  DisplaySampleInfo build_display_rgba(std::vector<u32> &rgba) const {
-    return build_display_rgba(&rgba);
+  DisplaySampleInfo build_display_rgba(std::vector<u32> *rgba,
+                                       bool include_stats = true) const;
+  DisplaySampleInfo build_display_rgba(std::vector<u32> &rgba,
+                                       bool include_stats = true) const {
+    return build_display_rgba(&rgba, include_stats);
   }
 
   // Frame tracking
@@ -98,6 +100,7 @@ private:
 
   // GP0 command buffer (commands can span multiple words)
   std::vector<u32> gp0_buffer_;
+  std::vector<u16> vram_copy_buffer_;
   u32 gp0_words_remaining_ = 0;
   u32 gp0_command_ = 0;
   enum class Gp0Mode { Command, VramWrite, VramRead };
@@ -192,6 +195,9 @@ private:
   void draw_line_segment(Vertex a, Vertex b, Color c, bool semi_transparent);
 
   void set_pixel(s16 x, s16 y, u16 color, bool semi_transparent = false);
+  void set_pixel_clipped(s16 x, s16 y, u16 color,
+                         bool semi_transparent = false);
+  void write_pixel_opaque_clipped(s16 x, s16 y, u16 color);
   u16 read_texel(u8 u, u8 v) const;
   static bool is_polyline_terminator(u32 word) {
     return (word & 0xF000F000u) == 0x50005000u;
