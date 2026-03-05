@@ -418,8 +418,8 @@ u8 System::read8(u32 addr) {
         (static_cast<u64>(psx::BIOS_BASE) + bios_.mapped_size()))
         return bios_.read8(phys - psx::BIOS_BASE);
 
-    // Scratchpad
-    if (phys >= 0x1F800000 && phys < 0x1F800400)
+    // Scratchpad (1 KiB mirrored within 0x1F800000-0x1F800FFF).
+    if (phys >= 0x1F800000 && phys < 0x1F801000)
         return ram_.scratch_read8(phys - 0x1F800000);
 
     // I/O Ports
@@ -436,8 +436,8 @@ u8 System::read8(u32 addr) {
         }
         // DMA registers (byte access)
         if (io >= 0x080 && io < 0x100) {
-            const u32 reg_off = io & ~0x3u;
-            const u32 word = dma_.read(reg_off);
+            const u32 dma_off = (io - 0x080) & ~0x3u;
+            const u32 word = dma_.read(dma_off);
             const u32 shift = (io & 0x3u) * 8u;
             return static_cast<u8>((word >> shift) & 0xFFu);
         }
@@ -489,7 +489,7 @@ u16 System::read16(u32 addr) {
         static_cast<u64>(phys) <
         (static_cast<u64>(psx::BIOS_BASE) + bios_.mapped_size()))
         return bios_.read16(phys - psx::BIOS_BASE);
-    if (phys >= 0x1F800000 && phys < 0x1F800400)
+    if (phys >= 0x1F800000 && phys < 0x1F801000)
         return ram_.scratch_read16(phys - 0x1F800000);
 
     if (phys >= 0x1F801000 && phys < 0x1F803000) {
@@ -503,8 +503,8 @@ u16 System::read16(u32 addr) {
             return static_cast<u16>(irq_.read(io - 0x070));
         // DMA registers (halfword access)
         if (io >= 0x080 && io < 0x100) {
-            const u32 reg_off = io & ~0x3u;
-            const u32 word = dma_.read(reg_off);
+            const u32 dma_off = (io - 0x080) & ~0x3u;
+            const u32 word = dma_.read(dma_off);
             const u32 shift = (io & 0x2u) * 8u;
             return static_cast<u16>((word >> shift) & 0xFFFFu);
         }
@@ -561,7 +561,7 @@ u32 System::read32(u32 addr) {
         static_cast<u64>(phys) <
         (static_cast<u64>(psx::BIOS_BASE) + bios_.mapped_size()))
         return bios_.read32(phys - psx::BIOS_BASE);
-    if (phys >= 0x1F800000 && phys < 0x1F800400)
+    if (phys >= 0x1F800000 && phys < 0x1F801000)
         return ram_.scratch_read32(phys - 0x1F800000);
 
     if (phys >= 0x1F801000 && phys < 0x1F803000) {
@@ -650,7 +650,7 @@ void System::write8(u32 addr, u8 val) {
         ram_.write8(phys & 0x1FFFFF, val);
         return;
     }
-    if (phys >= 0x1F800000 && phys < 0x1F800400) {
+    if (phys >= 0x1F800000 && phys < 0x1F801000) {
         ram_.scratch_write8(phys - 0x1F800000, val);
         return;
     }
@@ -667,12 +667,12 @@ void System::write8(u32 addr, u8 val) {
             return;
         }
         if (io >= 0x080 && io < 0x100) {
-            const u32 reg_off = io & ~0x3u;
+            const u32 dma_off = (io - 0x080) & ~0x3u;
             const u32 shift = (io & 0x3u) * 8u;
             const u32 mask = 0xFFu << shift;
             const u32 merged =
-                (dma_.read(reg_off) & ~mask) | (static_cast<u32>(val) << shift);
-            dma_.write(reg_off, merged);
+                (dma_.read(dma_off) & ~mask) | (static_cast<u32>(val) << shift);
+            dma_.write(dma_off, merged);
             return;
         }
         if (io >= 0x800 && io < 0x804) {
@@ -717,7 +717,7 @@ void System::write16(u32 addr, u16 val) {
         ram_.write16(phys & 0x1FFFFF, val);
         return;
     }
-    if (phys >= 0x1F800000 && phys < 0x1F800400) {
+    if (phys >= 0x1F800000 && phys < 0x1F801000) {
         ram_.scratch_write16(phys - 0x1F800000, val);
         return;
     }
@@ -733,12 +733,12 @@ void System::write16(u32 addr, u16 val) {
             return;
         }
         if (io >= 0x080 && io < 0x100) {
-            const u32 reg_off = io & ~0x3u;
+            const u32 dma_off = (io - 0x080) & ~0x3u;
             const u32 shift = (io & 0x2u) * 8u;
             const u32 mask = 0xFFFFu << shift;
             const u32 merged =
-                (dma_.read(reg_off) & ~mask) | (static_cast<u32>(val) << shift);
-            dma_.write(reg_off, merged);
+                (dma_.read(dma_off) & ~mask) | (static_cast<u32>(val) << shift);
+            dma_.write(dma_off, merged);
             return;
         }
         if (io >= 0x100 && io < 0x130) {
@@ -790,7 +790,7 @@ void System::write32(u32 addr, u32 val) {
         ram_.write32(phys & 0x1FFFFF, val);
         return;
     }
-    if (phys >= 0x1F800000 && phys < 0x1F800400) {
+    if (phys >= 0x1F800000 && phys < 0x1F801000) {
         ram_.scratch_write32(phys - 0x1F800000, val);
         return;
     }
