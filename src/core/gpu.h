@@ -23,9 +23,10 @@ struct Color {
 // Vertex type
 struct Vertex {
   s16 x, y;
+  float fx, fy;
   Color color;
   u8 u, v; // Texture coordinates
-  Vertex() : x(0), y(0), u(0), v(0) {}
+  Vertex() : x(0), y(0), fx(0.0f), fy(0.0f), u(0), v(0) {}
 };
 
 // Display mode

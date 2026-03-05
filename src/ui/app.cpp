@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cctype>
 #include <chrono>
+#include <cstdio>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -583,7 +584,7 @@ void App::menu_bar() {
       ImGui::MenuItem("CPU Debug", "F9", &show_debug_cpu_);
       ImGui::MenuItem("Show VRAM", "F10", &show_vram_);
       ImGui::MenuItem("Performance", "F11", &show_perf_);
-      ImGui::MenuItem("Sound Status", nullptr, &show_sound_status_);
+      ImGui::MenuItem("Voice Levels", nullptr, &show_sound_status_);
       ImGui::MenuItem("Logging", nullptr, &show_logging_);
       ImGui::MenuItem("About", nullptr, &show_about_);
       ImGui::EndMenu();
@@ -828,8 +829,6 @@ void App::panel_settings() {
               static_cast<OutputResolutionMode>(resolution_index);
         }
         ImGui::Text("Internal Upscaling: 1x (native)");
-        ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.3f, 1.0f),
-                           "PGXP: Not yet implemented");
         ImGui::EndTabItem();
       }
       if (ImGui::BeginTabItem("Audio")) {
@@ -1257,12 +1256,54 @@ void App::draw_sound_status_content() {
 
 void App::panel_sound_status() {
   ImGui::SetNextWindowSize(ImVec2(720, 500), ImGuiCond_FirstUseEver);
-  if (ImGui::Begin("Sound Status", &show_sound_status_)) {
-    draw_sound_status_content();
+  if (ImGui::Begin("Voice Levels", &show_sound_status_)) {
+    ImGui::Text("Voice Levels");
+    ImGuiTableFlags table_flags =
+        ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg |
+        ImGuiTableFlags_SizingStretchSame;
+    const float voice_row_height =
+        (ImGui::GetTextLineHeight() * 2.0f) + ImGui::GetFrameHeight() +
+        (ImGui::GetStyle().ItemSpacing.y * 3.0f);
+    if (ImGui::BeginTable("SPUVoiceLevelsOnly", 4, table_flags)) {
+      ImGui::TableSetupColumn("##voice_col_0", ImGuiTableColumnFlags_WidthStretch,
+                              1.0f);
+      ImGui::TableSetupColumn("##voice_col_1", ImGuiTableColumnFlags_WidthStretch,
+                              1.0f);
+      ImGui::TableSetupColumn("##voice_col_2", ImGuiTableColumnFlags_WidthStretch,
+                              1.0f);
+      ImGui::TableSetupColumn("##voice_col_3", ImGuiTableColumnFlags_WidthStretch,
+                              1.0f);
+      for (size_t voice = 0; voice < runtime_snapshot_.spu_voice_level_l.size();
+           ++voice) {
+        if ((voice % 4u) == 0u) {
+          ImGui::TableNextRow(ImGuiTableRowFlags_None, voice_row_height);
+        }
+        ImGui::TableSetColumnIndex(static_cast<int>(voice % 4u));
+
+        const s16 level_l = runtime_snapshot_.spu_voice_level_l[voice];
+        const s16 level_r = runtime_snapshot_.spu_voice_level_r[voice];
+        const int abs_l = (level_l < 0) ? -static_cast<int>(level_l)
+                                        : static_cast<int>(level_l);
+        const int abs_r = (level_r < 0) ? -static_cast<int>(level_r)
+                                        : static_cast<int>(level_r);
+        const int peak = std::max(abs_l, abs_r);
+        const float meter = std::min(1.0f, static_cast<float>(peak) / 32767.0f);
+        const bool active = runtime_snapshot_.spu_voice_active[voice];
+
+        ImGui::TextColored(active ? ImVec4(0.4f, 0.9f, 0.4f, 1.0f)
+                                  : ImVec4(0.55f, 0.55f, 0.55f, 1.0f),
+                           "V%02u", static_cast<unsigned>(voice));
+        ImGui::SameLine();
+        ImGui::TextUnformatted(active ? "ON" : "OFF");
+        ImGui::ProgressBar(meter, ImVec2(-1.0f, 0.0f));
+        ImGui::Text("L:%6d  R:%6d", static_cast<int>(level_l),
+                    static_cast<int>(level_r));
+      }
+      ImGui::EndTable();
+    }
   }
   ImGui::End();
 }
-
 void App::panel_performance() {
   ImGui::SetNextWindowSize(ImVec2(400, 300), ImGuiCond_FirstUseEver);
   if (ImGui::Begin("Performance Profiler", &show_perf_)) {
@@ -1360,11 +1401,26 @@ void App::panel_grim_reaper() {
     ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f),
                        "Set end to 0 for end-of-file.");
   }
+
+  ImGui::Separator();
+  ImGui::Text("Corruption Seed");
+  ImGui::Checkbox("Use Custom Seed", &grim_use_custom_seed_);
+  if (grim_use_custom_seed_) {
+    ImGui::InputScalar("Seed", ImGuiDataType_U32, &grim_seed_);
+  }
+  ImGui::Text("Last Used Seed: %u", static_cast<unsigned>(grim_last_used_seed_));
   if (!system_->bios_loaded() || bios_path_.empty()) {
     ImGui::BeginDisabled();
   }
   if (ImGui::Button("Reap && Reboot BIOS")) {
     reap_and_reboot_bios();
+  }
+  ImGui::SameLine();
+  if (ImGui::Button("Boot Input Seed")) {
+    const bool prev_use_custom_seed = grim_use_custom_seed_;
+    grim_use_custom_seed_ = true;
+    reap_and_reboot_bios();
+    grim_use_custom_seed_ = prev_use_custom_seed;
   }
   if (!system_->bios_loaded() || bios_path_.empty()) {
     ImGui::EndDisabled();
@@ -1406,12 +1462,72 @@ void App::panel_grim_reaper() {
     ImGui::EndDisabled();
   }
 
+
+
+  ImGui::Separator();
+  ImGui::Text("Batch Corruption");
+  ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f),
+                     "Select multiple ranges and apply random strike per range.");
+
+  ImGui::Checkbox("Intro/Bootmenu", &grim_batch_intro_enabled_);
+  if (grim_batch_intro_enabled_) {
+    grim_batch_intro_percent_ =
+        std::max(0.001f, std::min(0.1f, grim_batch_intro_percent_));
+    ImGui::SliderFloat("Intro Strike (%)", &grim_batch_intro_percent_, 0.001f,
+                       0.1f, "%.3f%%");
+
+    const float p = grim_batch_intro_percent_;
+    if (p >= 0.1f - 1e-6f) {
+      ImGui::TextColored(ImVec4(0.5f, 0.0f, 0.0f, 1.0f),
+                         "Absolute Death - Boot is very likely to fail.");
+    } else if (p >= 0.05f) {
+      ImGui::TextColored(
+          ImVec4(0.95f, 0.2f, 0.2f, 1.0f),
+          "Danger - Very unstable, may not work, extreme corruption.");
+    } else if (p >= 0.02f) {
+      ImGui::TextColored(
+          ImVec4(1.0f, 0.55f, 0.1f, 1.0f),
+          "Warning - Unstable, heavy corruptions.");
+    } else if (p >= 0.01f) {
+      ImGui::TextColored(
+          ImVec4(0.2f, 0.9f, 0.3f, 1.0f),
+          "Recommended - Stable corruptions.");
+    }
+  }
+
+  ImGui::Checkbox("Character Sets", &grim_batch_charset_enabled_);
+  if (grim_batch_charset_enabled_) {
+    grim_batch_charset_percent_ =
+        std::max(0.001f, std::min(100.0f, grim_batch_charset_percent_));
+    ImGui::SliderFloat("Charset Strike (%)", &grim_batch_charset_percent_, 0.001f,
+                       100.0f, "%.3f%%");
+  }
+
+  ImGui::Checkbox("End", &grim_batch_end_enabled_);
+  if (grim_batch_end_enabled_) {
+    grim_batch_end_percent_ =
+        std::max(0.001f, std::min(100.0f, grim_batch_end_percent_));
+    ImGui::SliderFloat("End Strike (%)", &grim_batch_end_percent_, 0.001f,
+                       100.0f, "%.3f%%");
+  }
+
+  const bool batch_has_any_selection =
+      grim_batch_intro_enabled_ || grim_batch_charset_enabled_ || grim_batch_end_enabled_;
+  if (!system_->bios_loaded() || bios_path_.empty() || !batch_has_any_selection) {
+    ImGui::BeginDisabled();
+  }
+  if (ImGui::Button("Batch Corrupt && Start")) {
+    reap_and_reboot_bios_batch();
+  }
+  if (!system_->bios_loaded() || bios_path_.empty() || !batch_has_any_selection) {
+    ImGui::EndDisabled();
+  }
+
   if (!grim_reaper_last_output_path_.empty()) {
     ImGui::Text("Last Corrupted BIOS: %s", grim_reaper_last_output_path_.c_str());
     ImGui::Text("Last Mutations: %u",
                 static_cast<unsigned>(grim_reaper_last_mutations_));
   }
-
   ImGui::TextColored(grim_reaper_mode_active_ ? ImVec4(0.9f, 0.6f, 0.3f, 1.0f)
                                                : ImVec4(0.6f, 0.6f, 0.6f, 1.0f),
                      "Console logging: %s",
@@ -1419,6 +1535,7 @@ void App::panel_grim_reaper() {
 
   ImGui::End();
 }
+
 void App::panel_about() {
   ImGui::SetNextWindowSize(ImVec2(400, 200), ImGuiCond_FirstUseEver);
   if (ImGui::Begin("About VibeStation", &show_about_,
@@ -1748,16 +1865,17 @@ bool App::reap_and_reboot_bios() {
     mutations = 1;
   }
 
-  std::random_device rd;
-  std::mt19937 rng(rd());
-  std::uniform_int_distribution<size_t> index_dist(start, end);
-  std::uniform_int_distribution<int> value_dist(0, 255);
+  const u32 seed = grim_use_custom_seed_
+                       ? grim_seed_
+                       : static_cast<u32>(std::random_device{}());
+  grim_last_used_seed_ = seed;
+  grim_seed_ = seed;
+  std::mt19937 rng(seed);
 
   for (size_t i = 0; i < mutations; ++i) {
-    const size_t idx = index_dist(rng);
-    bios_data[idx] = static_cast<u8>(value_dist(rng));
+    const size_t idx = start + (static_cast<size_t>(rng()) % span);
+    bios_data[idx] = static_cast<u8>(rng() & 0xFFu);
   }
-
   const std::filesystem::path src_path = std::filesystem::path(bios_path_);
   const std::filesystem::path out_path =
       src_path.parent_path() /
@@ -1791,7 +1909,143 @@ bool App::reap_and_reboot_bios() {
   has_started_emulation_ = true;
   emu_runner_.set_running(true);
 
-  status_message_ = "Reaped BIOS copy loaded: " + out_path.filename().string();
+  status_message_ = "Reaped BIOS copy loaded (seed " + std::to_string(seed) + "): " +
+                    out_path.filename().string();
+  return true;
+}
+
+bool App::reap_and_reboot_bios_batch() {
+  if (!system_ || bios_path_.empty()) {
+    status_message_ = "Load a BIOS first.";
+    return false;
+  }
+
+  const bool do_intro = grim_batch_intro_enabled_;
+  const bool do_charset = grim_batch_charset_enabled_;
+  const bool do_end = grim_batch_end_enabled_;
+  if (!do_intro && !do_charset && !do_end) {
+    status_message_ = "Select at least one batch corruption range.";
+    return false;
+  }
+
+  std::ifstream in(bios_path_, std::ios::binary);
+  if (!in.is_open()) {
+    status_message_ = "Failed to open source BIOS file.";
+    return false;
+  }
+
+  in.seekg(0, std::ios::end);
+  const std::streamoff size_off = in.tellg();
+  if (size_off <= 0) {
+    status_message_ = "Source BIOS is empty or unreadable.";
+    return false;
+  }
+  const size_t bios_size = static_cast<size_t>(size_off);
+  in.seekg(0, std::ios::beg);
+
+  std::vector<u8> bios_data(bios_size, 0);
+  in.read(reinterpret_cast<char *>(bios_data.data()),
+          static_cast<std::streamsize>(bios_data.size()));
+  if (!in) {
+    status_message_ = "Failed reading source BIOS.";
+    return false;
+  }
+
+  const u32 seed = grim_use_custom_seed_
+                       ? grim_seed_
+                       : static_cast<u32>(std::random_device{}());
+  grim_last_used_seed_ = seed;
+  grim_seed_ = seed;
+  std::mt19937 rng(seed);
+
+  size_t total_mutations = 0;
+  auto apply_range = [&](const GrimReaperRange &range, float percent,
+                         float max_percent) -> bool {
+    if (bios_data.size() <= static_cast<size_t>(range.start)) {
+      return false;
+    }
+
+    const size_t start = static_cast<size_t>(range.start);
+    const size_t end = std::min(static_cast<size_t>(range.end), bios_data.size() - 1u);
+    if (end < start) {
+      return false;
+    }
+
+    const float pct = std::max(0.001f, std::min(max_percent, percent));
+    const size_t span = end - start + 1u;
+    size_t mutations =
+        static_cast<size_t>((pct / 100.0f) * static_cast<float>(span));
+    if (mutations == 0) {
+      mutations = 1;
+    }
+
+    for (size_t i = 0; i < mutations; ++i) {
+      const size_t idx = start + (static_cast<size_t>(rng()) % span);
+      bios_data[idx] = static_cast<u8>(rng() & 0xFFu);
+    }
+
+    total_mutations += mutations;
+    return true;
+  };
+
+  std::string slug = "batch";
+  if (do_intro) {
+    if (!apply_range(kGrimReaperRanges[0], grim_batch_intro_percent_, 0.1f)) {
+      status_message_ = "Intro range is outside BIOS size.";
+      return false;
+    }
+    slug += "_intro";
+  }
+  if (do_charset) {
+    if (!apply_range(kGrimReaperRanges[1], grim_batch_charset_percent_, 100.0f)) {
+      status_message_ = "Character Sets range is outside BIOS size.";
+      return false;
+    }
+    slug += "_charset";
+  }
+  if (do_end) {
+    if (!apply_range(kGrimReaperRanges[2], grim_batch_end_percent_, 100.0f)) {
+      status_message_ = "End range is outside BIOS size.";
+      return false;
+    }
+    slug += "_end";
+  }
+
+    const std::filesystem::path src_path = std::filesystem::path(bios_path_);
+  const std::filesystem::path out_path =
+      src_path.parent_path() /
+      (src_path.stem().string() + "_grim_" + slug + src_path.extension().string());
+
+  std::ofstream out(out_path, std::ios::binary | std::ios::trunc);
+  if (!out.is_open()) {
+    status_message_ = "Failed to create corrupted BIOS copy.";
+    return false;
+  }
+  out.write(reinterpret_cast<const char *>(bios_data.data()),
+            static_cast<std::streamsize>(bios_data.size()));
+  if (!out) {
+    status_message_ = "Failed writing corrupted BIOS copy.";
+    return false;
+  }
+
+  emu_runner_.pause_and_wait_idle();
+  set_grim_reaper_mode(true);
+  if (!system_->load_bios(out_path.string())) {
+    set_grim_reaper_mode(false);
+    status_message_ = "Failed to load corrupted BIOS copy.";
+    return false;
+  }
+
+  grim_reaper_last_mutations_ = static_cast<u32>(total_mutations);
+  grim_reaper_last_output_path_ = out_path.string();
+
+  has_started_emulation_ = false;
+  system_->reset();
+  has_started_emulation_ = true;
+  emu_runner_.set_running(true);
+
+  status_message_ = "Batch reaped BIOS loaded (seed " + std::to_string(seed) + "): " +
+                    out_path.filename().string();
   return true;
 }
 
@@ -1813,6 +2067,7 @@ std::string App::open_file_dialog(const char *filter, const char *title) {
 #endif
   return "";
 }
+
 
 void App::load_persistent_config() {
   std::ifstream in(kAppConfigFileName);
