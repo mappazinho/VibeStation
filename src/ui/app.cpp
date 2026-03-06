@@ -638,15 +638,8 @@ void App::process_events(bool &quit) {
           if (has_started_emulation_) {
             emu_runner_.set_running(true);
             status_message_ = "Emulation resumed";
-          } else if (system_->disc_loaded() || !game_cue_path_.empty()) {
-            boot_disc_from_ui();
           } else {
-            emu_runner_.pause_and_wait_idle();
-            disable_ram_reaper_mode();
-            system_->reset();
-            has_started_emulation_ = true;
-            emu_runner_.set_running(true);
-            status_message_ = "Emulation started (BIOS)";
+            start_bios_from_ui();
           }
         }
       } else if (no_mod && key == SDLK_F6) {
@@ -856,24 +849,17 @@ void App::menu_bar() {
           return;
         }
       }
-      if (ImGui::MenuItem("Start / Resume", "F5", false,
+      if (ImGui::MenuItem("Start / Resume BIOS", "F5", false,
                           bios_loaded && !emu_running)) {
         if (has_started_emulation_) {
           emu_runner_.set_running(true);
           status_message_ = "Emulation resumed";
-        } else if (disc_loaded || !game_cue_path_.empty()) {
-          if (!boot_disc_from_ui()) {
+        } else {
+          if (!start_bios_from_ui()) {
             ImGui::EndMenu();
             ImGui::EndMainMenuBar();
             return;
           }
-        } else {
-          emu_runner_.pause_and_wait_idle();
-          disable_ram_reaper_mode();
-          system_->reset();
-          has_started_emulation_ = true;
-          emu_runner_.set_running(true);
-          status_message_ = "Emulation started (BIOS)";
         }
       }
       if (ImGui::MenuItem("Pause", "F6", false, emu_running)) {
@@ -1034,16 +1020,7 @@ void App::panel_emulator_screen() {
       ImGui::BeginDisabled();
     }
     if (ImGui::Button("Start Emulation", button_size)) {
-      if (disc_loaded || !game_cue_path_.empty()) {
-        boot_disc_from_ui();
-      } else {
-        emu_runner_.pause_and_wait_idle();
-        disable_ram_reaper_mode();
-        system_->reset();
-        has_started_emulation_ = true;
-        emu_runner_.set_running(true);
-        status_message_ = "Emulation started (BIOS)";
-      }
+      start_bios_from_ui();
     }
     if (!bios_loaded) {
       ImGui::EndDisabled();
@@ -2447,7 +2424,6 @@ bool App::resolve_disc_paths(const std::string &selected_path,
 
 bool App::load_disc_from_ui(const std::string &bin_path,
                             const std::string &cue_path) {
-  const bool was_running = emu_runner_.is_running();
   const bool hot_insert = has_started_emulation_;
   if (hot_insert) {
     game_bin_path_ = bin_path;
@@ -2459,32 +2435,26 @@ bool App::load_disc_from_ui(const std::string &bin_path,
     return true;
   }
 
-  if (was_running) {
-    emu_runner_.pause_and_wait_idle();
-  }
+  game_bin_path_ = bin_path;
+  game_cue_path_ = cue_path;
+  status_message_ = "Disc selected: " +
+                    std::filesystem::path(cue_path).filename().string() +
+                    " (Emulation > Boot Disc)";
+  return true;
+}
 
-  if (!system_->load_game(bin_path, cue_path)) {
-    if (was_running) {
-      emu_runner_.set_running(true);
-    }
-    status_message_ = "Failed to load game image";
+bool App::start_bios_from_ui() {
+  if (!system_->bios_loaded()) {
+    status_message_ = "Load a BIOS first.";
     return false;
   }
 
-  game_bin_path_ = bin_path;
-  game_cue_path_ = cue_path;
-  has_started_emulation_ = false;
-
-  status_message_ = "Disc loaded: " +
-                    std::filesystem::path(cue_path).filename().string() +
-                    " (Emulation > Boot Disc)";
-  if (!system_->cdrom().track_map_valid()) {
-    status_message_ += " [track map warning]";
-  }
-
-  if (was_running) {
-    emu_runner_.set_running(true);
-  }
+  emu_runner_.pause_and_wait_idle();
+  disable_ram_reaper_mode();
+  system_->reset();
+  has_started_emulation_ = true;
+  emu_runner_.set_running(true);
+  status_message_ = "Emulation started (BIOS)";
   return true;
 }
 

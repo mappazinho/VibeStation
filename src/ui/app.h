@@ -146,6 +146,7 @@ private:
   bool resolve_disc_paths(const std::string &selected_path, std::string &bin_path,
                           std::string &cue_path, std::string &error) const;
   bool load_disc_from_ui(const std::string &bin_path, const std::string &cue_path);
+  bool start_bios_from_ui();
   bool boot_disc_from_ui();
   bool reap_and_reboot_bios();
   bool reap_and_reboot_bios_batch();
