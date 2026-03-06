@@ -9,7 +9,7 @@ CD-ROM ⚠️
 Graphics/VRAM ⚠️  
 Audio ✅  
 CPU/RAM/DMA ✅   
-Main UI ✅ 
+Main UI ✅  
 Real-time corrupter/BIOS corruption ✅
 
 ✅ - Implemented  
