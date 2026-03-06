@@ -33,6 +33,17 @@ public:
     u64 seed = 1;
   };
 
+  struct GpuReaperConfig {
+    bool enabled = false;
+    u32 writes_per_frame = 1;
+    float intensity_percent = 100.0f;
+    bool affect_geometry = true;
+    bool affect_texture_state = true;
+    bool affect_display_state = false;
+    bool use_custom_seed = false;
+    u64 seed = 1;
+  };
+
   struct BootDiagnostics {
     bool saw_cd_io = false;
     bool saw_sio_io = false;
@@ -154,6 +165,15 @@ public:
     return ram_reaper_total_mutations_.load(std::memory_order_acquire);
   }
   void disable_ram_reaper();
+  void set_gpu_reaper_config(const GpuReaperConfig &config);
+  GpuReaperConfig gpu_reaper_config() const;
+  u64 gpu_reaper_last_seed() const {
+    return gpu_reaper_last_seed_.load(std::memory_order_acquire);
+  }
+  u64 gpu_reaper_total_mutations() const {
+    return gpu_reaper_total_mutations_.load(std::memory_order_acquire);
+  }
+  void disable_gpu_reaper();
 
   // Memory bus interface
   u8 read8(u32 addr);
@@ -236,11 +256,27 @@ private:
   bool ram_reaper_prev_enabled_ = false;
   bool ram_reaper_prev_use_custom_seed_ = false;
   u64 ram_reaper_prev_seed_ = 0;
+  std::atomic<bool> gpu_reaper_enabled_{false};
+  std::atomic<u32> gpu_reaper_writes_per_frame_{1};
+  std::atomic<u32> gpu_reaper_intensity_x10_{1000};
+  std::atomic<bool> gpu_reaper_affect_geometry_{true};
+  std::atomic<bool> gpu_reaper_affect_texture_state_{true};
+  std::atomic<bool> gpu_reaper_affect_display_state_{false};
+  std::atomic<bool> gpu_reaper_use_custom_seed_{false};
+  std::atomic<u64> gpu_reaper_seed_{1};
+  std::atomic<u64> gpu_reaper_last_seed_{0};
+  std::atomic<u64> gpu_reaper_total_mutations_{0};
+  std::mt19937 gpu_reaper_rng_{};
+  bool gpu_reaper_rng_seeded_ = false;
+  bool gpu_reaper_prev_enabled_ = false;
+  bool gpu_reaper_prev_use_custom_seed_ = false;
+  u64 gpu_reaper_prev_seed_ = 0;
 
   void note_cdrom_io(u32 phys_addr);
   void note_sio_io(u32 phys_addr);
   void sync_spu_to_cpu();
   void apply_ram_reaper_for_frame();
+  void apply_gpu_reaper_for_frame();
 };
 
 // Timer IRQ helper (called from timer.cpp)

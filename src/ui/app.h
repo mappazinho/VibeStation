@@ -108,9 +108,20 @@ private:
   u64 ram_reaper_seed_ = 1u;
   u64 ram_reaper_active_seed_ = 0u;
   u64 ram_reaper_total_mutations_ = 0;
+  bool gpu_reaper_enabled_ = false;
+  u32 gpu_reaper_writes_per_frame_ = 48u;
+  float gpu_reaper_intensity_percent_ = 25.0f;
+  bool gpu_reaper_affect_geometry_ = true;
+  bool gpu_reaper_affect_texture_state_ = true;
+  bool gpu_reaper_affect_display_state_ = false;
+  bool gpu_reaper_use_custom_seed_ = false;
+  u64 gpu_reaper_seed_ = 1u;
+  u64 gpu_reaper_active_seed_ = 0u;
+  u64 gpu_reaper_total_mutations_ = 0;
   char grim_preset_name_[64] = "grim_preset";
   char batch_preset_name_[64] = "grim_batch";
   char ram_preset_name_[64] = "ram_reaper";
+  char gpu_preset_name_[64] = "gpu_reaper";
   int selected_corruption_preset_index_ = -1;
 
   struct CorruptionPresetListEntry {
@@ -152,11 +163,14 @@ private:
   bool reap_and_reboot_bios_batch();
   bool save_current_grim_preset(bool batch_mode);
   bool save_current_ram_preset();
+  bool save_current_gpu_preset();
   bool load_corruption_preset(const std::filesystem::path &path);
   void refresh_corruption_preset_list();
   void set_grim_reaper_mode(bool enabled);
   void sync_ram_reaper_config();
   void disable_ram_reaper_mode();
+  void sync_gpu_reaper_config();
+  void disable_gpu_reaper_mode();
 
   // Deferred heavy initialization to avoid large stack allocations on startup.
   bool init_runtime();

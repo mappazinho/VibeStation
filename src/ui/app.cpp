@@ -75,6 +75,7 @@ struct ParsedCorruptionPreset {
     GrimSingle,
     GrimBatch,
     RamReaper,
+    GpuReaper,
   };
 
   Type type = Type::Invalid;
@@ -104,6 +105,14 @@ struct ParsedCorruptionPreset {
   u32 ram_range_end = psx::RAM_SIZE - 1u;
   u64 ram_seed = 1u;
   bool ram_has_seed = false;
+  bool gpu_enabled = false;
+  float gpu_intensity = 0.0f;
+  u32 gpu_writes_per_frame = 0u;
+  bool gpu_target_geometry = true;
+  bool gpu_target_texture = true;
+  bool gpu_target_display = false;
+  u64 gpu_seed = 1u;
+  bool gpu_has_seed = false;
 };
 
 std::string trim_copy(const std::string &input) {
@@ -243,6 +252,8 @@ bool parse_corruption_preset_file(const std::filesystem::path &path,
           parsed.type = ParsedCorruptionPreset::Type::GrimBatch;
         } else if (value == "ram_reaper") {
           parsed.type = ParsedCorruptionPreset::Type::RamReaper;
+        } else if (value == "gpu_reaper") {
+          parsed.type = ParsedCorruptionPreset::Type::GpuReaper;
         }
       } else if (key == "name") {
         parsed.display_name = value;
@@ -258,10 +269,13 @@ bool parse_corruption_preset_file(const std::filesystem::path &path,
         parsed.custom_end_hex = value;
       } else if (key == "enabled") {
         parsed.ram_enabled = parse_bool_value(value, parsed.ram_enabled);
+        parsed.gpu_enabled = parse_bool_value(value, parsed.gpu_enabled);
       } else if (key == "intensity") {
         parse_float_value(value, parsed.ram_intensity);
+        parse_float_value(value, parsed.gpu_intensity);
       } else if (key == "writes_per_frame") {
         parse_u32_value(value, parsed.ram_writes_per_frame);
+        parse_u32_value(value, parsed.gpu_writes_per_frame);
       } else if (key == "target_main_ram") {
         parsed.ram_target_main =
             parse_bool_value(value, parsed.ram_target_main);
@@ -275,6 +289,15 @@ bool parse_corruption_preset_file(const std::filesystem::path &path,
         parse_u32_value(value, parsed.ram_range_start);
       } else if (key == "range_end") {
         parse_u32_value(value, parsed.ram_range_end);
+      } else if (key == "target_geometry") {
+        parsed.gpu_target_geometry =
+            parse_bool_value(value, parsed.gpu_target_geometry);
+      } else if (key == "target_texture_state") {
+        parsed.gpu_target_texture =
+            parse_bool_value(value, parsed.gpu_target_texture);
+      } else if (key == "target_display_state") {
+        parsed.gpu_target_display =
+            parse_bool_value(value, parsed.gpu_target_display);
       }
       continue;
     }
@@ -303,6 +326,10 @@ bool parse_corruption_preset_file(const std::filesystem::path &path,
     } else if (section == "ram_reaper") {
       if (key == "seed") {
         parsed.ram_has_seed = parse_u64_value(value, parsed.ram_seed);
+      }
+    } else if (section == "gpu_reaper") {
+      if (key == "seed") {
+        parsed.gpu_has_seed = parse_u64_value(value, parsed.gpu_seed);
       }
     }
   }
@@ -602,6 +629,7 @@ void App::process_events(bool &quit) {
         if (!path.empty()) {
           emu_runner_.pause_and_wait_idle();
           disable_ram_reaper_mode();
+          disable_gpu_reaper_mode();
           if (system_->load_bios(path)) {
             bios_path_ = path;
             save_persistent_config();
@@ -651,6 +679,7 @@ void App::process_events(bool &quit) {
         if (system_->bios_loaded() && has_started_emulation_) {
           emu_runner_.pause_and_wait_idle();
           disable_ram_reaper_mode();
+          disable_gpu_reaper_mode();
           has_started_emulation_ = false;
           status_message_ = "Emulation stopped";
         }
@@ -680,6 +709,7 @@ void App::process_events(bool &quit) {
 void App::update() {
   input_->update();
   sync_ram_reaper_config();
+  sync_gpu_reaper_config();
 
   // Push controller state into lock-free mailbox consumed by the emu thread.
   const u16 buttons = input_->controller().button_state();
@@ -799,6 +829,7 @@ void App::menu_bar() {
         if (!path.empty()) {
           emu_runner_.pause_and_wait_idle();
           disable_ram_reaper_mode();
+          disable_gpu_reaper_mode();
           if (system_->load_bios(path)) {
             bios_path_ = path;
             save_persistent_config();
@@ -870,12 +901,14 @@ void App::menu_bar() {
                           bios_loaded && has_started_emulation_)) {
         emu_runner_.pause_and_wait_idle();
         disable_ram_reaper_mode();
+        disable_gpu_reaper_mode();
         has_started_emulation_ = false;
         status_message_ = "Emulation stopped";
       }
       if (ImGui::MenuItem("Restart BIOS", nullptr, false, bios_loaded)) {
         emu_runner_.pause_and_wait_idle();
         disable_ram_reaper_mode();
+        disable_gpu_reaper_mode();
         set_grim_reaper_mode(false);
         if (!bios_path_.empty() && !system_->load_bios(bios_path_)) {
           status_message_ = "Failed to reload original BIOS";
@@ -980,6 +1013,7 @@ void App::panel_emulator_screen() {
       if (!path.empty()) {
         emu_runner_.pause_and_wait_idle();
         disable_ram_reaper_mode();
+        disable_gpu_reaper_mode();
         if (system_->load_bios(path)) {
           bios_path_ = path;
           save_persistent_config();
@@ -1793,6 +1827,7 @@ void App::panel_grim_reaper() {
   if (ImGui::Button("Stop")) {
     emu_runner_.pause_and_wait_idle();
     disable_ram_reaper_mode();
+    disable_gpu_reaper_mode();
     has_started_emulation_ = false;
     status_message_ = "Emulation stopped";
   }
@@ -1807,6 +1842,7 @@ void App::panel_grim_reaper() {
   if (ImGui::Button("Restart Corrupted BIOS")) {
     emu_runner_.pause_and_wait_idle();
     disable_ram_reaper_mode();
+    disable_gpu_reaper_mode();
     set_grim_reaper_mode(true);
     if (!system_->load_bios(grim_reaper_last_output_path_)) {
       set_grim_reaper_mode(false);
@@ -1888,6 +1924,50 @@ void App::panel_grim_reaper() {
   }
   ImGui::SameLine();
   if (ImGui::Button("Browse Presets##ram")) {
+    refresh_corruption_preset_list();
+    show_corruption_presets_ = true;
+  }
+
+  ImGui::Separator();
+  ImGui::Text("GPU Reaper");
+  ImGui::TextColored(
+      ImVec4(0.7f, 0.7f, 0.7f, 1.0f),
+      "Real-time GPU state corruption for broken polygons, warped textures, and unstable display state.");
+  ImGui::Checkbox("Enable GPU Reaper", &gpu_reaper_enabled_);
+  ImGui::SliderFloat("GPU Chaos (%)", &gpu_reaper_intensity_percent_, 0.0f,
+                     100.0f, "%.1f%%");
+  int gpu_writes_per_frame = static_cast<int>(
+      std::min<u32>(gpu_reaper_writes_per_frame_, 5000u));
+  ImGui::SliderInt("GPU Writes / Frame", &gpu_writes_per_frame, 0, 5000);
+  gpu_reaper_writes_per_frame_ =
+      static_cast<u32>(std::max(0, gpu_writes_per_frame));
+  ImGui::Checkbox("Target Geometry State", &gpu_reaper_affect_geometry_);
+  ImGui::Checkbox("Target Texture State", &gpu_reaper_affect_texture_state_);
+  ImGui::Checkbox("Target Display State", &gpu_reaper_affect_display_state_);
+  const float gpu_expected_writes =
+      (static_cast<float>(gpu_reaper_writes_per_frame_) *
+       (gpu_reaper_intensity_percent_ / 100.0f));
+  ImGui::Text("Expected Writes/Frame: %.2f", gpu_expected_writes);
+  if (!gpu_reaper_affect_geometry_ && !gpu_reaper_affect_texture_state_ &&
+      !gpu_reaper_affect_display_state_) {
+    ImGui::TextColored(ImVec4(0.9f, 0.5f, 0.3f, 1.0f),
+                       "No GPU targets selected.");
+  }
+  ImGui::Checkbox("Use Custom Seed##gpu", &gpu_reaper_use_custom_seed_);
+  if (gpu_reaper_use_custom_seed_) {
+    ImGui::InputScalar("Seed##gpu", ImGuiDataType_U64, &gpu_reaper_seed_);
+  }
+  ImGui::Text("Active Seed: %llu",
+              static_cast<unsigned long long>(gpu_reaper_active_seed_));
+  ImGui::Text("Total Mutations: %llu",
+              static_cast<unsigned long long>(gpu_reaper_total_mutations_));
+  ImGui::InputText("GPU Preset Name", gpu_preset_name_,
+                   IM_ARRAYSIZE(gpu_preset_name_));
+  if (ImGui::Button("Save GPU Preset")) {
+    save_current_gpu_preset();
+  }
+  ImGui::SameLine();
+  if (ImGui::Button("Browse Presets##gpu")) {
     refresh_corruption_preset_list();
     show_corruption_presets_ = true;
   }
@@ -2019,6 +2099,9 @@ void App::refresh_corruption_preset_list() {
     case ParsedCorruptionPreset::Type::RamReaper:
       item.preset_type = "ram-reaper";
       break;
+    case ParsedCorruptionPreset::Type::GpuReaper:
+      item.preset_type = "gpu-reaper";
+      break;
     default:
       item.preset_type = "unknown";
       break;
@@ -2130,6 +2213,43 @@ bool App::save_current_ram_preset() {
   return true;
 }
 
+bool App::save_current_gpu_preset() {
+  const std::filesystem::path dir = ensure_corruption_preset_dir();
+  const std::string stem =
+      sanitize_preset_file_stem(gpu_preset_name_, "gpu_reaper");
+  const std::filesystem::path path = dir / (stem + ".vibe_preset");
+
+  std::ofstream out(path, std::ios::out | std::ios::trunc);
+  if (!out.is_open()) {
+    status_message_ = "Failed to create preset file.";
+    return false;
+  }
+
+  out << std::fixed << std::setprecision(3);
+  out << "type=gpu_reaper\n";
+  out << "name=" << stem << "\n";
+  out << "enabled=" << (gpu_reaper_enabled_ ? 1 : 0) << "\n";
+  out << "intensity=" << gpu_reaper_intensity_percent_ << "\n";
+  out << "writes_per_frame=" << gpu_reaper_writes_per_frame_ << "\n";
+  out << "target_geometry=" << (gpu_reaper_affect_geometry_ ? 1 : 0) << "\n";
+  out << "target_texture_state=" << (gpu_reaper_affect_texture_state_ ? 1 : 0)
+      << "\n";
+  out << "target_display_state=" << (gpu_reaper_affect_display_state_ ? 1 : 0)
+      << "\n";
+  out << "gpu_reaper(\n";
+  out << "seed=" << gpu_reaper_seed_ << "\n";
+  out << ")\n";
+
+  if (!out) {
+    status_message_ = "Failed writing preset file.";
+    return false;
+  }
+
+  refresh_corruption_preset_list();
+  status_message_ = "Saved preset: " + path.filename().string();
+  return true;
+}
+
 bool App::load_corruption_preset(const std::filesystem::path &path) {
   ParsedCorruptionPreset preset{};
   if (!parse_corruption_preset_file(path, preset)) {
@@ -2187,6 +2307,17 @@ bool App::load_corruption_preset(const std::filesystem::path &path) {
     ram_reaper_use_custom_seed_ = preset.ram_has_seed;
     ram_reaper_seed_ = preset.ram_seed;
     sync_ram_reaper_config();
+  } else if (preset.type == ParsedCorruptionPreset::Type::GpuReaper) {
+    show_grim_reaper_ = true;
+    gpu_reaper_enabled_ = preset.gpu_enabled;
+    gpu_reaper_intensity_percent_ = preset.gpu_intensity;
+    gpu_reaper_writes_per_frame_ = preset.gpu_writes_per_frame;
+    gpu_reaper_affect_geometry_ = preset.gpu_target_geometry;
+    gpu_reaper_affect_texture_state_ = preset.gpu_target_texture;
+    gpu_reaper_affect_display_state_ = preset.gpu_target_display;
+    gpu_reaper_use_custom_seed_ = preset.gpu_has_seed;
+    gpu_reaper_seed_ = preset.gpu_seed;
+    sync_gpu_reaper_config();
   } else {
     status_message_ = "Unsupported preset type.";
     return false;
@@ -2451,6 +2582,7 @@ bool App::start_bios_from_ui() {
 
   emu_runner_.pause_and_wait_idle();
   disable_ram_reaper_mode();
+  disable_gpu_reaper_mode();
   system_->reset();
   has_started_emulation_ = true;
   emu_runner_.set_running(true);
@@ -2461,6 +2593,7 @@ bool App::start_bios_from_ui() {
 bool App::boot_disc_from_ui() {
   emu_runner_.pause_and_wait_idle();
   disable_ram_reaper_mode();
+  disable_gpu_reaper_mode();
 
   if (!system_->bios_loaded()) {
     status_message_ = "Load a BIOS before booting a disc.";
@@ -2514,6 +2647,31 @@ void App::disable_ram_reaper_mode() {
   ram_reaper_enabled_ = false;
   if (system_) {
     system_->disable_ram_reaper();
+  }
+}
+
+void App::sync_gpu_reaper_config() {
+  if (!system_) {
+    return;
+  }
+  System::GpuReaperConfig cfg{};
+  cfg.enabled = gpu_reaper_enabled_;
+  cfg.writes_per_frame = gpu_reaper_writes_per_frame_;
+  cfg.intensity_percent = gpu_reaper_intensity_percent_;
+  cfg.affect_geometry = gpu_reaper_affect_geometry_;
+  cfg.affect_texture_state = gpu_reaper_affect_texture_state_;
+  cfg.affect_display_state = gpu_reaper_affect_display_state_;
+  cfg.use_custom_seed = gpu_reaper_use_custom_seed_;
+  cfg.seed = gpu_reaper_seed_;
+  system_->set_gpu_reaper_config(cfg);
+  gpu_reaper_active_seed_ = system_->gpu_reaper_last_seed();
+  gpu_reaper_total_mutations_ = system_->gpu_reaper_total_mutations();
+}
+
+void App::disable_gpu_reaper_mode() {
+  gpu_reaper_enabled_ = false;
+  if (system_) {
+    system_->disable_gpu_reaper();
   }
 }
 
@@ -2676,6 +2834,7 @@ bool App::reap_and_reboot_bios() {
 
   emu_runner_.pause_and_wait_idle();
   disable_ram_reaper_mode();
+  disable_gpu_reaper_mode();
   set_grim_reaper_mode(true);
   if (!system_->load_bios(out_path.string())) {
     set_grim_reaper_mode(false);
@@ -2817,6 +2976,7 @@ bool App::reap_and_reboot_bios_batch() {
 
   emu_runner_.pause_and_wait_idle();
   disable_ram_reaper_mode();
+  disable_gpu_reaper_mode();
   set_grim_reaper_mode(true);
   if (!system_->load_bios(out_path.string())) {
     set_grim_reaper_mode(false);
