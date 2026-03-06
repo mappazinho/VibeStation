@@ -253,6 +253,8 @@ private:
   u32 mem_ctrl_[9] = {};
   u32 ram_size_ = 0;
   u32 cache_ctrl_ = 0;
+  u32 mdec_command_shadow_ = 0;
+  u32 mdec_command_shadow_mask_ = 0;
   u32 mdec_control_shadow_ = 0;
   u8 post_reg_ = 0;
   BootDiagnostics boot_diag_ = {};

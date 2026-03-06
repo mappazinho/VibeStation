@@ -28,8 +28,8 @@ public:
   void init(System *sys);
   void reset();
 
-  // Execute one instruction
-  void step();
+  // Execute one instruction and return the number of CPU cycles it consumed.
+  u32 step();
 
   // COP2 (GTE) — publicly accessible for DMA
   Gte gte;
@@ -80,6 +80,7 @@ private:
   void begin_branch(bool taken, u32 target);
   u32 read_cop0_reg(u32 index) const;
   void write_cop0_reg(u32 index, u32 value);
+  u32 instruction_cycles(u32 instruction) const;
 
   // Memory access (through system bus)
   u32 load32(u32 addr);
