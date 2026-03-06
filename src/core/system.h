@@ -11,6 +11,8 @@
 #include "spu.h"
 #include "timer.h"
 #include "types.h"
+#include <atomic>
+#include <random>
 #include <string>
 #include <vector>
 
@@ -18,6 +20,19 @@
 
 class System {
 public:
+  struct RamReaperConfig {
+    bool enabled = false;
+    u32 range_start = 0;
+    u32 range_end = psx::RAM_SIZE - 1u;
+    u32 writes_per_frame = 1;
+    float intensity_percent = 100.0f;
+    bool affect_main_ram = true;
+    bool affect_vram = true;
+    bool affect_spu_ram = true;
+    bool use_custom_seed = false;
+    u32 seed = 1;
+  };
+
   struct BootDiagnostics {
     bool saw_cd_io = false;
     bool saw_sio_io = false;
@@ -125,6 +140,17 @@ public:
   }
   void update_display_diag(const DisplaySampleInfo &display_sample);
 
+  // RAM Reaper (experimental real-time RAM corruption)
+  void set_ram_reaper_config(const RamReaperConfig &config);
+  RamReaperConfig ram_reaper_config() const;
+  u32 ram_reaper_last_seed() const {
+    return ram_reaper_last_seed_.load(std::memory_order_acquire);
+  }
+  u64 ram_reaper_total_mutations() const {
+    return ram_reaper_total_mutations_.load(std::memory_order_acquire);
+  }
+  void disable_ram_reaper();
+
   // Memory bus interface
   u8 read8(u32 addr);
   u16 read16(u32 addr);
@@ -189,10 +215,28 @@ private:
   bool saw_non_bios_exec_ = false;
   u32 bios_menu_streak_after_non_bios_ = 0;
   u64 spu_synced_cpu_cycle_ = 0;
+  std::atomic<bool> ram_reaper_enabled_{false};
+  std::atomic<u32> ram_reaper_range_start_{0};
+  std::atomic<u32> ram_reaper_range_end_{psx::RAM_SIZE - 1u};
+  std::atomic<u32> ram_reaper_writes_per_frame_{1};
+  std::atomic<u32> ram_reaper_intensity_x10_{1000};
+  std::atomic<bool> ram_reaper_affect_main_ram_{true};
+  std::atomic<bool> ram_reaper_affect_vram_{true};
+  std::atomic<bool> ram_reaper_affect_spu_ram_{true};
+  std::atomic<bool> ram_reaper_use_custom_seed_{false};
+  std::atomic<u32> ram_reaper_seed_{1};
+  std::atomic<u32> ram_reaper_last_seed_{0};
+  std::atomic<u64> ram_reaper_total_mutations_{0};
+  std::mt19937 ram_reaper_rng_{};
+  bool ram_reaper_rng_seeded_ = false;
+  bool ram_reaper_prev_enabled_ = false;
+  bool ram_reaper_prev_use_custom_seed_ = false;
+  u32 ram_reaper_prev_seed_ = 0;
 
   void note_cdrom_io(u32 phys_addr);
   void note_sio_io(u32 phys_addr);
   void sync_spu_to_cpu();
+  void apply_ram_reaper_for_frame();
 };
 
 // Timer IRQ helper (called from timer.cpp)

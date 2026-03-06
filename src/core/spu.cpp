@@ -241,6 +241,12 @@ void Spu::reset() {
   has_last_koff_write_sample_ = false;
 }
 
+void Spu::corrupt_ram_byte(u32 offset, u8 value) {
+  const u32 addr = offset & SPU_RAM_MASK;
+  maybe_raise_irq9_for_ram_access(addr, 1);
+  spu_ram_[addr] = value;
+}
+
 u16 Spu::spucnt_effective() const {
   return static_cast<u16>((spucnt_ & 0xFFC0u) | (spucnt_mode_latched_ & 0x003Fu));
 }

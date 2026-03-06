@@ -90,6 +90,18 @@ private:
   bool grim_use_custom_seed_ = false;
   u32 grim_seed_ = 1u;
   u32 grim_last_used_seed_ = 0u;
+  bool ram_reaper_enabled_ = false;
+  u32 ram_reaper_writes_per_frame_ = 64u;
+  float ram_reaper_intensity_percent_ = 35.0f;
+  bool ram_reaper_affect_main_ram_ = true;
+  bool ram_reaper_affect_vram_ = true;
+  bool ram_reaper_affect_spu_ram_ = true;
+  u32 ram_reaper_range_start_ = 0u;
+  u32 ram_reaper_range_end_ = psx::RAM_SIZE - 1u;
+  bool ram_reaper_use_custom_seed_ = false;
+  u32 ram_reaper_seed_ = 1u;
+  u32 ram_reaper_active_seed_ = 0u;
+  u64 ram_reaper_total_mutations_ = 0;
 
   void process_events(bool &quit);
   bool should_route_keyboard_to_emu(const SDL_Event &event,
@@ -118,6 +130,8 @@ private:
   bool reap_and_reboot_bios();
   bool reap_and_reboot_bios_batch();
   void set_grim_reaper_mode(bool enabled);
+  void sync_ram_reaper_config();
+  void disable_ram_reaper_mode();
 
   // Deferred heavy initialization to avoid large stack allocations on startup.
   bool init_runtime();

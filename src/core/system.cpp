@@ -33,6 +33,20 @@ namespace {
     }
 
     bool is_non_bios_pc(u32 pc) { return !is_bios_rom_pc(pc) && !is_bios_ram_pc(pc); }
+
+    System::RamReaperConfig sanitize_ram_reaper_config(
+        const System::RamReaperConfig& input) {
+        System::RamReaperConfig cfg = input;
+        const u32 max_ram_off = psx::RAM_SIZE - 1u;
+        cfg.range_start = std::min(cfg.range_start, max_ram_off);
+        cfg.range_end = std::min(cfg.range_end, max_ram_off);
+        cfg.writes_per_frame = std::min(cfg.writes_per_frame, psx::RAM_SIZE);
+        cfg.intensity_percent = std::max(0.0f, std::min(100.0f, cfg.intensity_percent));
+        if (cfg.range_start > cfg.range_end) {
+            std::swap(cfg.range_start, cfg.range_end);
+        }
+        return cfg;
+    }
 } // namespace
 
 // Timer IRQ helper
@@ -185,6 +199,7 @@ void System::run_frame(bool sample_display_diag) {
     auto start_total = std::chrono::high_resolution_clock::now();
     reset_profiling_stats();
     const bool profile_detailed = g_profile_detailed_timing;
+    apply_ram_reaper_for_frame();
 
     const bool pal = gpu_.display_mode().is_pal;
     const u32 scanlines_per_frame = pal ? 314 : 263;
@@ -384,6 +399,158 @@ void System::update_display_diag(const DisplaySampleInfo& display_sample) {
         }
         boot_diag_.logo_visible_run_frames = 0;
     }
+}
+
+void System::set_ram_reaper_config(const RamReaperConfig& config) {
+    const RamReaperConfig sanitized = sanitize_ram_reaper_config(config);
+    ram_reaper_enabled_.store(sanitized.enabled, std::memory_order_release);
+    ram_reaper_range_start_.store(sanitized.range_start, std::memory_order_release);
+    ram_reaper_range_end_.store(sanitized.range_end, std::memory_order_release);
+    ram_reaper_writes_per_frame_.store(sanitized.writes_per_frame,
+        std::memory_order_release);
+    const u32 intensity_x10 = static_cast<u32>(std::lround(
+        static_cast<double>(sanitized.intensity_percent) * 10.0));
+    ram_reaper_intensity_x10_.store(intensity_x10, std::memory_order_release);
+    ram_reaper_affect_main_ram_.store(sanitized.affect_main_ram,
+        std::memory_order_release);
+    ram_reaper_affect_vram_.store(sanitized.affect_vram, std::memory_order_release);
+    ram_reaper_affect_spu_ram_.store(sanitized.affect_spu_ram,
+        std::memory_order_release);
+    ram_reaper_use_custom_seed_.store(sanitized.use_custom_seed,
+        std::memory_order_release);
+    ram_reaper_seed_.store(sanitized.seed, std::memory_order_release);
+}
+
+System::RamReaperConfig System::ram_reaper_config() const {
+    RamReaperConfig cfg{};
+    cfg.enabled = ram_reaper_enabled_.load(std::memory_order_acquire);
+    cfg.range_start = ram_reaper_range_start_.load(std::memory_order_acquire);
+    cfg.range_end = ram_reaper_range_end_.load(std::memory_order_acquire);
+    cfg.writes_per_frame =
+        ram_reaper_writes_per_frame_.load(std::memory_order_acquire);
+    cfg.intensity_percent =
+        static_cast<float>(ram_reaper_intensity_x10_.load(std::memory_order_acquire)) /
+        10.0f;
+    cfg.affect_main_ram =
+        ram_reaper_affect_main_ram_.load(std::memory_order_acquire);
+    cfg.affect_vram = ram_reaper_affect_vram_.load(std::memory_order_acquire);
+    cfg.affect_spu_ram =
+        ram_reaper_affect_spu_ram_.load(std::memory_order_acquire);
+    cfg.use_custom_seed =
+        ram_reaper_use_custom_seed_.load(std::memory_order_acquire);
+    cfg.seed = ram_reaper_seed_.load(std::memory_order_acquire);
+    return sanitize_ram_reaper_config(cfg);
+}
+
+void System::disable_ram_reaper() {
+    RamReaperConfig cfg = ram_reaper_config();
+    cfg.enabled = false;
+    set_ram_reaper_config(cfg);
+}
+
+void System::apply_ram_reaper_for_frame() {
+    const RamReaperConfig cfg = ram_reaper_config();
+    if (!cfg.enabled) {
+        ram_reaper_prev_enabled_ = false;
+        ram_reaper_rng_seeded_ = false;
+        return;
+    }
+
+    bool reseed = !ram_reaper_rng_seeded_ || !ram_reaper_prev_enabled_;
+    if (cfg.use_custom_seed != ram_reaper_prev_use_custom_seed_) {
+        reseed = true;
+    }
+    if (cfg.use_custom_seed && (cfg.seed != ram_reaper_prev_seed_)) {
+        reseed = true;
+    }
+
+    if (reseed) {
+        const u32 seed =
+            cfg.use_custom_seed ? cfg.seed : static_cast<u32>(std::random_device{}());
+        ram_reaper_rng_.seed(seed);
+        ram_reaper_last_seed_.store(seed, std::memory_order_release);
+        ram_reaper_rng_seeded_ = true;
+    }
+
+    ram_reaper_prev_enabled_ = true;
+    ram_reaper_prev_use_custom_seed_ = cfg.use_custom_seed;
+    ram_reaper_prev_seed_ = cfg.seed;
+
+    if (cfg.writes_per_frame == 0 || cfg.intensity_percent <= 0.0f) {
+        return;
+    }
+
+    const bool target_main = cfg.affect_main_ram;
+    const bool target_vram = cfg.affect_vram;
+    const bool target_spu = cfg.affect_spu_ram;
+    const u32 target_count = static_cast<u32>(target_main ? 1u : 0u) +
+        static_cast<u32>(target_vram ? 1u : 0u) +
+        static_cast<u32>(target_spu ? 1u : 0u);
+    if (target_count == 0) {
+        return;
+    }
+
+    const double desired_writes =
+        static_cast<double>(cfg.writes_per_frame) *
+        (static_cast<double>(cfg.intensity_percent) / 100.0);
+    u32 writes_this_frame = static_cast<u32>(std::floor(desired_writes));
+    const double frac = desired_writes - static_cast<double>(writes_this_frame);
+    std::uniform_real_distribution<double> unit_dist(0.0, 1.0);
+    if (unit_dist(ram_reaper_rng_) < frac) {
+        ++writes_this_frame;
+    }
+
+    if (writes_this_frame == 0) {
+        return;
+    }
+
+    // Add occasional bursty spikes for a cartridge-tilt-like feel.
+    std::uniform_int_distribution<u32> pct_dist(0u, 99u);
+    const u32 burst_chance = static_cast<u32>(cfg.intensity_percent * 0.35f);
+    if (pct_dist(ram_reaper_rng_) < burst_chance) {
+        const u32 burst_cap = std::max<u32>(1u, writes_this_frame / 2u + 1u);
+        std::uniform_int_distribution<u32> burst_dist(1u, burst_cap);
+        writes_this_frame += burst_dist(ram_reaper_rng_);
+    }
+
+    std::uniform_int_distribution<u32> addr_dist(cfg.range_start, cfg.range_end);
+    std::uniform_int_distribution<u32> byte_dist(0u, 0xFFu);
+    std::uniform_int_distribution<u32> vram_dist(
+        0u, static_cast<u32>(psx::VRAM_WIDTH * psx::VRAM_HEIGHT - 1u));
+    std::uniform_int_distribution<u32> spu_dist(0u, Spu::RAM_SIZE_BYTES - 1u);
+    std::uniform_int_distribution<u32> target_dist(0u, target_count - 1u);
+    u64 mutations = 0;
+    for (u32 i = 0; i < writes_this_frame; ++i) {
+        const u32 target_index = target_dist(ram_reaper_rng_);
+        u32 cursor = 0;
+        if (target_main) {
+            if (cursor == target_index) {
+                const u32 offset = addr_dist(ram_reaper_rng_);
+                ram_.write8(offset, static_cast<u8>(byte_dist(ram_reaper_rng_)));
+                ++mutations;
+                continue;
+            }
+            ++cursor;
+        }
+        if (target_vram) {
+            if (cursor == target_index) {
+                gpu_.corrupt_vram_word(vram_dist(ram_reaper_rng_),
+                    static_cast<u16>(ram_reaper_rng_() & 0xFFFFu));
+                ++mutations;
+                continue;
+            }
+            ++cursor;
+        }
+        if (target_spu) {
+            if (cursor == target_index) {
+                spu_.corrupt_ram_byte(spu_dist(ram_reaper_rng_),
+                    static_cast<u8>(byte_dist(ram_reaper_rng_)));
+                ++mutations;
+                continue;
+            }
+        }
+    }
+    ram_reaper_total_mutations_.fetch_add(mutations, std::memory_order_acq_rel);
 }
 
 void System::step() {

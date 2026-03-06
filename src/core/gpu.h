@@ -75,6 +75,7 @@ public:
 
   // VRAM access
   const u16 *vram() const { return vram_.data(); }
+  void corrupt_vram_word(u32 index, u16 value);
   const DisplayMode &display_mode() const { return display_; }
   DisplaySampleInfo build_display_rgba(std::vector<u32> *rgba,
                                        bool include_stats = true) const;

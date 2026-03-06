@@ -353,6 +353,7 @@ void App::process_events(bool &quit) {
             "BIOS Files (*.bin)\0*.bin\0All Files\0*.*\0", "Select PS1 BIOS");
         if (!path.empty()) {
           emu_runner_.pause_and_wait_idle();
+          disable_ram_reaper_mode();
           if (system_->load_bios(path)) {
             bios_path_ = path;
             save_persistent_config();
@@ -406,6 +407,7 @@ void App::process_events(bool &quit) {
             boot_disc_from_ui();
           } else {
             emu_runner_.pause_and_wait_idle();
+            disable_ram_reaper_mode();
             system_->reset();
             has_started_emulation_ = true;
             emu_runner_.set_running(true);
@@ -420,6 +422,7 @@ void App::process_events(bool &quit) {
       } else if (no_mod && key == SDLK_F7) {
         if (system_->bios_loaded() && has_started_emulation_) {
           emu_runner_.pause_and_wait_idle();
+          disable_ram_reaper_mode();
           has_started_emulation_ = false;
           status_message_ = "Emulation stopped";
         }
@@ -448,6 +451,7 @@ void App::process_events(bool &quit) {
 
 void App::update() {
   input_->update();
+  sync_ram_reaper_config();
 
   // Push controller state into lock-free mailbox consumed by the emu thread.
   const u16 buttons = input_->controller().button_state();
@@ -563,6 +567,7 @@ void App::menu_bar() {
             "BIOS Files (*.bin)\0*.bin\0All Files\0*.*\0", "Select PS1 BIOS");
         if (!path.empty()) {
           emu_runner_.pause_and_wait_idle();
+          disable_ram_reaper_mode();
           if (system_->load_bios(path)) {
             bios_path_ = path;
             save_persistent_config();
@@ -635,6 +640,7 @@ void App::menu_bar() {
           }
         } else {
           emu_runner_.pause_and_wait_idle();
+          disable_ram_reaper_mode();
           system_->reset();
           has_started_emulation_ = true;
           emu_runner_.set_running(true);
@@ -648,11 +654,13 @@ void App::menu_bar() {
       if (ImGui::MenuItem("Stop", "F7", false,
                           bios_loaded && has_started_emulation_)) {
         emu_runner_.pause_and_wait_idle();
+        disable_ram_reaper_mode();
         has_started_emulation_ = false;
         status_message_ = "Emulation stopped";
       }
       if (ImGui::MenuItem("Restart BIOS", nullptr, false, bios_loaded)) {
         emu_runner_.pause_and_wait_idle();
+        disable_ram_reaper_mode();
         set_grim_reaper_mode(false);
         if (!bios_path_.empty() && !system_->load_bios(bios_path_)) {
           status_message_ = "Failed to reload original BIOS";
@@ -756,6 +764,7 @@ void App::panel_emulator_screen() {
           "BIOS Files (*.bin)\0*.bin\0All Files\0*.*\0", "Select PS1 BIOS");
       if (!path.empty()) {
         emu_runner_.pause_and_wait_idle();
+        disable_ram_reaper_mode();
         if (system_->load_bios(path)) {
           bios_path_ = path;
           save_persistent_config();
@@ -813,6 +822,7 @@ void App::panel_emulator_screen() {
         boot_disc_from_ui();
       } else {
         emu_runner_.pause_and_wait_idle();
+        disable_ram_reaper_mode();
         system_->reset();
         has_started_emulation_ = true;
         emu_runner_.set_running(true);
@@ -1595,6 +1605,7 @@ void App::panel_grim_reaper() {
   }
   if (ImGui::Button("Stop")) {
     emu_runner_.pause_and_wait_idle();
+    disable_ram_reaper_mode();
     has_started_emulation_ = false;
     status_message_ = "Emulation stopped";
   }
@@ -1608,6 +1619,7 @@ void App::panel_grim_reaper() {
   }
   if (ImGui::Button("Restart Corrupted BIOS")) {
     emu_runner_.pause_and_wait_idle();
+    disable_ram_reaper_mode();
     set_grim_reaper_mode(true);
     if (!system_->load_bios(grim_reaper_last_output_path_)) {
       set_grim_reaper_mode(false);
@@ -1623,6 +1635,51 @@ void App::panel_grim_reaper() {
   if (grim_reaper_last_output_path_.empty()) {
     ImGui::EndDisabled();
   }
+
+  ImGui::Separator();
+  ImGui::Text("RAM Reaper");
+  ImGui::TextColored(
+      ImVec4(0.7f, 0.7f, 0.7f, 1.0f),
+      "Tilt-style real-time corruption. Enable VRAM/SPU targets for visual/audio glitches.");
+  ImGui::Checkbox("Enable RAM Reaper", &ram_reaper_enabled_);
+  ImGui::SliderFloat("Tilt Intensity (%)", &ram_reaper_intensity_percent_, 0.0f,
+                     100.0f, "%.1f%%");
+  int writes_per_frame = static_cast<int>(
+      std::min<u32>(ram_reaper_writes_per_frame_, 5000u));
+  ImGui::SliderInt("Base Writes / Frame", &writes_per_frame, 0, 5000);
+  ram_reaper_writes_per_frame_ = static_cast<u32>(std::max(0, writes_per_frame));
+  ImGui::Checkbox("Target Main RAM", &ram_reaper_affect_main_ram_);
+  ImGui::Checkbox("Target VRAM (Visual)", &ram_reaper_affect_vram_);
+  ImGui::Checkbox("Target SPU RAM (Audio)", &ram_reaper_affect_spu_ram_);
+  if (ram_reaper_affect_main_ram_) {
+    ImGui::InputScalar("Start (hex)", ImGuiDataType_U32, &ram_reaper_range_start_,
+                       nullptr, nullptr, "%06X",
+                       ImGuiInputTextFlags_CharsHexadecimal);
+    ImGui::InputScalar("End (hex)", ImGuiDataType_U32, &ram_reaper_range_end_,
+                       nullptr, nullptr, "%06X",
+                       ImGuiInputTextFlags_CharsHexadecimal);
+  } else {
+    ImGui::TextColored(ImVec4(0.75f, 0.75f, 0.75f, 1.0f),
+                       "Main RAM range controls disabled (target off).");
+  }
+  ram_reaper_range_start_ = std::min(ram_reaper_range_start_, psx::RAM_SIZE - 1u);
+  ram_reaper_range_end_ = std::min(ram_reaper_range_end_, psx::RAM_SIZE - 1u);
+  const float expected_writes =
+      (static_cast<float>(ram_reaper_writes_per_frame_) *
+       (ram_reaper_intensity_percent_ / 100.0f));
+  ImGui::Text("Expected Writes/Frame: %.2f", expected_writes);
+  if (!ram_reaper_affect_main_ram_ && !ram_reaper_affect_vram_ &&
+      !ram_reaper_affect_spu_ram_) {
+    ImGui::TextColored(ImVec4(0.9f, 0.5f, 0.3f, 1.0f),
+                       "No targets selected.");
+  }
+  ImGui::Checkbox("Use Custom Seed##ram", &ram_reaper_use_custom_seed_);
+  if (ram_reaper_use_custom_seed_) {
+    ImGui::InputScalar("Seed##ram", ImGuiDataType_U32, &ram_reaper_seed_);
+  }
+  ImGui::Text("Active Seed: %u", static_cast<unsigned>(ram_reaper_active_seed_));
+  ImGui::Text("Total Mutations: %llu",
+              static_cast<unsigned long long>(ram_reaper_total_mutations_));
 
 
 
@@ -1875,6 +1932,7 @@ bool App::resolve_disc_paths(const std::string &selected_path,
 
 bool App::boot_disc_from_ui() {
   emu_runner_.pause_and_wait_idle();
+  disable_ram_reaper_mode();
 
   if (!system_->bios_loaded()) {
     status_message_ = "Load a BIOS before booting a disc.";
@@ -1902,6 +1960,33 @@ bool App::boot_disc_from_ui() {
   emu_runner_.set_running(true);
   status_message_ = "Booting disc from BIOS...";
   return true;
+}
+
+void App::sync_ram_reaper_config() {
+  if (!system_) {
+    return;
+  }
+  System::RamReaperConfig cfg{};
+  cfg.enabled = ram_reaper_enabled_;
+  cfg.range_start = ram_reaper_range_start_;
+  cfg.range_end = ram_reaper_range_end_;
+  cfg.writes_per_frame = ram_reaper_writes_per_frame_;
+  cfg.intensity_percent = ram_reaper_intensity_percent_;
+  cfg.affect_main_ram = ram_reaper_affect_main_ram_;
+  cfg.affect_vram = ram_reaper_affect_vram_;
+  cfg.affect_spu_ram = ram_reaper_affect_spu_ram_;
+  cfg.use_custom_seed = ram_reaper_use_custom_seed_;
+  cfg.seed = ram_reaper_seed_;
+  system_->set_ram_reaper_config(cfg);
+  ram_reaper_active_seed_ = system_->ram_reaper_last_seed();
+  ram_reaper_total_mutations_ = system_->ram_reaper_total_mutations();
+}
+
+void App::disable_ram_reaper_mode() {
+  ram_reaper_enabled_ = false;
+  if (system_) {
+    system_->disable_ram_reaper();
+  }
 }
 
 
@@ -2059,6 +2144,7 @@ bool App::reap_and_reboot_bios() {
   }
 
   emu_runner_.pause_and_wait_idle();
+  disable_ram_reaper_mode();
   set_grim_reaper_mode(true);
   if (!system_->load_bios(out_path.string())) {
     set_grim_reaper_mode(false);
@@ -2194,6 +2280,7 @@ bool App::reap_and_reboot_bios_batch() {
   }
 
   emu_runner_.pause_and_wait_idle();
+  disable_ram_reaper_mode();
   set_grim_reaper_mode(true);
   if (!system_->load_bios(out_path.string())) {
     set_grim_reaper_mode(false);

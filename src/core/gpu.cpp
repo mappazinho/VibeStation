@@ -268,6 +268,11 @@ void Gpu::reset() {
 
 // ── GP0 (Rendering Commands) ──────────────────────────────────────
 
+void Gpu::corrupt_vram_word(u32 index, u16 value) {
+  const size_t safe_index = static_cast<size_t>(index) % vram_.size();
+  vram_[safe_index] = value;
+}
+
 void Gpu::gp0(u32 command) {
   const bool profile_detailed = g_profile_detailed_timing;
   std::chrono::high_resolution_clock::time_point start{};

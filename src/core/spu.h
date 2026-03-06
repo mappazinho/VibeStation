@@ -9,6 +9,7 @@ class System;
 
 class Spu {
 public:
+  static constexpr u32 RAM_SIZE_BYTES = 512u * 1024u;
   struct AudioDiag {
     u64 generated_frames = 0;
     u64 queued_frames = 0;
@@ -144,6 +145,7 @@ public:
 
   u16 read16(u32 offset) const;
   void write16(u32 offset, u16 value);
+  void corrupt_ram_byte(u32 offset, u8 value);
   void dma_write(u32 value);
   u32 dma_read();
   bool dma_request() const;
