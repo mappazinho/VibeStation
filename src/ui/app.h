@@ -118,10 +118,22 @@ private:
   u64 gpu_reaper_seed_ = 1u;
   u64 gpu_reaper_active_seed_ = 0u;
   u64 gpu_reaper_total_mutations_ = 0;
+  bool sound_reaper_enabled_ = false;
+  u32 sound_reaper_writes_per_frame_ = 32u;
+  float sound_reaper_intensity_percent_ = 20.0f;
+  bool sound_reaper_affect_pitch_ = true;
+  bool sound_reaper_affect_envelope_ = true;
+  bool sound_reaper_affect_reverb_ = true;
+  bool sound_reaper_affect_mixer_ = true;
+  bool sound_reaper_use_custom_seed_ = false;
+  u64 sound_reaper_seed_ = 1u;
+  u64 sound_reaper_active_seed_ = 0u;
+  u64 sound_reaper_total_mutations_ = 0;
   char grim_preset_name_[64] = "grim_preset";
   char batch_preset_name_[64] = "grim_batch";
   char ram_preset_name_[64] = "ram_reaper";
   char gpu_preset_name_[64] = "gpu_reaper";
+  char sound_preset_name_[64] = "sound_reaper";
   int selected_corruption_preset_index_ = -1;
 
   struct CorruptionPresetListEntry {
@@ -164,6 +176,7 @@ private:
   bool save_current_grim_preset(bool batch_mode);
   bool save_current_ram_preset();
   bool save_current_gpu_preset();
+  bool save_current_sound_preset();
   bool load_corruption_preset(const std::filesystem::path &path);
   void refresh_corruption_preset_list();
   void set_grim_reaper_mode(bool enabled);
@@ -171,6 +184,8 @@ private:
   void disable_ram_reaper_mode();
   void sync_gpu_reaper_config();
   void disable_gpu_reaper_mode();
+  void sync_sound_reaper_config();
+  void disable_sound_reaper_mode();
 
   // Deferred heavy initialization to avoid large stack allocations on startup.
   bool init_runtime();
