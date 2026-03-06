@@ -178,21 +178,23 @@ bool CdRom::load_bin_cue(const std::string &bin_path,
   insert_probe_delay_cycles_ = 0;
   insert_probe_stage_ = 0;
 
-  const std::filesystem::path cue_fs(cue_path);
-  const std::filesystem::path cue_dir = cue_fs.parent_path();
-  if (!parse_cue(cue_path, cue_dir.string())) {
-    LOG_ERROR("CDROM: Failed to parse CUE file: %s", cue_path.c_str());
-    return false;
-  }
-
   std::filesystem::path resolved_bin_path = bin_path;
-  if (resolved_bin_path.empty() && !tracks_.empty() &&
-      !tracks_.front().filename.empty()) {
-    resolved_bin_path = cue_dir / tracks_.front().filename;
+  std::filesystem::path cue_dir;
+  if (!cue_path.empty()) {
+    const std::filesystem::path cue_fs(cue_path);
+    cue_dir = cue_fs.parent_path();
+    if (!parse_cue(cue_path, cue_dir.string())) {
+      LOG_ERROR("CDROM: Failed to parse CUE file: %s", cue_path.c_str());
+      return false;
+    }
+    if (resolved_bin_path.empty() && !tracks_.empty() &&
+        !tracks_.front().filename.empty()) {
+      resolved_bin_path = cue_dir / tracks_.front().filename;
+    }
   }
 
   if (resolved_bin_path.empty()) {
-    LOG_ERROR("CDROM: No BIN file could be resolved from CUE");
+    LOG_ERROR("CDROM: No BIN file could be resolved");
     return false;
   }
 
@@ -219,6 +221,19 @@ bool CdRom::load_bin_cue(const std::string &bin_path,
   bin_size_ = std::filesystem::file_size(resolved_bin_path, ec);
   if (ec) {
     bin_size_ = 0;
+  }
+
+  if (tracks_.empty()) {
+    CdTrack fallback{};
+    fallback.number = 1;
+    fallback.type = "MODE2/2352";
+    fallback.filename = resolved_bin_path.filename().string();
+    fallback.sector_size = 2352;
+    fallback.pregap_sectors = 0;
+    fallback.index01_file_lba = 0;
+    fallback.index01_abs_lba = 150;
+    fallback.index01_file_offset = 0;
+    tracks_.push_back(fallback);
   }
 
   bool single_file = true;
@@ -281,29 +296,32 @@ bool CdRom::swap_disc_image(const std::string &bin_path,
     bin_file_.close();
   }
 
-  tracks_.clear();
-  const std::filesystem::path cue_fs(cue_path);
-  const std::filesystem::path cue_dir = cue_fs.parent_path();
-  if (!parse_cue(cue_path, cue_dir.string())) {
-    tracks_ = old_tracks;
-    resolved_disc_path_ = old_resolved_disc_path;
-    track_map_valid_ = old_track_map_valid;
-    disc_loaded_ = old_disc_loaded;
-    bin_size_ = old_bin_size;
-    if (!old_resolved_disc_path.empty()) {
-      bin_file_.open(old_resolved_disc_path, std::ios::binary);
-    }
-    LOG_ERROR("CDROM: Failed to parse CUE file for live disc insert: %s",
-              cue_path.c_str());
-    return false;
-  }
-  parsed_tracks = tracks_;
-
   std::filesystem::path resolved_bin_path = bin_path;
-  if (resolved_bin_path.empty() && !parsed_tracks.empty() &&
-      !parsed_tracks.front().filename.empty()) {
-    resolved_bin_path = cue_dir / parsed_tracks.front().filename;
+  std::filesystem::path cue_dir;
+  tracks_.clear();
+  if (!cue_path.empty()) {
+    const std::filesystem::path cue_fs(cue_path);
+    cue_dir = cue_fs.parent_path();
+    if (!parse_cue(cue_path, cue_dir.string())) {
+      tracks_ = old_tracks;
+      resolved_disc_path_ = old_resolved_disc_path;
+      track_map_valid_ = old_track_map_valid;
+      disc_loaded_ = old_disc_loaded;
+      bin_size_ = old_bin_size;
+      if (!old_resolved_disc_path.empty()) {
+        bin_file_.open(old_resolved_disc_path, std::ios::binary);
+      }
+      LOG_ERROR("CDROM: Failed to parse CUE file for live disc insert: %s",
+                cue_path.c_str());
+      return false;
+    }
+    parsed_tracks = tracks_;
+    if (resolved_bin_path.empty() && !parsed_tracks.empty() &&
+        !parsed_tracks.front().filename.empty()) {
+      resolved_bin_path = cue_dir / parsed_tracks.front().filename;
+    }
   }
+
   if (resolved_bin_path.empty()) {
     tracks_ = old_tracks;
     resolved_disc_path_ = old_resolved_disc_path;
@@ -313,7 +331,7 @@ bool CdRom::swap_disc_image(const std::string &bin_path,
     if (!old_resolved_disc_path.empty()) {
       bin_file_.open(old_resolved_disc_path, std::ios::binary);
     }
-    LOG_ERROR("CDROM: No BIN file could be resolved from CUE during live insert");
+    LOG_ERROR("CDROM: No BIN file could be resolved during live insert");
     return false;
   }
 
@@ -347,6 +365,19 @@ bool CdRom::swap_disc_image(const std::string &bin_path,
   std::error_code ec;
   const u64 replacement_size = std::filesystem::file_size(resolved_bin_path, ec);
   bin_size_ = ec ? 0 : replacement_size;
+
+  if (parsed_tracks.empty()) {
+    CdTrack fallback{};
+    fallback.number = 1;
+    fallback.type = "MODE2/2352";
+    fallback.filename = resolved_bin_path.filename().string();
+    fallback.sector_size = 2352;
+    fallback.pregap_sectors = 0;
+    fallback.index01_file_lba = 0;
+    fallback.index01_abs_lba = 150;
+    fallback.index01_file_offset = 0;
+    parsed_tracks.push_back(fallback);
+  }
 
   bool single_file = true;
   bool monotonic = true;

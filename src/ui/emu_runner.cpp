@@ -81,6 +81,9 @@ void EmuRunner::pause_and_wait_idle() {
 void EmuRunner::set_speed(double speed) {
   const double clamped = std::max(0.25, std::min(speed, 4.0));
   speed_.store(clamped, std::memory_order_release);
+  if (system_ != nullptr) {
+    system_->set_audio_output_speed(clamped);
+  }
 }
 
 void EmuRunner::set_input_state(u16 buttons, u8 lx, u8 ly, u8 rx, u8 ry) {

@@ -165,7 +165,7 @@ bool System::boot_disc() {
     set_running(false);
     reset();
 
-    if (!cue.empty()) {
+    if (!bin.empty()) {
         if (!load_game(bin, cue)) {
             return false;
         }

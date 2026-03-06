@@ -2,6 +2,8 @@
 
 #include "types.h"
 #include <SDL.h>
+#include <algorithm>
+#include <atomic>
 #include <array>
 #include <vector>
 
@@ -151,6 +153,10 @@ public:
   u32 dma_read();
   bool dma_request() const;
   void push_cd_audio_samples(const std::vector<s16> &samples, u32 sample_rate);
+  void set_output_speed(double speed) {
+    const double clamped = std::max(0.25, std::min(speed, 4.0));
+    audio_output_speed_.store(clamped, std::memory_order_release);
+  }
 
   void tick(u32 cycles);
   void mark_synced_to_cpu(u64 cpu_cycle) { last_synced_cpu_cycle_ = cpu_cycle; }
@@ -318,6 +324,7 @@ private:
   double sample_accum_ = 0.0;
   u64 sample_clock_ = 0;
   u64 last_synced_cpu_cycle_ = 0;
+  std::atomic<double> audio_output_speed_{1.0};
 
   s16 noise_level_ = 1;
   s32 noise_timer_ = 0;
