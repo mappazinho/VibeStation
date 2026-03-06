@@ -203,6 +203,8 @@ void System::reset() {
     std::memset(mem_ctrl_, 0, sizeof(mem_ctrl_));
     ram_size_ = 0;
     cache_ctrl_ = 0;
+    mdec_command_shadow_ = 0;
+    mdec_command_shadow_mask_ = 0;
     mdec_control_shadow_ = 0;
     post_reg_ = 0;
 }
@@ -237,7 +239,7 @@ void System::run_frame(bool sample_display_diag) {
     frame_cycle_remainder_ -= static_cast<double>(cycles_per_frame);
     const u32 base_cycles_per_scanline = cycles_per_frame / scanlines_per_frame;
     const u32 extra_cycles_per_frame = cycles_per_frame % scanlines_per_frame;
-    static constexpr u32 kCpuSliceCycles = 32;
+    static constexpr u32 kCpuInstructionSlice = 32;
     static constexpr u32 kDmaTickStride = 16;
     u32 extra_cycle_error = 0;
     u32 dma_tick_budget = 0;
@@ -260,14 +262,21 @@ void System::run_frame(bool sample_display_diag) {
         }
         u32 cycles_remaining = cycles_this_scanline;
         while (cycles_remaining > 0) {
-            const u32 slice = std::min(cycles_remaining, kCpuSliceCycles);
-            for (u32 c = 0; c < slice; ++c) {
-                cpu_.step();
-                ++frame_cycles_;
+            const u32 target_slice_cycles =
+                std::min(cycles_remaining, kCpuInstructionSlice * 4u);
+            u32 spent_in_slice = 0;
+            u32 instructions_executed = 0;
+            while (cycles_remaining > 0 && spent_in_slice < target_slice_cycles &&
+                   instructions_executed < kCpuInstructionSlice) {
+                const u32 consumed = cpu_.step();
+                spent_in_slice += consumed;
+                frame_cycles_ += consumed;
+                ++instructions_executed;
+                cycles_remaining =
+                    (consumed >= cycles_remaining) ? 0 : (cycles_remaining - consumed);
             }
-            cycles_remaining -= slice;
 
-            dma_tick_budget += slice;
+            dma_tick_budget += spent_in_slice;
             while (dma_tick_budget >= kDmaTickStride) {
                 dma_.tick();
                 dma_tick_budget -= kDmaTickStride;

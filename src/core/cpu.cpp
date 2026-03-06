@@ -233,7 +233,7 @@ bool Cpu::check_irq() {
 
 // ── Main Step ──────────────────────────────────────────────────────
 
-void Cpu::step() {
+u32 Cpu::step() {
   static u64 trace_step_counter = 0;
   static u32 trace_last_pc = 0;
   static u32 trace_last_instr = 0;
@@ -258,8 +258,9 @@ void Cpu::step() {
     exception(Exception::Interrupt);
     apply_pending_load();
     gpr_[0] = 0;
-    cycles_++;
-    return;
+    constexpr u32 irq_cycles = 2;
+    cycles_ += irq_cycles;
+    return irq_cycles;
   }
 
   // Fetch instruction
@@ -267,8 +268,9 @@ void Cpu::step() {
   if (exception_raised_) {
     apply_pending_load();
     gpr_[0] = 0;
-    cycles_++;
-    return;
+    constexpr u32 fault_cycles = 2;
+    cycles_ += fault_cycles;
+    return fault_cycles;
   }
 
   if (g_trace_cpu) {
@@ -323,7 +325,9 @@ void Cpu::step() {
   // Ensure $zero stays 0
   gpr_[0] = 0;
 
-  cycles_++;
+  const u32 consumed_cycles = instruction_cycles(instruction);
+  cycles_ += consumed_cycles;
+  return consumed_cycles;
 }
 
 // ── Instruction Dispatch ───────────────────────────────────────────
@@ -598,6 +602,59 @@ void Cpu::op_jalr(u32 i) {
 void Cpu::op_movz(u32 i) {
   if (gpr_[rt(i)] == 0) {
     set_reg(rd(i), gpr_[rs(i)]);
+  }
+}
+
+u32 Cpu::instruction_cycles(u32 instruction) const {
+  if (exception_raised_) {
+    return 2;
+  }
+
+  switch (op(instruction)) {
+  case 0x00:
+    switch (funct(instruction)) {
+    case 0x08: // JR
+    case 0x09: // JALR
+      return 2;
+    case 0x18: // MULT
+    case 0x19: // MULTU
+      return 8;
+    case 0x1A: // DIV
+    case 0x1B: // DIVU
+      return 35;
+    default:
+      return 1;
+    }
+  case 0x01: // BcondZ
+  case 0x02: // J
+  case 0x03: // JAL
+  case 0x04: // BEQ
+  case 0x05: // BNE
+  case 0x06: // BLEZ
+  case 0x07: // BGTZ
+    return pending_branch_taken_ ? 2 : 1;
+  case 0x10: // COP0
+  case 0x12: // COP2 / GTE
+    return 2;
+  case 0x20: // LB
+  case 0x21: // LH
+  case 0x22: // LWL
+  case 0x23: // LW
+  case 0x24: // LBU
+  case 0x25: // LHU
+  case 0x26: // LWR
+  case 0x28: // SB
+  case 0x29: // SH
+  case 0x2A: // SWL
+  case 0x2B: // SW
+  case 0x2E: // SWR
+  case 0x30: // LWC0
+  case 0x32: // LWC2
+  case 0x38: // SWC0
+  case 0x3A: // SWC2
+    return 2;
+  default:
+    return 1;
   }
 }
 
