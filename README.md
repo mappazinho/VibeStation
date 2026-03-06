@@ -3,17 +3,18 @@ This is a fully vibe-coded PS1 emulator for fun. It is written in C++.
 
 ## Things implemented:
 BIOS loading ✅  
-Game loading ⚠️❌  
-Bindings ✅⚠️  
+Game loading 🚩  
+Bindings ⚠️  
 CD-ROM ⚠️  
 Graphics/VRAM ⚠️  
 Audio ✅  
 CPU/RAM/DMA ✅   
 Main UI ✅ 
+Real-time corrupter/BIOS corruption ✅
 
 ✅ - Implemented  
-✅⚠️ - Implemented, has issues  
-⚠️ - Implemented, Has big issues  
+⚠️ - Implemented, buggy 
+🚩 - Incomplete 
 ❌ - Not implemented/Doesn't work   
 
 ## Build requirements
@@ -22,7 +23,8 @@ CMake 3.20+ (tested with CMake 4.2.2)
 Access to internet (to download dependencies)  
 
 # Build
-Run `cmake -S . -B build-vs -G "Visual Studio 17 2022" -A x64`  
+Run
+`cmake -S . -B build-vs -G "Visual Studio 17 2022" -A x64`  
 and  
 `cmake --build build-vs --config Release` (or compile inside Visual Studio)    
   
