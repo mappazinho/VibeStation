@@ -1,5 +1,6 @@
 #include "dma.h"
 #include "system.h"
+#include <algorithm>
 #include <chrono>
 
 void DmaController::recompute_dicr_master(bool request_irq_on_rise) {
@@ -25,6 +26,9 @@ void DmaController::recompute_dicr_master(bool request_irq_on_rise) {
 void DmaController::reset() {
   for (auto &ch : channels_) {
     ch = {};
+  }
+  for (auto &dbg : last_debug_) {
+    dbg = {};
   }
   dpcr_ = 0x07654321;
   dicr_ = 0;
@@ -84,8 +88,10 @@ void DmaController::write(u32 offset, u32 value) {
       break;
     case 0x4:
       ch.block_ctrl = value;
+      ch.block_words_remaining = 0;
       break;
     case 0x8:
+      ch.block_words_remaining = 0;
       ch.channel_ctrl = value;
       if (g_trace_dma) {
         static u64 chcr_log_count = 0;
@@ -158,7 +164,7 @@ void DmaController::execute_dma(int channel) {
     break;
   case DmaChannel::SyncMode::Block:
     dma_block(channel);
-    if (ch.block_count() == 0) {
+    if (ch.block_count() == 0 && ch.block_words_remaining == 0) {
       transfer_complete(channel);
     }
     break;
@@ -173,18 +179,24 @@ void DmaController::dma_block(int channel) {
   auto &ch = channels_[channel];
 
   u32 addr = ch.base_addr;
-  u32 word_count;
+  u32 word_count = 0;
 
   if (ch.sync_mode() == DmaChannel::SyncMode::Immediate) {
     word_count = ch.block_size();
     if (word_count == 0)
       word_count = 0x10000;
   } else {
-    word_count = ch.block_size();
-    if (word_count == 0) {
-      word_count = 0x10000;
+    if (ch.block_words_remaining == 0) {
+      word_count = ch.block_size();
+      if (word_count == 0) {
+        word_count = 0x10000;
+      }
+      ch.block_words_remaining = word_count;
     }
+    word_count = ch.block_words_remaining;
   }
+
+  u32 transfer_words = word_count;
 
   s32 step;
   if ((ch.channel_ctrl >> 1) & 1) {
@@ -194,13 +206,45 @@ void DmaController::dma_block(int channel) {
   }
 
   bool from_ram = ch.from_ram();
+  auto &dbg = last_debug_[channel];
+  dbg.base_addr = addr & 0x00FFFFFFu;
+  dbg.block_ctrl = ch.block_ctrl;
+  dbg.channel_ctrl = ch.channel_ctrl;
+  dbg.transfer_words = transfer_words;
+  dbg.cpu_cycle = sys_ ? sys_->cpu().cycle_count() : 0;
+  dbg.from_ram = from_ram;
+  dbg.first_addr = addr & 0x001FFFFCu;
+  if (transfer_words != 0) {
+    const s32 span = step * static_cast<s32>(transfer_words - 1);
+    dbg.last_addr =
+        static_cast<u32>(static_cast<s32>(dbg.first_addr) + span) & 0x001FFFFCu;
+  } else {
+    dbg.last_addr = dbg.first_addr;
+  }
+
+  if (!from_ram && ch.sync_mode() == DmaChannel::SyncMode::Block) {
+    switch (channel) {
+    case 1:
+      transfer_words =
+          std::min(transfer_words, sys_->mdec_dma_out_words_available());
+      break;
+    case 3:
+      transfer_words = std::min(transfer_words, sys_->cdrom_dma_words_available());
+      break;
+    default:
+      break;
+    }
+    if (transfer_words == 0) {
+      return;
+    }
+  }
 
   if (channel == 6) {
     // OTC (Ordering Table Clear): always writes to RAM, backwards.
     u32 current = addr;
-    for (u32 i = 0; i < word_count; i++) {
+    for (u32 i = 0; i < transfer_words; i++) {
       u32 val;
-      if (i == word_count - 1) {
+      if (i == transfer_words - 1) {
         val = 0x00FFFFFF; // End-of-list marker
       } else {
         val = (current - 4) & 0x001FFFFC;
@@ -208,10 +252,24 @@ void DmaController::dma_block(int channel) {
       sys_->write32(current, val);
       current -= 4;
     }
+    if (ch.sync_mode() == DmaChannel::SyncMode::Block) {
+      ch.base_addr = current & 0x00FFFFFF;
+      if (ch.block_words_remaining > transfer_words) {
+        ch.block_words_remaining -= transfer_words;
+      } else {
+        ch.block_words_remaining = 0;
+      }
+      if (ch.block_words_remaining == 0) {
+        const u16 remaining = ch.block_count();
+        const u16 next = (remaining > 0) ? static_cast<u16>(remaining - 1) : 0;
+        ch.block_ctrl =
+            (ch.block_ctrl & 0x0000FFFFu) | (static_cast<u32>(next) << 16);
+      }
+    }
     return;
   }
 
-  for (u32 i = 0; i < word_count; i++) {
+  for (u32 i = 0; i < transfer_words; i++) {
     u32 current_addr = addr & 0x001FFFFC;
 
     if (from_ram) {
@@ -259,9 +317,17 @@ void DmaController::dma_block(int channel) {
 
   ch.base_addr = addr & 0x00FFFFFF;
   if (ch.sync_mode() == DmaChannel::SyncMode::Block) {
-    const u16 remaining = ch.block_count();
-    const u16 next = (remaining > 0) ? static_cast<u16>(remaining - 1) : 0;
-    ch.block_ctrl = (ch.block_ctrl & 0x0000FFFFu) | (static_cast<u32>(next) << 16);
+    if (ch.block_words_remaining > transfer_words) {
+      ch.block_words_remaining -= transfer_words;
+    } else {
+      ch.block_words_remaining = 0;
+    }
+    if (ch.block_words_remaining == 0) {
+      const u16 remaining = ch.block_count();
+      const u16 next = (remaining > 0) ? static_cast<u16>(remaining - 1) : 0;
+      ch.block_ctrl =
+          (ch.block_ctrl & 0x0000FFFFu) | (static_cast<u32>(next) << 16);
+    }
   }
 }
 
@@ -306,6 +372,7 @@ void DmaController::transfer_complete(int channel) {
   // Clear enable + trigger bits
   ch.channel_ctrl &= ~(1u << 24); // Disable
   ch.channel_ctrl &= ~(1u << 28); // Clear trigger
+  ch.block_words_remaining = 0;
 
   // Set completion flag in DICR and update IRQ state.
   dicr_ |= (1u << (24 + channel));

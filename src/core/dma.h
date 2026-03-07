@@ -12,6 +12,7 @@ struct DmaChannel {
   u32 base_addr = 0;    // MADR: Base address
   u32 block_ctrl = 0;   // BCR: Block control
   u32 channel_ctrl = 0; // CHCR: Channel control
+  u32 block_words_remaining = 0; // Internal progress for sync-mode block DMA.
 
   // Decoded from CHCR
   bool from_ram() const {
@@ -44,6 +45,17 @@ struct DmaChannel {
 
 class DmaController {
 public:
+  struct TransferDebug {
+    u32 base_addr = 0;
+    u32 block_ctrl = 0;
+    u32 channel_ctrl = 0;
+    u32 transfer_words = 0;
+    u32 first_addr = 0;
+    u32 last_addr = 0;
+    u64 cpu_cycle = 0;
+    bool from_ram = false;
+  };
+
   void init(System *sys) { sys_ = sys; }
   void reset();
 
@@ -51,10 +63,14 @@ public:
   void write(u32 offset, u32 value);
 
   void tick();
+  const TransferDebug &last_debug(int channel) const {
+    return last_debug_[channel & 0x7];
+  }
 
 private:
   System *sys_ = nullptr;
   DmaChannel channels_[7];
+  TransferDebug last_debug_[7];
 
   u32 dpcr_ = 0x07654321; // DMA control register (priority/enable)
   u32 dicr_ = 0;          // DMA interrupt register

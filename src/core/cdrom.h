@@ -72,6 +72,14 @@ public:
   // DMA reads a word from the data buffer
   u32 dma_read();
   bool dma_request() const { return data_ready_ && data_request_; }
+  u32 dma_words_available() const {
+    if (!data_ready_ || data_index_ >= static_cast<int>(data_buffer_.size())) {
+      return 0;
+    }
+    const size_t remaining_bytes =
+        data_buffer_.size() - static_cast<size_t>(data_index_);
+    return static_cast<u32>(remaining_bytes / 4u);
+  }
 
 private:
   System *sys_ = nullptr;

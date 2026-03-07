@@ -439,26 +439,43 @@ bool Mdec::decode_block(const std::vector<u16> &src, size_t &pos, Block &block,
 }
 
 void Mdec::idct(const Block &coeffs, Block &pixels) const {
-  Block src = coeffs;
-  Block dst{};
-  for (int pass = 0; pass < 2; ++pass) {
+  Block temp{};
+
+  // First pass: transform rows.
+  for (int y = 0; y < 8; ++y) {
     for (int x = 0; x < 8; ++x) {
-      for (int y = 0; y < 8; ++y) {
-        s64 sum = 0;
-        for (int z = 0; z < 8; ++z) {
-          const int sample = src[static_cast<size_t>(y) + static_cast<size_t>(z) * 8];
-          const int scale = static_cast<int>(scale_table_[static_cast<size_t>(x) +
-                                                          static_cast<size_t>(z) * 8]) >>
-                            3;
-          sum += static_cast<s64>(sample) * static_cast<s64>(scale);
-        }
-        dst[static_cast<size_t>(x) + static_cast<size_t>(y) * 8] =
-            static_cast<int>((sum + 0x0FFF) >> 13);
+      s64 sum = 0;
+      for (int z = 0; z < 8; ++z) {
+        const int sample =
+            coeffs[static_cast<size_t>(y) * 8 + static_cast<size_t>(z)];
+        const int scale =
+            static_cast<int>(scale_table_[static_cast<size_t>(x) +
+                                          static_cast<size_t>(z) * 8]) >>
+            3;
+        sum += static_cast<s64>(sample) * static_cast<s64>(scale);
       }
+      temp[static_cast<size_t>(y) * 8 + static_cast<size_t>(x)] =
+          static_cast<int>((sum + 0x0FFF) >> 13);
     }
-    src = dst;
   }
-  pixels = src;
+
+  // Second pass: transform columns.
+  for (int y = 0; y < 8; ++y) {
+    for (int x = 0; x < 8; ++x) {
+      s64 sum = 0;
+      for (int z = 0; z < 8; ++z) {
+        const int sample =
+            temp[static_cast<size_t>(z) * 8 + static_cast<size_t>(x)];
+        const int scale =
+            static_cast<int>(scale_table_[static_cast<size_t>(y) +
+                                          static_cast<size_t>(z) * 8]) >>
+            3;
+        sum += static_cast<s64>(sample) * static_cast<s64>(scale);
+      }
+      pixels[static_cast<size_t>(y) * 8 + static_cast<size_t>(x)] =
+          static_cast<int>((sum + 0x0FFF) >> 13);
+    }
+  }
 }
 
 void Mdec::emit_colored_macroblock(const Block &cr, const Block &cb,

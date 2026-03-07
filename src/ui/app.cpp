@@ -2,6 +2,7 @@
 #include <SDL.h>
 #include <SDL_opengl.h>
 #include <imgui.h>
+#include <imgui_impl_opengl2.h>
 #include <imgui_impl_opengl3.h>
 #include <imgui_impl_sdl2.h>
 #include <algorithm>
@@ -392,38 +393,77 @@ bool App::init() {
   }
   load_persistent_config();
 
-  SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
-  SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 3);
-  SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
-  SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
+  struct GlContextAttempt {
+    int major;
+    int minor;
+    int profile;
+    const char *imgui_glsl;
+    const char *label;
+    bool use_imgui_opengl2_backend;
+  };
 
-  printf("[App::init] Creating window...\n");
-  fflush(stdout);
-  window_ = SDL_CreateWindow(
-      "VibeStation - PS1 Emulator", SDL_WINDOWPOS_CENTERED,
-      SDL_WINDOWPOS_CENTERED, 1280, 800,
-      SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
-  if (!window_) {
-    LOG_ERROR("SDL_CreateWindow failed: %s", SDL_GetError());
-    printf("[App::init] SDL_CreateWindow FAILED: %s\n", SDL_GetError());
+  const GlContextAttempt attempts[] = {
+      {3, 3, SDL_GL_CONTEXT_PROFILE_CORE, "#version 330", "OpenGL 3.3 Core",
+       false},
+      {3, 2, SDL_GL_CONTEXT_PROFILE_CORE, "#version 150", "OpenGL 3.2 Core",
+       false},
+      {2, 1, SDL_GL_CONTEXT_PROFILE_COMPATIBILITY, "#version 120",
+       "OpenGL 2.1 Compatibility", true},
+  };
+
+  bool context_ready = false;
+  for (const GlContextAttempt &attempt : attempts) {
+    SDL_GL_ResetAttributes();
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, attempt.major);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, attempt.minor);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, attempt.profile);
+    SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
+
+    printf("[App::init] Creating window/context (%s)...\n", attempt.label);
+    fflush(stdout);
+    window_ = SDL_CreateWindow(
+        "VibeStation - PS1 Emulator", SDL_WINDOWPOS_CENTERED,
+        SDL_WINDOWPOS_CENTERED, 1280, 800,
+        SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
+    if (!window_) {
+      LOG_WARN("SDL_CreateWindow failed for %s: %s", attempt.label,
+               SDL_GetError());
+      printf("[App::init] SDL_CreateWindow failed for %s: %s\n", attempt.label,
+             SDL_GetError());
+      fflush(stdout);
+      continue;
+    }
+
+    gl_context_ = SDL_GL_CreateContext(window_);
+    if (!gl_context_) {
+      LOG_WARN("SDL_GL_CreateContext failed for %s: %s", attempt.label,
+               SDL_GetError());
+      printf("[App::init] GL Context failed for %s: %s\n", attempt.label,
+             SDL_GetError());
+      fflush(stdout);
+      SDL_DestroyWindow(window_);
+      window_ = nullptr;
+      continue;
+    }
+
+    SDL_GL_MakeCurrent(window_, gl_context_);
+    SDL_GL_SetSwapInterval(config_vsync_ ? 1 : 0);
+    imgui_glsl_version_ = attempt.imgui_glsl;
+    use_imgui_opengl2_backend_ = attempt.use_imgui_opengl2_backend;
+    context_ready = true;
+
+    const GLubyte *gl_version = glGetString(GL_VERSION);
+    printf("[App::init] GL Context OK (%s, driver: %s)\n", attempt.label,
+           gl_version ? reinterpret_cast<const char *>(gl_version) : "Unknown");
+    fflush(stdout);
+    break;
+  }
+
+  if (!context_ready) {
+    printf("[App::init] GL Context FAILED: No compatible OpenGL context found.\n");
     fflush(stdout);
     return false;
   }
-  printf("[App::init] Window OK\n");
-  fflush(stdout);
-
-  printf("[App::init] Creating GL context...\n");
-  fflush(stdout);
-  gl_context_ = SDL_GL_CreateContext(window_);
-  if (!gl_context_) {
-    printf("[App::init] GL Context FAILED: %s\n", SDL_GetError());
-    fflush(stdout);
-    return false;
-  }
-  SDL_GL_MakeCurrent(window_, gl_context_);
-  SDL_GL_SetSwapInterval(config_vsync_ ? 1 : 0);
-  printf("[App::init] GL Context OK\n");
-  fflush(stdout);
 
   // Init Dear ImGui
   printf("[App::init] Initializing ImGui...\n");
@@ -471,9 +511,27 @@ bool App::init() {
   printf("[App::init] ImGui styled\n");
   fflush(stdout);
 
-  ImGui_ImplSDL2_InitForOpenGL(window_, gl_context_);
-  ImGui_ImplOpenGL3_Init("#version 330");
-  printf("[App::init] ImGui backends OK\n");
+  if (!ImGui_ImplSDL2_InitForOpenGL(window_, gl_context_)) {
+    printf("[App::init] ImGui SDL backend FAILED: %s\n", SDL_GetError());
+    fflush(stdout);
+    return false;
+  }
+  if (use_imgui_opengl2_backend_) {
+    if (!ImGui_ImplOpenGL2_Init()) {
+      printf("[App::init] ImGui OpenGL2 backend FAILED\n");
+      fflush(stdout);
+      return false;
+    }
+  } else {
+    if (!ImGui_ImplOpenGL3_Init(imgui_glsl_version_)) {
+      printf("[App::init] ImGui OpenGL3 backend FAILED (GLSL=%s)\n",
+             imgui_glsl_version_);
+      fflush(stdout);
+      return false;
+    }
+  }
+  printf("[App::init] ImGui backends OK (%s)\n",
+         use_imgui_opengl2_backend_ ? "OpenGL2" : "OpenGL3");
   fflush(stdout);
 
   printf("[App::init] Window + UI ready. Deferring emulator runtime init.\n");
@@ -556,7 +614,11 @@ void App::run() {
     }
 
     // Start ImGui frame
-    ImGui_ImplOpenGL3_NewFrame();
+    if (use_imgui_opengl2_backend_) {
+      ImGui_ImplOpenGL2_NewFrame();
+    } else {
+      ImGui_ImplOpenGL3_NewFrame();
+    }
     ImGui_ImplSDL2_NewFrame();
     ImGui::NewFrame();
 
@@ -572,7 +634,11 @@ void App::run() {
     glClear(GL_COLOR_BUFFER_BIT);
 
     const auto present_start = std::chrono::high_resolution_clock::now();
-    ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+    if (use_imgui_opengl2_backend_) {
+      ImGui_ImplOpenGL2_RenderDrawData(ImGui::GetDrawData());
+    } else {
+      ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+    }
     SDL_GL_SwapWindow(window_);
     const auto present_end = std::chrono::high_resolution_clock::now();
     present_ms_ =
@@ -3595,7 +3661,11 @@ void App::shutdown() {
     vram_debug_texture_ = 0;
   }
 
-  ImGui_ImplOpenGL3_Shutdown();
+  if (use_imgui_opengl2_backend_) {
+    ImGui_ImplOpenGL2_Shutdown();
+  } else {
+    ImGui_ImplOpenGL3_Shutdown();
+  }
   ImGui_ImplSDL2_Shutdown();
   ImGui::DestroyContext();
 

@@ -80,6 +80,7 @@ private:
   void begin_branch(bool taken, u32 target);
   u32 read_cop0_reg(u32 index) const;
   void write_cop0_reg(u32 index, u32 value);
+  void raise_cop_unusable(u32 cop_index);
   u32 instruction_cycles(u32 instruction) const;
 
   // Memory access (through system bus)
@@ -130,7 +131,9 @@ private:
   void op_xori(u32 i);
   void op_lui(u32 i);
   void op_cop0(u32 i);
+  void op_cop1(u32 i);
   void op_cop2(u32 i);
+  void op_cop3(u32 i);
   void op_lb(u32 i);
   void op_lh(u32 i);
   void op_lwl(u32 i);
@@ -144,9 +147,13 @@ private:
   void op_sw(u32 i);
   void op_swr(u32 i);
   void op_lwc0(u32 i);
+  void op_lwc1(u32 i);
   void op_swc0(u32 i);
+  void op_swc1(u32 i);
   void op_lwc2(u32 i);
+  void op_lwc3(u32 i);
   void op_swc2(u32 i);
+  void op_swc3(u32 i);
 
   // ── Opcode Handlers — SPECIAL (funct) ──────────────────────────
   void op_sll(u32 i);
