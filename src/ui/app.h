@@ -67,6 +67,8 @@ private:
   u32 last_fps_time_ = 0;
   u32 last_vram_update_ms_ = 0;
   double present_ms_ = 0.0;
+  double render_ms_ = 0.0;
+  double swap_ms_ = 0.0;
   EmuRunner::RuntimeSnapshot runtime_snapshot_{};
   unsigned int vram_debug_texture_ = 0;
 
@@ -142,6 +144,7 @@ private:
   int selected_corruption_preset_index_ = -1;
   bool game_library_dirty_ = true;
   u32 game_library_last_scan_ms_ = 0;
+  bool rom_directory_valid_ = false;
 
   struct GameLibraryEntry {
     std::string title;

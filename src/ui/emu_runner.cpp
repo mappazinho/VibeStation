@@ -240,7 +240,7 @@ void EmuRunner::worker_main() {
       FrameSnapshot frame{};
       std::vector<u32> rgba;
       const DisplaySampleInfo sample =
-          system_->gpu().build_display_rgba(rgba, !g_gpu_fast_mode);
+          system_->gpu().build_display_rgba(rgba, false);
 
       frame.frame_id = snapshot.frame_id;
       frame.width = std::max(1, sample.width);
