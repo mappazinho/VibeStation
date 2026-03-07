@@ -23,6 +23,8 @@ public:
 private:
   SDL_Window *window_ = nullptr;
   SDL_GLContext gl_context_ = nullptr;
+  const char *imgui_glsl_version_ = "#version 330";
+  bool use_imgui_opengl2_backend_ = false;
 
   std::unique_ptr<System> system_;
   std::unique_ptr<Renderer> renderer_;
