@@ -337,6 +337,18 @@ private:
   std::vector<s16> capture_samples_;
   std::vector<s16> cd_input_samples_;
   size_t cd_input_read_pos_ = 0;
+  s16 cd_last_sample_l_ = 0;
+  s16 cd_last_sample_r_ = 0;
+  u32 cd_gap_ramp_samples_ = 0;
+  bool cd_gap_active_ = false;
+  u32 cd_rejoin_blend_samples_ = 0;
+  s16 cd_rejoin_from_l_ = 0;
+  s16 cd_rejoin_from_r_ = 0;
+  double cd_resample_src_pos_ = 1.0;
+  u32 cd_resample_in_rate_ = SAMPLE_RATE;
+  bool cd_resample_prev_valid_ = false;
+  s16 cd_resample_prev_l_ = 0;
+  s16 cd_resample_prev_r_ = 0;
 
   std::array<u64, NUM_VOICES> last_kon_sample_ = {};
   std::array<bool, NUM_VOICES> has_last_kon_ = {};
