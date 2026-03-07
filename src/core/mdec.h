@@ -17,6 +17,9 @@ public:
   u32 dma_read() { return read_data(); }
   bool dma_in_request() const;
   bool dma_out_request() const;
+  u32 dma_out_words_available() const {
+    return static_cast<u32>(out_fifo_.size());
+  }
 
 private:
   static constexpr size_t kBlockSize = 64;

@@ -6,6 +6,11 @@
 #include <limits>
 
 namespace {
+    constexpr u32 kMainRamMirrorWindow = 0x00800000u;
+    constexpr u32 kRamWatchStart = 0x00094000u;
+    constexpr u32 kRamWatchEnd = 0x00098000u;
+    constexpr u32 kRamWatchLogLimit = 48u;
+
     // PSX-SPX vertical refresh rates (native region clock):
     // NTSC interlaced     ~59.940 Hz
     // NTSC non-interlaced ~59.826 Hz
@@ -96,6 +101,22 @@ void System::note_sio_io(u32 phys_addr) {
         boot_diag_.first_sio_io_cycle = cpu_.cycle_count();
         boot_diag_.first_sio_io_addr = phys_addr;
     }
+}
+
+void System::maybe_log_ram_watch_write(u32 phys_addr, u32 value, u32 size_bytes) {
+    static u32 watch_log_count = 0;
+    const u32 ram_off = phys_addr & 0x001FFFFFu;
+    if (ram_off < kRamWatchStart || ram_off >= kRamWatchEnd) {
+        return;
+    }
+    if (watch_log_count >= kRamWatchLogLimit) {
+        return;
+    }
+    ++watch_log_count;
+    LOG_WARN(
+        "BUS: RAM watch write%u off=0x%08X phys=0x%08X val=0x%08X pc=0x%08X sp=0x%08X ra=0x%08X",
+        size_bytes * 8u, ram_off, phys_addr, value, cpu_.pc(), cpu_.reg(29),
+        cpu_.reg(31));
 }
 
 void System::sync_spu_to_cpu() {
@@ -902,8 +923,8 @@ u8 System::read8(u32 addr) {
         }
     }
 
-    // Main RAM (2MB) mirrored across the low physical region.
-    if (phys < 0x1F000000)
+    // Main RAM (2MB) mirrored across the low 8MB physical window.
+    if (phys < kMainRamMirrorWindow)
         return ram_.read8(phys & 0x1FFFFF);
 
     // BIOS
@@ -977,7 +998,7 @@ u16 System::read16(u32 addr) {
         }
     }
 
-    if (phys < 0x1F000000)
+    if (phys < kMainRamMirrorWindow)
         return ram_.read16(phys & 0x1FFFFF);
     if (phys >= psx::BIOS_BASE &&
         static_cast<u64>(phys) <
@@ -1049,7 +1070,7 @@ u32 System::read32(u32 addr) {
         }
     }
 
-    if (phys < 0x1F000000)
+    if (phys < kMainRamMirrorWindow)
         return ram_.read32(phys & 0x1FFFFF);
     if (phys >= psx::BIOS_BASE &&
         static_cast<u64>(phys) <
@@ -1140,7 +1161,8 @@ void System::write8(u32 addr, u8 val) {
         }
     }
 
-    if (phys < 0x1F000000) {
+    if (phys < kMainRamMirrorWindow) {
+        maybe_log_ram_watch_write(phys, val, 1);
         ram_.write8(phys & 0x1FFFFF, val);
         return;
     }
@@ -1217,7 +1239,8 @@ void System::write16(u32 addr, u16 val) {
         }
     }
 
-    if (phys < 0x1F000000) {
+    if (phys < kMainRamMirrorWindow) {
+        maybe_log_ram_watch_write(phys, val, 2);
         ram_.write16(phys & 0x1FFFFF, val);
         return;
     }
@@ -1299,7 +1322,8 @@ void System::write32(u32 addr, u32 val) {
         }
     }
 
-    if (phys < 0x1F000000) {
+    if (phys < kMainRamMirrorWindow) {
+        maybe_log_ram_watch_write(phys, val, 4);
         ram_.write32(phys & 0x1FFFFF, val);
         return;
     }

@@ -1,6 +1,39 @@
 #include "cpu.h"
 #include "system.h"
 
+namespace {
+void log_dma_context(System *sys, u32 pc, u32 instr, const u32 *gpr) {
+  static u32 last_pc = 0xFFFFFFFFu;
+  static u32 last_instr = 0xFFFFFFFFu;
+  if (sys == nullptr) {
+    return;
+  }
+  if (pc == last_pc && instr == last_instr) {
+    return;
+  }
+  last_pc = pc;
+  last_instr = instr;
+
+  const auto &mdec = sys->dma_last_debug(1);
+  const auto &cd = sys->dma_last_debug(3);
+  LOG_WARN(
+      "CPU: ctx sp=0x%08X ra=0x%08X a0=0x%08X a1=0x%08X v0=0x%08X v1=0x%08X",
+      gpr[29], gpr[31], gpr[4], gpr[5], gpr[2], gpr[3]);
+  LOG_WARN(
+      "CPU: last DMA1 madr=0x%08X words=%u first=0x%08X last=0x%08X "
+      "bcr=0x%08X chcr=0x%08X cyc=%llu from_ram=%u",
+      mdec.base_addr, mdec.transfer_words, mdec.first_addr, mdec.last_addr,
+      mdec.block_ctrl, mdec.channel_ctrl,
+      static_cast<unsigned long long>(mdec.cpu_cycle), mdec.from_ram ? 1u : 0u);
+  LOG_WARN(
+      "CPU: last DMA3 madr=0x%08X words=%u first=0x%08X last=0x%08X "
+      "bcr=0x%08X chcr=0x%08X cyc=%llu from_ram=%u",
+      cd.base_addr, cd.transfer_words, cd.first_addr, cd.last_addr,
+      cd.block_ctrl, cd.channel_ctrl,
+      static_cast<unsigned long long>(cd.cpu_cycle), cd.from_ram ? 1u : 0u);
+}
+} // namespace
+
 // ── Init / Reset ───────────────────────────────────────────────────
 
 void Cpu::init(System *sys) {
@@ -102,6 +135,11 @@ void Cpu::write_cop0_reg(u32 index, u32 value) {
   }
 }
 
+void Cpu::raise_cop_unusable(u32 cop_index) {
+  cop0_cause_ = (cop0_cause_ & ~(0x3u << 28)) | ((cop_index & 0x3u) << 28);
+  exception(Exception::CopUnusable);
+}
+
 void Cpu::apply_pending_load() {
   if (load_.reg != 0) {
     gpr_[load_.reg] = load_.value;
@@ -198,6 +236,9 @@ void Cpu::exception(Exception cause) {
   cop0_sr_ |= (mode << 2) & 0x3F;
 
   // Set cause register
+  if (cause != Exception::CopUnusable) {
+    cop0_cause_ &= ~(0x3u << 28); // CE field is only meaningful for CopUnusable.
+  }
   cop0_cause_ = (cop0_cause_ & ~0x7Cu) | (static_cast<u32>(cause) << 2);
 
   // Set EPC
@@ -397,8 +438,14 @@ void Cpu::execute(u32 i) {
   case 0x10:
     op_cop0(i);
     break;
+  case 0x11:
+    op_cop1(i);
+    break;
   case 0x12:
     op_cop2(i);
+    break;
+  case 0x13:
+    op_cop3(i);
     break;
   case 0x20:
     op_lb(i);
@@ -439,17 +486,31 @@ void Cpu::execute(u32 i) {
   case 0x30:
     op_lwc0(i);
     break;
+  case 0x31:
+    op_lwc1(i);
+    break;
   case 0x32:
     op_lwc2(i);
+    break;
+  case 0x33:
+    op_lwc3(i);
     break;
   case 0x38:
     op_swc0(i);
     break;
+  case 0x39:
+    op_swc1(i);
+    break;
   case 0x3A:
     op_swc2(i);
     break;
+  case 0x3B:
+    op_swc3(i);
+    break;
   default:
-    LOG_WARN("CPU: Unhandled opcode 0x%02X at PC=0x%08X", op(i), current_pc_);
+    LOG_WARN("CPU: Unhandled opcode 0x%02X instr=0x%08X at PC=0x%08X", op(i),
+             i, current_pc_);
+    log_dma_context(sys_, current_pc_, i, gpr_);
     exception(Exception::ReservedInst);
     break;
   }
@@ -561,10 +622,12 @@ void Cpu::op_special(u32 i) {
       set_reg(rd(i), 0);
       LOG_WARN("CPU: Experimental fallback for SPECIAL funct 0x%02X at PC=0x%08X (rd <- 0)",
                funct(i), current_pc_);
+      log_dma_context(sys_, current_pc_, i, gpr_);
       break;
     }
-    LOG_WARN("CPU: Unhandled SPECIAL funct 0x%02X at PC=0x%08X", funct(i),
-             current_pc_);
+    LOG_WARN("CPU: Unhandled SPECIAL funct 0x%02X instr=0x%08X at PC=0x%08X",
+             funct(i), i, current_pc_);
+    log_dma_context(sys_, current_pc_, i, gpr_);
     exception(Exception::ReservedInst);
     break;
   }
@@ -634,7 +697,9 @@ u32 Cpu::instruction_cycles(u32 instruction) const {
   case 0x07: // BGTZ
     return pending_branch_taken_ ? 2 : 1;
   case 0x10: // COP0
+  case 0x11: // COP1
   case 0x12: // COP2 / GTE
+  case 0x13: // COP3
     return 2;
   case 0x20: // LB
   case 0x21: // LH
@@ -649,9 +714,13 @@ u32 Cpu::instruction_cycles(u32 instruction) const {
   case 0x2B: // SW
   case 0x2E: // SWR
   case 0x30: // LWC0
+  case 0x31: // LWC1
   case 0x32: // LWC2
+  case 0x33: // LWC3
   case 0x38: // SWC0
+  case 0x39: // SWC1
   case 0x3A: // SWC2
+  case 0x3B: // SWC3
     return 2;
   default:
     return 1;
@@ -1094,6 +1163,8 @@ void Cpu::op_cop0(u32 i) {
   }
 }
 
+void Cpu::op_cop1(u32 /*i*/) { raise_cop_unusable(1); }
+
 void Cpu::op_lwc0(u32 i) {
   const u32 addr = gpr_[rs(i)] + static_cast<u32>(simm(i));
   const u32 val = load32(addr);
@@ -1108,6 +1179,9 @@ void Cpu::op_swc0(u32 i) {
   const u32 val = read_cop0_reg(rt(i));
   store32(addr, val);
 }
+
+void Cpu::op_lwc1(u32 /*i*/) { raise_cop_unusable(1); }
+void Cpu::op_swc1(u32 /*i*/) { raise_cop_unusable(1); }
 
 // ── COP2 (GTE) ────────────────────────────────────────────────────
 
@@ -1131,7 +1205,9 @@ void Cpu::op_cop2(u32 i) {
       // GTE command
       gte.execute(i);
     } else {
-      LOG_WARN("CPU: Unhandled COP2 sub-op 0x%02X", sub);
+      LOG_WARN("CPU: Unhandled COP2 sub-op 0x%02X at PC=0x%08X", sub,
+               current_pc_);
+      exception(Exception::ReservedInst);
     }
     break;
   }
@@ -1150,4 +1226,8 @@ void Cpu::op_swc2(u32 i) {
   u32 val = gte.read_data(rt(i));
   store32(addr, val);
 }
+
+void Cpu::op_cop3(u32 /*i*/) { raise_cop_unusable(3); }
+void Cpu::op_lwc3(u32 /*i*/) { raise_cop_unusable(3); }
+void Cpu::op_swc3(u32 /*i*/) { raise_cop_unusable(3); }
 

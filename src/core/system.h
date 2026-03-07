@@ -211,13 +211,20 @@ public:
   bool gpu_dma_request() const { return gpu_.dma_request(); }
   u32 cdrom_dma_read() { return cdrom_.dma_read(); }
   bool cdrom_dma_request() const { return cdrom_.dma_request(); }
+  u32 cdrom_dma_words_available() const { return cdrom_.dma_words_available(); }
   void mdec_dma_write(u32 val) { mdec_.dma_write(val); }
   u32 mdec_dma_read() { return mdec_.dma_read(); }
   bool mdec_dma_in_request() const { return mdec_.dma_in_request(); }
   bool mdec_dma_out_request() const { return mdec_.dma_out_request(); }
+  u32 mdec_dma_out_words_available() const {
+    return mdec_.dma_out_words_available();
+  }
   void spu_dma_write(u32 val);
   u32 spu_dma_read();
   bool spu_dma_request() const { return spu_.dma_request(); }
+  const DmaController::TransferDebug &dma_last_debug(int channel) const {
+    return dma_.last_debug(channel);
+  }
 
   // Public component access
   Gpu &gpu() { return gpu_; }
@@ -313,6 +320,7 @@ private:
 
   void note_cdrom_io(u32 phys_addr);
   void note_sio_io(u32 phys_addr);
+  void maybe_log_ram_watch_write(u32 phys_addr, u32 value, u32 size_bytes);
   void sync_spu_to_cpu();
   void apply_ram_reaper_for_frame();
   void apply_gpu_reaper_for_frame();

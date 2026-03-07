@@ -1076,8 +1076,8 @@ void Gpu::gp0_image_load() {
   // CPU → VRAM transfer
   vram_tx_x_ = gp0_buffer_[1] & 0x3FF;
   vram_tx_y_ = (gp0_buffer_[1] >> 16) & 0x1FF;
-  vram_tx_w_ = gp0_buffer_[2] & 0xFFFF;
-  vram_tx_h_ = gp0_buffer_[2] >> 16;
+  vram_tx_w_ = gp0_buffer_[2] & 0x3FF;
+  vram_tx_h_ = (gp0_buffer_[2] >> 16) & 0x1FF;
 
   if (vram_tx_w_ == 0)
     vram_tx_w_ = 1024;
@@ -1094,8 +1094,8 @@ void Gpu::gp0_image_store() {
   // VRAM → CPU transfer
   vram_tx_x_ = gp0_buffer_[1] & 0x3FF;
   vram_tx_y_ = (gp0_buffer_[1] >> 16) & 0x1FF;
-  vram_tx_w_ = gp0_buffer_[2] & 0xFFFF;
-  vram_tx_h_ = gp0_buffer_[2] >> 16;
+  vram_tx_w_ = gp0_buffer_[2] & 0x3FF;
+  vram_tx_h_ = (gp0_buffer_[2] >> 16) & 0x1FF;
 
   if (vram_tx_w_ == 0)
     vram_tx_w_ = 1024;
