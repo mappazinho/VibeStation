@@ -597,13 +597,12 @@ void App::run() {
     const u64 loop_start_counter = SDL_GetPerformanceCounter();
     process_events(quit);
     update();
-    runtime_snapshot_ = emu_runner_.runtime_snapshot();
 
     FrameSnapshot frame;
     if (emu_runner_.consume_latest_frame(frame)) {
       renderer_->upload_frame(frame.rgba, frame.width, frame.height);
-      runtime_snapshot_ = emu_runner_.runtime_snapshot();
     }
+    runtime_snapshot_ = emu_runner_.runtime_snapshot();
 
     u32 now_ms = SDL_GetTicks();
     if (show_vram_ ||
@@ -633,17 +632,22 @@ void App::run() {
     glClearColor(0.05f, 0.03f, 0.08f, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT);
 
-    const auto present_start = std::chrono::high_resolution_clock::now();
+    const auto render_start = std::chrono::high_resolution_clock::now();
     if (use_imgui_opengl2_backend_) {
       ImGui_ImplOpenGL2_RenderDrawData(ImGui::GetDrawData());
     } else {
       ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
     }
+    const auto swap_start = std::chrono::high_resolution_clock::now();
     SDL_GL_SwapWindow(window_);
-    const auto present_end = std::chrono::high_resolution_clock::now();
-    present_ms_ =
-        std::chrono::duration<double, std::milli>(present_end - present_start)
+    const auto frame_end = std::chrono::high_resolution_clock::now();
+    render_ms_ =
+        std::chrono::duration<double, std::milli>(swap_start - render_start)
             .count();
+    swap_ms_ =
+        std::chrono::duration<double, std::milli>(frame_end - swap_start)
+            .count();
+    present_ms_ = render_ms_ + swap_ms_;
 
     // FPS counter
     frame_count_++;
@@ -1205,12 +1209,10 @@ void App::panel_emulator_screen() {
       ImGui::EndDisabled();
     }
 
-    const bool rom_dir_valid =
-        !rom_directory_.empty() &&
-        std::filesystem::exists(rom_directory_) &&
-        std::filesystem::is_directory(rom_directory_);
-    if (game_library_dirty_ || (rom_dir_valid &&
-                                (SDL_GetTicks() - game_library_last_scan_ms_ > 2000u))) {
+    const bool rom_dir_valid = rom_directory_valid_;
+    if (game_library_dirty_ ||
+        (rom_dir_valid &&
+         (SDL_GetTicks() - game_library_last_scan_ms_ > 15000u))) {
       refresh_game_library();
     }
 
@@ -1953,7 +1955,13 @@ void App::panel_performance() {
     }
     ImGui::Separator();
     row("Core", runtime_snapshot_.core_frame_ms, ImVec4(1.0f, 1.0f, 1.0f, 1.0f));
+    row("Render", render_ms_, ImVec4(0.9f, 0.9f, 0.7f, 1.0f));
+    row("Swap", swap_ms_, ImVec4(0.7f, 0.9f, 0.9f, 1.0f));
     row("Present", present_ms_, ImVec4(0.7f, 0.9f, 0.9f, 1.0f));
+    if (config_vsync_ && swap_ms_ > 8.0) {
+      ImGui::TextDisabled(
+          "Swap includes VSync/compositor wait. Disable VSync to profile CPU cost.");
+    }
 
     float budget_ms = 1000.0f / 60.0f;
     float usage = static_cast<float>(runtime_snapshot_.core_frame_ms / budget_ms);
@@ -3430,6 +3438,7 @@ void App::refresh_game_library() {
   game_library_.clear();
   game_library_last_scan_ms_ = SDL_GetTicks();
   game_library_dirty_ = false;
+  rom_directory_valid_ = false;
 
   if (rom_directory_.empty()) {
     return;
@@ -3440,6 +3449,7 @@ void App::refresh_game_library() {
       !std::filesystem::is_directory(rom_directory_, ec)) {
     return;
   }
+  rom_directory_valid_ = true;
 
   std::vector<std::filesystem::path> cue_paths;
   std::filesystem::recursive_directory_iterator it(

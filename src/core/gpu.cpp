@@ -1478,7 +1478,7 @@ DisplaySampleInfo Gpu::build_display_rgba(std::vector<u32> *rgba,
   const DeinterlaceMode deinterlace_mode =
       interlaced_field_output ? g_deinterlace_mode : DeinterlaceMode::Weave;
 
-  if (g_gpu_fast_mode && rgba != nullptr && !include_stats && !display_.is_24bit &&
+  if (rgba != nullptr && !include_stats && !display_.is_24bit &&
       !interlaced_field_output && info.x_start >= 0 && info.y_start >= 0 &&
       info.x_start + src_width <= static_cast<int>(psx::VRAM_WIDTH) &&
       info.y_start + src_height <= static_cast<int>(psx::VRAM_HEIGHT)) {
