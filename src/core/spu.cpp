@@ -1476,9 +1476,26 @@ void Spu::queue_host_audio(const std::vector<s16> &samples) {
     return;
   }
 
+  const std::vector<s16> *queue_samples = &samples;
+  std::vector<s16> turbo_adjusted_samples;
+  const double output_speed = audio_output_speed_.load(std::memory_order_acquire);
+  if (output_speed > 1.001) {
+    const double scaled_rate =
+        static_cast<double>(SAMPLE_RATE) * std::min(output_speed, 4.0);
+    const u32 in_rate =
+        static_cast<u32>(std::clamp<int>(static_cast<int>(std::lround(scaled_rate)),
+                                         SAMPLE_RATE, SAMPLE_RATE * 4));
+    turbo_adjusted_samples =
+        resample_stereo_linear(samples, in_rate, static_cast<u32>(SAMPLE_RATE));
+    if (!turbo_adjusted_samples.empty()) {
+      queue_samples = &turbo_adjusted_samples;
+    }
+  }
+
   if (capture_enabled_) {
-    if (capture_samples_.size() + samples.size() > CAPTURE_MAX_SAMPLES) {
-      size_t drop = capture_samples_.size() + samples.size() - CAPTURE_MAX_SAMPLES;
+    if (capture_samples_.size() + queue_samples->size() > CAPTURE_MAX_SAMPLES) {
+      size_t drop =
+          capture_samples_.size() + queue_samples->size() - CAPTURE_MAX_SAMPLES;
       drop &= ~static_cast<size_t>(1);
       if (drop >= capture_samples_.size()) {
         capture_samples_.clear();
@@ -1488,8 +1505,9 @@ void Spu::queue_host_audio(const std::vector<s16> &samples) {
                                    static_cast<s64>(drop));
       }
     }
-    capture_samples_.insert(capture_samples_.end(), samples.begin(), samples.end());
-    audio_diag_.capture_frames += samples.size() / 2;
+    capture_samples_.insert(capture_samples_.end(), queue_samples->begin(),
+                            queue_samples->end());
+    audio_diag_.capture_frames += queue_samples->size() / 2;
     return;
   }
 
@@ -1512,8 +1530,8 @@ void Spu::queue_host_audio(const std::vector<s16> &samples) {
   }
 
   const size_t unread = host_staging_samples_.size() - host_staging_read_pos_;
-  if (unread + samples.size() > HOST_STAGING_MAX_SAMPLES) {
-    size_t drop = unread + samples.size() - HOST_STAGING_MAX_SAMPLES;
+  if (unread + queue_samples->size() > HOST_STAGING_MAX_SAMPLES) {
+    size_t drop = unread + queue_samples->size() - HOST_STAGING_MAX_SAMPLES;
     drop = std::min(drop, unread);
     drop &= ~static_cast<size_t>(1);
     if (drop > 0) {
@@ -1527,8 +1545,8 @@ void Spu::queue_host_audio(const std::vector<s16> &samples) {
     }
   }
 
-  host_staging_samples_.insert(host_staging_samples_.end(), samples.begin(),
-                               samples.end());
+  host_staging_samples_.insert(host_staging_samples_.end(),
+                               queue_samples->begin(), queue_samples->end());
 
   while (host_staging_read_pos_ < host_staging_samples_.size()) {
     const u32 queued = SDL_GetQueuedAudioSize(audio_device_);

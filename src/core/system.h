@@ -136,6 +136,7 @@ public:
   void run_frame(bool sample_display_diag = true);
   void step();
   double target_fps() const;
+  void set_audio_output_speed(double speed) { spu_.set_output_speed(speed); }
 
   // State
   bool is_running() const { return running_; }

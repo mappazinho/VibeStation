@@ -15,7 +15,6 @@
 #include <limits>
 #include <random>
 #include <sstream>
-#include <unordered_set>
 #include <vector>
 
 #ifdef _WIN32
@@ -625,12 +624,25 @@ void App::run() {
 }
 
 void App::process_events(bool &quit) {
+  auto apply_turbo_speed = [this]() {
+    const double turbo_speed =
+        static_cast<double>(std::max(100, config_turbo_speed_percent_)) / 100.0;
+    emu_runner_.set_speed(turbo_hold_active_ ? turbo_speed : 1.0);
+  };
+
   SDL_Event event;
   while (SDL_PollEvent(&event)) {
     ImGui_ImplSDL2_ProcessEvent(&event);
 
     if (event.type == SDL_QUIT) {
       quit = true;
+    }
+    if (event.type == SDL_WINDOWEVENT &&
+        event.window.event == SDL_WINDOWEVENT_FOCUS_LOST) {
+      if (turbo_hold_active_) {
+        turbo_hold_active_ = false;
+        apply_turbo_speed();
+      }
     }
     if (pending_bind_index_ >= 0 && event.type == SDL_KEYDOWN &&
         !event.key.repeat) {
@@ -645,6 +657,25 @@ void App::process_events(bool &quit) {
         status_message_ = std::string("Bound ") +
                           kKeyboardBindEntries[bind_index].label + " to " +
                           SDL_GetScancodeName(scancode);
+      }
+      continue;
+    }
+    if (event.type == SDL_KEYDOWN && !event.key.repeat &&
+        event.key.keysym.sym == SDLK_BACKSPACE) {
+      const u16 mods = static_cast<u16>(event.key.keysym.mod);
+      const bool ctrl = (mods & KMOD_CTRL) != 0;
+      const bool alt = (mods & KMOD_ALT) != 0;
+      const bool gui = (mods & KMOD_GUI) != 0;
+      if (!ctrl && !alt && !gui) {
+        turbo_hold_active_ = true;
+        apply_turbo_speed();
+        continue;
+      }
+    }
+    if (event.type == SDL_KEYUP && event.key.keysym.sym == SDLK_BACKSPACE) {
+      if (turbo_hold_active_) {
+        turbo_hold_active_ = false;
+        apply_turbo_speed();
       }
       continue;
     }
@@ -692,7 +723,7 @@ void App::process_events(bool &quit) {
         show_settings_ = !show_settings_;
       } else if (ctrl && key == SDLK_F5) {
         if (system_->bios_loaded() && !emu_runner_.is_running() &&
-            (system_->disc_loaded() || !game_cue_path_.empty())) {
+            (system_->disc_loaded() || !game_bin_path_.empty())) {
           boot_disc_from_ui();
         }
       } else if (no_mod && key == SDLK_F5) {
@@ -910,7 +941,7 @@ void App::menu_bar() {
     if (ImGui::BeginMenu("Emulation")) {
       if (ImGui::MenuItem("Boot Disc", "Ctrl+F5", false,
                           bios_loaded && !emu_running &&
-                              (disc_loaded || !game_cue_path_.empty()))) {
+                              (disc_loaded || !game_bin_path_.empty()))) {
         if (!boot_disc_from_ui()) {
           ImGui::EndMenu();
           ImGui::EndMainMenuBar();
@@ -1093,7 +1124,7 @@ void App::panel_emulator_screen() {
     if (!bios_loaded) {
       ImGui::BeginDisabled();
     }
-    const bool has_selected_game = !game_cue_path_.empty() || system_->disc_loaded();
+    const bool has_selected_game = !game_bin_path_.empty() || system_->disc_loaded();
     const char *start_button_label =
         has_selected_game ? "Boot Selected Game" : "Start Emulation";
     const ImVec2 start_button_size(150.0f, 0.0f);
@@ -1154,7 +1185,7 @@ void App::panel_emulator_screen() {
       ImGui::TextWrapped("Set a ROM directory to scan and list games here.");
     } else if (game_library_.empty()) {
       ImGui::TextColored(ImVec4(0.85f, 0.75f, 0.45f, 1.0f),
-                         "No playable .cue/.bin pairs found.");
+                         "No playable disc images found.");
     } else {
       for (size_t i = 0; i < game_library_.size(); ++i) {
         const auto &entry = game_library_[i];
@@ -1358,6 +1389,17 @@ void App::panel_settings() {
         ImGui::Separator();
         ImGui::Text("Performance");
         ImGui::Text("Emulation pacing: fixed 60 Hz");
+        const char *turbo_modes[] = {"200%", "400%"};
+        int turbo_mode_index = (config_turbo_speed_percent_ >= 400) ? 1 : 0;
+        if (ImGui::Combo("Turbo Speed (Hold Backspace)", &turbo_mode_index,
+                         turbo_modes, IM_ARRAYSIZE(turbo_modes))) {
+          config_turbo_speed_percent_ = (turbo_mode_index == 1) ? 400 : 200;
+          if (turbo_hold_active_) {
+            emu_runner_.set_speed(static_cast<double>(config_turbo_speed_percent_) /
+                                  100.0);
+          }
+          save_persistent_config();
+        }
         if (ImGui::Checkbox("VSync Playback", &config_vsync_)) {
           SDL_GL_SetSwapInterval(config_vsync_ ? 1 : 0);
         }
@@ -1857,7 +1899,7 @@ void App::panel_performance() {
 }
 
 void App::panel_grim_reaper() {
-  ImGui::SetNextWindowSize(ImVec2(540, 330), ImGuiCond_FirstUseEver);
+  ImGui::SetNextWindowSize(ImVec2(640, 460), ImGuiCond_FirstUseEver);
   if (!ImGui::Begin("Grim Reaper", &show_grim_reaper_)) {
     ImGui::End();
     return;
@@ -1865,6 +1907,8 @@ void App::panel_grim_reaper() {
 
   ImGui::TextColored(ImVec4(0.9f, 0.4f, 0.4f, 1.0f),
                      "Experimental BIOS corruption. Original BIOS is never modified.");
+  if (ImGui::BeginTabBar("GrimReaperTabs")) {
+    if (ImGui::BeginTabItem("Single BIOS")) {
 
   grim_reaper_area_index_ =
       std::max(0, std::min(kGrimReaperRangeCount - 1, grim_reaper_area_index_));
@@ -2003,6 +2047,10 @@ void App::panel_grim_reaper() {
     show_corruption_presets_ = true;
   }
 
+      ImGui::EndTabItem();
+    }
+
+    if (ImGui::BeginTabItem("RAM Reaper")) {
   ImGui::Separator();
   ImGui::Text("RAM Reaper");
   ImGui::TextColored(
@@ -2059,6 +2107,10 @@ void App::panel_grim_reaper() {
     show_corruption_presets_ = true;
   }
 
+      ImGui::EndTabItem();
+    }
+
+    if (ImGui::BeginTabItem("GPU Reaper")) {
   ImGui::Separator();
   ImGui::Text("GPU Reaper");
   ImGui::TextColored(
@@ -2103,6 +2155,10 @@ void App::panel_grim_reaper() {
     show_corruption_presets_ = true;
   }
 
+      ImGui::EndTabItem();
+    }
+
+    if (ImGui::BeginTabItem("Sound Reaper")) {
   ImGui::Separator();
   ImGui::Text("Sound Reaper");
   ImGui::TextColored(
@@ -2147,9 +2203,10 @@ void App::panel_grim_reaper() {
     refresh_corruption_preset_list();
     show_corruption_presets_ = true;
   }
+      ImGui::EndTabItem();
+    }
 
-
-
+    if (ImGui::BeginTabItem("Batch BIOS")) {
   ImGui::Separator();
   ImGui::Text("Batch Corruption");
   ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f),
@@ -2228,6 +2285,10 @@ void App::panel_grim_reaper() {
   }
   if (!system_->bios_loaded() || bios_path_.empty() || !batch_has_any_selection) {
     ImGui::EndDisabled();
+  }
+      ImGui::EndTabItem();
+    }
+    ImGui::EndTabBar();
   }
 
   if (!grim_reaper_last_output_path_.empty()) {
@@ -2768,11 +2829,8 @@ bool App::resolve_disc_paths(const std::string &selected_path,
       }
     }
 
-    if (cue_path.empty()) {
-      error =
-          "Selected BIN requires matching CUE file in the same directory.";
-      return false;
-    }
+    // CUE is optional. If missing, CDROM loader falls back to
+    // TRACK 01 MODE2/2352 with INDEX 01 00:00:00.
     return true;
   }
 
@@ -2782,22 +2840,23 @@ bool App::resolve_disc_paths(const std::string &selected_path,
 
 bool App::load_disc_from_ui(const std::string &bin_path,
                             const std::string &cue_path) {
+  const std::string disc_label =
+      cue_path.empty()
+          ? std::filesystem::path(bin_path).filename().string()
+          : std::filesystem::path(cue_path).filename().string();
+
   const bool hot_insert = has_started_emulation_;
   if (hot_insert) {
     game_bin_path_ = bin_path;
     game_cue_path_ = cue_path;
     emu_runner_.request_live_disc_insert(bin_path, cue_path);
-    status_message_ = "Disc inserted: " +
-                      std::filesystem::path(cue_path).filename().string() +
-                      " (live)";
+    status_message_ = "Disc inserted: " + disc_label + " (live)";
     return true;
   }
 
   game_bin_path_ = bin_path;
   game_cue_path_ = cue_path;
-  status_message_ = "Disc selected: " +
-                    std::filesystem::path(cue_path).filename().string() +
-                    " (Emulation > Boot Disc)";
+  status_message_ = "Disc selected: " + disc_label + " (Emulation > Boot Disc)";
   return true;
 }
 
@@ -2829,7 +2888,7 @@ bool App::boot_disc_from_ui() {
     return false;
   }
 
-  if (!game_cue_path_.empty()) {
+  if (!game_bin_path_.empty()) {
     // Always (re)attach the currently selected game so changing selection
     // after a prior boot takes effect.
     if (!system_->load_game(game_bin_path_, game_cue_path_)) {
@@ -3317,7 +3376,6 @@ void App::refresh_game_library() {
   }
 
   std::vector<std::filesystem::path> cue_paths;
-  std::vector<std::filesystem::path> bin_paths;
   std::filesystem::recursive_directory_iterator it(
       rom_directory_, std::filesystem::directory_options::skip_permission_denied, ec);
   std::filesystem::recursive_directory_iterator end;
@@ -3342,22 +3400,8 @@ void App::refresh_game_library() {
 
     if (ext == ".cue") {
       cue_paths.push_back(file);
-    } else if (ext == ".bin") {
-      bin_paths.push_back(file);
     }
   }
-
-  auto key_for_path = [](const std::filesystem::path &p) {
-    std::string key =
-        (p.parent_path() / p.stem()).lexically_normal().string();
-    std::transform(key.begin(), key.end(), key.begin(), [](unsigned char c) {
-      return static_cast<char>(std::tolower(c));
-    });
-    return key;
-  };
-
-  std::unordered_set<std::string> listed_keys;
-  listed_keys.reserve(cue_paths.size() + bin_paths.size());
 
   for (const auto &cue : cue_paths) {
     std::string bin;
@@ -3371,27 +3415,6 @@ void App::refresh_game_library() {
     entry.bin_path = bin;
     entry.cue_path = cue_path;
     game_library_.push_back(std::move(entry));
-    listed_keys.insert(key_for_path(cue));
-  }
-
-  for (const auto &bin : bin_paths) {
-    const std::string key = key_for_path(bin);
-    if (listed_keys.find(key) != listed_keys.end()) {
-      continue;
-    }
-    std::string bin_path;
-    std::string cue_path;
-    std::string error;
-    if (!resolve_disc_paths(bin.string(), bin_path, cue_path, error) ||
-        bin_path.empty() || cue_path.empty()) {
-      continue;
-    }
-    GameLibraryEntry entry{};
-    entry.title = bin.stem().string();
-    entry.bin_path = bin_path;
-    entry.cue_path = cue_path;
-    game_library_.push_back(std::move(entry));
-    listed_keys.insert(key);
   }
 
   std::sort(game_library_.begin(), game_library_.end(),
@@ -3454,6 +3477,10 @@ void App::load_persistent_config() {
     } else if (key == "low_spec_mode") {
       config_low_spec_mode_ = parse_bool(value, config_low_spec_mode_);
       g_low_spec_mode = config_low_spec_mode_;
+    } else if (key == "turbo_speed_percent") {
+      const int parsed = static_cast<int>(std::strtol(value.c_str(), nullptr, 10));
+      config_turbo_speed_percent_ =
+          (parsed >= 400) ? 400 : ((parsed >= 200) ? 200 : 200);
     } else if (key == "gpu_fast_mode") {
       g_gpu_fast_mode = parse_bool(value, g_gpu_fast_mode);
     } else if (key.rfind("bind_", 0) == 0) {
@@ -3511,6 +3538,7 @@ void App::save_persistent_config() const {
   out << "rom_directory=" << rom_directory_ << "\n";
   out << "vsync=" << (config_vsync_ ? 1 : 0) << "\n";
   out << "low_spec_mode=" << (config_low_spec_mode_ ? 1 : 0) << "\n";
+  out << "turbo_speed_percent=" << config_turbo_speed_percent_ << "\n";
   out << "gpu_fast_mode=" << (g_gpu_fast_mode ? 1 : 0) << "\n";
   for (const auto &entry : kKeyboardBindEntries) {
     out << entry.config_key << "="
