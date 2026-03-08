@@ -72,6 +72,11 @@ inline bool g_trace_spu = false;
 inline bool g_trace_irq = false;
 inline bool g_trace_timer = false;
 inline bool g_trace_sio = false;
+// Expensive CPU sanity diagnostics (helper-range probes, suspicious RA/SP checks).
+// Keep disabled for normal/turbo gameplay performance.
+inline bool g_cpu_deep_diagnostics = false;
+// Expensive RAM watchpoint diagnostics around BIOS boot streams.
+inline bool g_ram_watch_diagnostics = false;
 inline u32 g_trace_burst_cpu = 128;
 inline u32 g_trace_stride_cpu = 32768;
 inline u32 g_trace_burst_bus = 256;
@@ -99,6 +104,10 @@ inline bool g_low_spec_mode = false;
 inline bool g_gpu_fast_mode = false;
 inline bool g_spu_advanced_sound_status = false;
 inline u32 g_spu_desired_samples = 64u;
+inline bool g_spu_enable_audio_queue = true;
+inline bool g_spu_force_audio_queue = false;
+inline u32 g_spu_output_latency_ms = 90u;
+inline u32 g_spu_xa_latency_ms = 120u;
 inline bool g_profile_detailed_timing =
 #if defined(NDEBUG)
     false;
