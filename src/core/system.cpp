@@ -163,6 +163,9 @@ void System::note_sio_io(u32 phys_addr) {
 }
 
 void System::maybe_log_ram_watch_write(u32 phys_addr, u32 value, u32 size_bytes) {
+    if (!g_ram_watch_diagnostics) {
+        return;
+    }
     static u32 watch_log_count = 0;
     static u32 last_code_dump_pc = 0xFFFFFFFFu;
     const u32 ram_off = phys_addr & 0x001FFFFFu;
@@ -218,6 +221,12 @@ void System::maybe_log_ram_watch_write(u32 phys_addr, u32 value, u32 size_bytes)
 void System::sync_spu_to_cpu() {
     const u64 target_cycle = cpu_.cycle_count();
     if (target_cycle <= spu_synced_cpu_cycle_) {
+        spu_.mark_synced_to_cpu(spu_synced_cpu_cycle_);
+        return;
+    }
+
+    if (spu_skip_sync_for_turbo_) {
+        spu_synced_cpu_cycle_ = target_cycle;
         spu_.mark_synced_to_cpu(spu_synced_cpu_cycle_);
         return;
     }
@@ -337,9 +346,10 @@ double System::target_fps() const {
     return effective_interlaced ? kNtscInterlacedFps : kNtscProgressiveFps;
 }
 
-void System::run_frame(bool sample_display_diag) {
+void System::run_frame(bool sample_display_diag, bool skip_spu_for_turbo) {
     auto start_total = std::chrono::high_resolution_clock::now();
     reset_profiling_stats();
+    spu_skip_sync_for_turbo_ = skip_spu_for_turbo;
     const bool profile_detailed = g_profile_detailed_timing;
     apply_ram_reaper_for_frame();
     apply_gpu_reaper_for_frame();
@@ -358,6 +368,7 @@ void System::run_frame(bool sample_display_diag) {
     const u32 extra_cycles_per_frame = cycles_per_frame % scanlines_per_frame;
     static constexpr u32 kCpuInstructionSlice = 32;
     static constexpr u32 kDmaTickStride = 16;
+    static constexpr u32 kSpuSyncScanlineStride = 4;
     u32 extra_cycle_error = 0;
     u32 dma_tick_budget = 0;
 
@@ -433,7 +444,12 @@ void System::run_frame(bool sample_display_diag) {
         }
 
         cdrom_.tick(cycles_this_scanline);
-        sync_spu_to_cpu();
+        const bool sync_spu_now =
+            (((scanline + 1u) % kSpuSyncScanlineStride) == 0u) ||
+            ((scanline + 1u) == scanlines_per_frame);
+        if (sync_spu_now) {
+            sync_spu_to_cpu();
+        }
         if (!boot_diag_.saw_pad_cmd42 && sio_.saw_pad_cmd42()) {
             boot_diag_.saw_pad_cmd42 = true;
         }
@@ -521,6 +537,7 @@ void System::run_frame(bool sample_display_diag) {
     set_total_time(
         std::chrono::duration<double, std::milli>(end_total - start_total)
         .count());
+    spu_skip_sync_for_turbo_ = false;
 }
 
 void System::update_display_diag(const DisplaySampleInfo& display_sample) {
@@ -1272,7 +1289,9 @@ void System::write8(u32 addr, u8 val) {
     }
 
     if (phys < kMainRamMirrorWindow) {
-        maybe_log_ram_watch_write(phys, val, 1);
+        if (g_ram_watch_diagnostics) {
+            maybe_log_ram_watch_write(phys, val, 1);
+        }
         ram_.write8(phys & 0x1FFFFF, val);
         return;
     }
@@ -1350,7 +1369,9 @@ void System::write16(u32 addr, u16 val) {
     }
 
     if (phys < kMainRamMirrorWindow) {
-        maybe_log_ram_watch_write(phys, val, 2);
+        if (g_ram_watch_diagnostics) {
+            maybe_log_ram_watch_write(phys, val, 2);
+        }
         ram_.write16(phys & 0x1FFFFF, val);
         return;
     }
@@ -1433,7 +1454,9 @@ void System::write32(u32 addr, u32 val) {
     }
 
     if (phys < kMainRamMirrorWindow) {
-        maybe_log_ram_watch_write(phys, val, 4);
+        if (g_ram_watch_diagnostics) {
+            maybe_log_ram_watch_write(phys, val, 4);
+        }
         ram_.write32(phys & 0x1FFFFF, val);
         return;
     }
