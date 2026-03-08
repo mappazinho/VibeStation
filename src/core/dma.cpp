@@ -45,11 +45,16 @@ void DmaController::reset_mdec_out_reorder_state() {
 u32 DmaController::map_mdec_out_word_addr(u32 linear_addr, s32 step, u8 block_id,
                                           u8 depth) {
   const u32 addr = linear_addr & 0x001FFFFCu;
-  // DMA1 block re-ordering is only needed for 15bpp colored output.
-  if (step != 4 || depth != 3u || block_id >= 4u) {
+  // DMA1 block re-ordering is needed for colored macroblocks in both:
+  // depth=2 (24bpp, 8x8 block = 48 words) and depth=3 (15bpp, 32 words).
+  if (step != 4 || block_id >= 4u || (depth != 2u && depth != 3u)) {
     reset_mdec_out_reorder_state();
     return addr;
   }
+
+  const u32 words_per_row_in_block = (depth == 2u) ? 6u : 4u;
+  const u32 words_per_block = words_per_row_in_block * 8u;
+  const u32 macroblock_row_words = words_per_row_in_block * 2u;
 
   if (!mdec_out_reorder_active_) {
     mdec_out_reorder_active_ = true;
@@ -66,15 +71,16 @@ u32 DmaController::map_mdec_out_word_addr(u32 linear_addr, s32 step, u8 block_id
   }
 
   const u32 word_index = mdec_out_word_index_in_block_++;
-  if (mdec_out_word_index_in_block_ >= 32u) {
+  if (mdec_out_word_index_in_block_ >= words_per_block) {
     mdec_out_word_index_in_block_ = 0;
   }
 
-  const u32 row = (word_index >> 2);
-  const u32 col = (word_index & 0x3u);
-  const u32 block_x_words = (block_id & 0x1u) ? 4u : 0u;
+  const u32 row = word_index / words_per_row_in_block;
+  const u32 col = word_index % words_per_row_in_block;
+  const u32 block_x_words = (block_id & 0x1u) ? words_per_row_in_block : 0u;
   const u32 block_y_rows = (block_id >= 2u) ? 8u : 0u;
-  const u32 offset_words = (block_y_rows + row) * 8u + block_x_words + col;
+  const u32 offset_words =
+      (block_y_rows + row) * macroblock_row_words + block_x_words + col;
   return (mdec_out_mb_base_addr_ + offset_words * 4u) & 0x001FFFFCu;
 }
 

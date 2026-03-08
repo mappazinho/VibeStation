@@ -245,21 +245,31 @@ void Mdec::execute_command() {
 }
 
 void Mdec::execute_set_quant_table() {
-  size_t byte_index = 0;
-  while (!in_halfword_fifo_.empty() && byte_index < 64) {
-    u16 hw = in_halfword_fifo_.front();
+  const bool has_chroma_table = (command_word_ & 0x1u) != 0;
+  const size_t target_bytes = has_chroma_table ? 128u : 64u;
+
+  std::array<u8, 128> bytes{};
+  size_t byte_count = 0;
+  while (!in_halfword_fifo_.empty() && byte_count < target_bytes) {
+    const u16 hw = in_halfword_fifo_.front();
     in_halfword_fifo_.pop_front();
-    if (byte_index < 32) {
-        quant_luma_[byte_index * 2] = static_cast<u8>(hw & 0xFF);
-        quant_luma_[byte_index * 2 + 1] = static_cast<u8>(hw >> 8);
-    } else {
-        size_t c_idx = (byte_index - 16) * 2; // This logic is wrong for 32 words
+    bytes[byte_count++] = static_cast<u8>(hw & 0xFFu);
+    if (byte_count < target_bytes) {
+      bytes[byte_count++] = static_cast<u8>((hw >> 8) & 0xFFu);
     }
-    byte_index++;
   }
-  // Re-implementing correctly:
-  // Command 2 words are consumed. 
-  // Let's just use the FIFO correctly.
+
+  const size_t luma_bytes = std::min<size_t>(64u, byte_count);
+  for (size_t i = 0; i < luma_bytes; ++i) {
+    quant_luma_[i] = bytes[i];
+  }
+
+  if (has_chroma_table && byte_count > 64u) {
+    const size_t chroma_bytes = std::min<size_t>(64u, byte_count - 64u);
+    for (size_t i = 0; i < chroma_bytes; ++i) {
+      quant_chroma_[i] = bytes[64u + i];
+    }
+  }
 }
 
 void Mdec::execute_set_scale_table() {
