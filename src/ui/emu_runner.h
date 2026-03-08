@@ -39,6 +39,9 @@ public:
   void set_running(bool running);
   void pause_and_wait_idle();
   bool is_running() const { return running_.load(std::memory_order_acquire); }
+  void set_vram_debug_capture_enabled(bool enabled) {
+    capture_vram_debug_.store(enabled, std::memory_order_release);
+  }
 
   void set_speed(double speed);
   double speed() const { return speed_.load(std::memory_order_acquire); }
@@ -47,6 +50,7 @@ public:
   void request_live_disc_insert(const std::string &bin_path,
                                 const std::string &cue_path);
   bool consume_latest_frame(FrameSnapshot &out_frame);
+  bool consume_latest_vram_snapshot(std::vector<u16> &out_vram);
   RuntimeSnapshot runtime_snapshot() const;
 
 private:
@@ -82,6 +86,10 @@ private:
 
   mutable std::mutex snapshot_mutex_;
   RuntimeSnapshot latest_snapshot_{};
+  std::atomic<bool> capture_vram_debug_{false};
+  mutable std::mutex vram_mutex_;
+  std::vector<u16> latest_vram_snapshot_{};
+  bool has_latest_vram_snapshot_ = false;
 
   mutable std::mutex disc_request_mutex_;
   bool has_pending_disc_request_ = false;

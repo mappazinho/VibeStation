@@ -148,6 +148,14 @@ namespace {
         return fallback;
     }
 
+    int normalize_turbo_speed_percent(int percent) {
+        return (percent >= 400) ? 400 : 200;
+    }
+
+    double turbo_speed_multiplier_from_percent(int percent) {
+        return static_cast<double>(normalize_turbo_speed_percent(percent)) / 100.0;
+    }
+
     bool parse_u64_value(const std::string& value, u64& out) {
         char* end_ptr = nullptr;
         const unsigned long long parsed = std::strtoull(value.c_str(), &end_ptr, 10);
@@ -639,6 +647,7 @@ void App::run() {
             renderer_->upload_frame(frame.rgba, frame.width, frame.height);
         }
         runtime_snapshot_ = emu_runner_.runtime_snapshot();
+        emu_runner_.set_vram_debug_capture_enabled(show_vram_);
 
         u32 now_ms = SDL_GetTicks();
         if (show_vram_ ||
@@ -734,7 +743,7 @@ void App::run() {
 void App::process_events(bool& quit) {
     auto apply_turbo_speed = [this]() {
         const double turbo_speed =
-            static_cast<double>(std::max(100, config_turbo_speed_percent_)) / 100.0;
+            turbo_speed_multiplier_from_percent(config_turbo_speed_percent_);
         emu_runner_.set_speed(turbo_hold_active_ ? turbo_speed : 1.0);
         };
 
@@ -1185,10 +1194,12 @@ void App::panel_emulator_screen() {
 
         // Show a centered welcome message
         ImVec2 center = ImGui::GetMainViewport()->GetCenter();
-        ImGui::SetCursorPos(ImVec2(center.x - 200, center.y - 80));
+        const char* logo_text = "VibeStation";
         ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.5f, 0.4f, 0.8f, 1.0f));
         ImGui::SetWindowFontScale(2.0f);
-        ImGui::Text("VibeStation");
+        const ImVec2 logo_size = ImGui::CalcTextSize(logo_text);
+        ImGui::SetCursorPos(ImVec2(center.x - (logo_size.x * 0.5f), center.y - 80));
+        ImGui::Text("%s", logo_text);
         ImGui::SetWindowFontScale(1.0f);
         ImGui::PopStyleColor();
 
@@ -1505,6 +1516,17 @@ void App::panel_settings() {
                     g_spu_desired_samples = static_cast<u32>(desired_samples);
                 }
                 ImGui::TextDisabled("Applied on next audio device init.");
+                int output_latency_ms = static_cast<int>(g_spu_output_latency_ms);
+                if (ImGui::InputInt("Output Latency (ms)", &output_latency_ms, 5, 20)) {
+                    output_latency_ms = std::max(16, std::min(1000, output_latency_ms));
+                    g_spu_output_latency_ms = static_cast<u32>(output_latency_ms);
+                }
+                int xa_latency_ms = static_cast<int>(g_spu_xa_latency_ms);
+                if (ImGui::InputInt("XA Latency (ms)", &xa_latency_ms, 5, 20)) {
+                    xa_latency_ms = std::max(0, std::min(2000, xa_latency_ms));
+                    g_spu_xa_latency_ms = static_cast<u32>(xa_latency_ms);
+                }
+                ImGui::Checkbox("Enable Audio Queue", &g_spu_enable_audio_queue);
                 ImGui::Checkbox("Advanced Sound Status Logging", &g_spu_advanced_sound_status);
                 ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f),
                     "Enables per-sample SPU diagnostics. Voice level meters stay live.");
@@ -1529,8 +1551,8 @@ void App::panel_settings() {
                     turbo_modes, IM_ARRAYSIZE(turbo_modes))) {
                     config_turbo_speed_percent_ = (turbo_mode_index == 1) ? 400 : 200;
                     if (turbo_hold_active_) {
-                        emu_runner_.set_speed(static_cast<double>(config_turbo_speed_percent_) /
-                            100.0);
+                        emu_runner_.set_speed(
+                            turbo_speed_multiplier_from_percent(config_turbo_speed_percent_));
                     }
                     save_persistent_config();
                 }
@@ -2904,13 +2926,29 @@ void App::update_vram_debug_texture() {
     if (vram_debug_texture_ == 0) {
         glGenTextures(1, &vram_debug_texture_);
         glBindTexture(GL_TEXTURE_2D, vram_debug_texture_);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        // VRAM debug is usually displayed downscaled; linear filtering avoids
+        // harsh temporal aliasing that can look like z-fighting/flicker.
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
     }
 
-    const u16* vram = system_->gpu().vram();
+    std::vector<u16> vram_snapshot;
+    const u16* vram = nullptr;
+    const size_t pixel_count =
+        static_cast<size_t>(psx::VRAM_WIDTH) * psx::VRAM_HEIGHT;
+    if (emu_runner_.consume_latest_vram_snapshot(vram_snapshot) &&
+        vram_snapshot.size() == pixel_count) {
+        vram = vram_snapshot.data();
+    }
+    else if (!emu_runner_.is_running()) {
+        vram = system_->gpu().vram();
+    }
+    else {
+        return;
+    }
+
     std::vector<u32> rgba(psx::VRAM_WIDTH * psx::VRAM_HEIGHT);
     for (size_t i = 0; i < rgba.size(); ++i) {
         const u16 p = vram[i];
@@ -2938,7 +2976,9 @@ void App::panel_vram() {
         const float tex_w = static_cast<float>(psx::VRAM_WIDTH);
         const float tex_h = static_cast<float>(psx::VRAM_HEIGHT);
         const float scale = std::min(avail.x / tex_w, avail.y / tex_h);
-        ImVec2 draw_size(tex_w * scale, tex_h * scale);
+        ImVec2 draw_size(std::floor(tex_w * scale), std::floor(tex_h * scale));
+        draw_size.x = std::max(1.0f, draw_size.x);
+        draw_size.y = std::max(1.0f, draw_size.y);
 
         if (vram_debug_texture_ != 0) {
             ImGui::Image((ImTextureID)(intptr_t)vram_debug_texture_, draw_size,
@@ -3576,7 +3616,7 @@ void App::refresh_game_library() {
         std::string bin;
         std::string cue_path;
         std::string error;
-        if (!resolve_disc_paths(cue.string(), bin, cue_path, error) || bin.empty()) {
+        if (!resolve_disc_paths(cue.string(), bin, cue_path, error)) {
             continue;
         }
         GameLibraryEntry entry{};
@@ -3652,8 +3692,7 @@ void App::load_persistent_config() {
         }
         else if (key == "turbo_speed_percent") {
             const int parsed = static_cast<int>(std::strtol(value.c_str(), nullptr, 10));
-            config_turbo_speed_percent_ =
-                (parsed >= 400) ? 400 : ((parsed >= 200) ? 200 : 200);
+            config_turbo_speed_percent_ = normalize_turbo_speed_percent(parsed);
         }
         else if (key == "gpu_fast_mode") {
             g_gpu_fast_mode = parse_bool(value, g_gpu_fast_mode);
@@ -3677,6 +3716,19 @@ void App::load_persistent_config() {
             const unsigned long parsed = std::strtoul(value.c_str(), nullptr, 10);
             const u32 clamped = static_cast<u32>(std::max(64ul, std::min(65535ul, parsed)));
             g_spu_desired_samples = clamped;
+        }
+        else if (key == "spu_output_latency_ms") {
+            const unsigned long parsed = std::strtoul(value.c_str(), nullptr, 10);
+            const u32 clamped = static_cast<u32>(std::max(16ul, std::min(1000ul, parsed)));
+            g_spu_output_latency_ms = clamped;
+        }
+        else if (key == "spu_xa_latency_ms") {
+            const unsigned long parsed = std::strtoul(value.c_str(), nullptr, 10);
+            const u32 clamped = static_cast<u32>(std::min(2000ul, parsed));
+            g_spu_xa_latency_ms = clamped;
+        }
+        else if (key == "spu_enable_audio_queue") {
+            g_spu_enable_audio_queue = parse_bool(value, g_spu_enable_audio_queue);
         }
         else if (key == "advanced_sound_status_logging") {
             g_spu_advanced_sound_status =
@@ -3729,6 +3781,9 @@ void App::save_persistent_config() const {
             << static_cast<int>(input_->key_for_button(entry.button)) << "\n";
     }
     out << "spu_desired_samples=" << static_cast<unsigned>(g_spu_desired_samples) << "\n";
+    out << "spu_output_latency_ms=" << static_cast<unsigned>(g_spu_output_latency_ms) << "\n";
+    out << "spu_xa_latency_ms=" << static_cast<unsigned>(g_spu_xa_latency_ms) << "\n";
+    out << "spu_enable_audio_queue=" << (g_spu_enable_audio_queue ? 1 : 0) << "\n";
     out << "advanced_sound_status_logging=" << (g_spu_advanced_sound_status ? 1 : 0) << "\n";
     out << "detailed_profiling=" << (g_profile_detailed_timing ? 1 : 0) << "\n";
     out << "experimental_bios_size_mode=" << (g_experimental_bios_size_mode ? 1 : 0) << "\n";

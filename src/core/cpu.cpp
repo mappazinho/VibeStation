@@ -2,6 +2,8 @@
 #include "system.h"
 
 namespace {
+inline bool cpu_diag_enabled() { return g_cpu_deep_diagnostics; }
+
 void log_dma_context(System *sys, u32 pc, u32 instr, const u32 *gpr) {
   static u32 last_pc = 0xFFFFFFFFu;
   static u32 last_instr = 0xFFFFFFFFu;
@@ -313,7 +315,7 @@ void Cpu::set_reg(u32 index, u32 value) {
     return;
   }
 
-  if (index == 29) {
+  if (cpu_diag_enabled() && index == 29) {
     const bool entered_high_mirror =
         (value >= 0x807F0000u && value < 0x80800000u) &&
         (gpr_[29] < 0x807F0000u || gpr_[29] >= 0x80800000u);
@@ -329,7 +331,7 @@ void Cpu::set_reg(u32 index, u32 value) {
     }
   }
 
-  if (index == 31) {
+  if (cpu_diag_enabled() && index == 31) {
     const bool suspicious_ra =
         (value == 0u) ||
         (!is_plausible_exec_addr(value) && value != next_pc_);
@@ -405,7 +407,7 @@ void Cpu::raise_cop_unusable(u32 cop_index) {
 }
 
 void Cpu::apply_pending_load() {
-  if (load_.reg == 31) {
+  if (cpu_diag_enabled() && load_.reg == 31) {
     const bool suspicious_ra =
         (load_.value == 0u) || !is_plausible_exec_addr(load_.value);
     if (suspicious_ra) {
@@ -596,7 +598,8 @@ u32 Cpu::step() {
     return fault_cycles;
   }
 
-  if (current_pc_ >= 0x80015298u && current_pc_ <= 0x800152B8u) {
+  if (cpu_diag_enabled() &&
+      current_pc_ >= 0x80015298u && current_pc_ <= 0x800152B8u) {
     static bool logged_low_helper_caller_entry = false;
     if (!logged_low_helper_caller_entry) {
       logged_low_helper_caller_entry = true;
@@ -616,7 +619,8 @@ u32 Cpu::step() {
       log_stack_window(sys_, "CPU: caller frame", gpr_[29]);
     }
   }
-  if (current_pc_ >= 0x8001EC98u && current_pc_ <= 0x8001ECC0u) {
+  if (cpu_diag_enabled() &&
+      current_pc_ >= 0x8001EC98u && current_pc_ <= 0x8001ECC0u) {
     static bool logged_low_helper_chain_entry = false;
     if (!logged_low_helper_chain_entry) {
       logged_low_helper_chain_entry = true;
@@ -636,7 +640,8 @@ u32 Cpu::step() {
       log_stack_window(sys_, "CPU: chain frame", gpr_[29]);
     }
   }
-  if (current_pc_ >= 0x8001ECBCu && current_pc_ <= 0x8001ED10u) {
+  if (cpu_diag_enabled() &&
+      current_pc_ >= 0x8001ECBCu && current_pc_ <= 0x8001ED10u) {
     static bool logged_low_helper_chain_tail = false;
     if (!logged_low_helper_chain_tail) {
       logged_low_helper_chain_tail = true;
@@ -676,7 +681,8 @@ u32 Cpu::step() {
       log_stack_window(sys_, "CPU: chain tail frame", gpr_[29]);
     }
   }
-  if (current_pc_ >= 0x000023D0u && current_pc_ <= 0x00002408u) {
+  if (cpu_diag_enabled() &&
+      current_pc_ >= 0x000023D0u && current_pc_ <= 0x00002408u) {
     static bool logged_low_helper_leadin = false;
     if (!logged_low_helper_leadin) {
       logged_low_helper_leadin = true;
@@ -714,7 +720,8 @@ u32 Cpu::step() {
       log_stack_window(sys_, "CPU: low lead-in frame", gpr_[29]);
     }
   }
-  if (current_pc_ >= 0x00002400u && current_pc_ <= 0x00002424u) {
+  if (cpu_diag_enabled() &&
+      current_pc_ >= 0x00002400u && current_pc_ <= 0x00002424u) {
     static bool logged_low_prologue_entry = false;
     if (!logged_low_prologue_entry) {
       logged_low_prologue_entry = true;
@@ -736,7 +743,8 @@ u32 Cpu::step() {
       log_stack_window(sys_, "CPU: low-helper prologue frame", gpr_[29]);
     }
   }
-  if (current_pc_ >= 0x00002440u && current_pc_ <= 0x00002454u) {
+  if (cpu_diag_enabled() &&
+      current_pc_ >= 0x00002440u && current_pc_ <= 0x00002454u) {
     static bool logged_low_epilogue_entry = false;
     if (!logged_low_epilogue_entry) {
       logged_low_epilogue_entry = true;
@@ -759,7 +767,8 @@ u32 Cpu::step() {
           sys_->read32(0x00002450u));
     }
   }
-  if (current_pc_ >= 0x00002420u && current_pc_ <= 0x00002450u) {
+  if (cpu_diag_enabled() &&
+      current_pc_ >= 0x00002420u && current_pc_ <= 0x00002450u) {
     static bool logged_low_func_call = false;
     const bool came_from_outside =
         !(prev_pc_for_diag >= 0x00002420u && prev_pc_for_diag <= 0x00002450u);
@@ -1114,22 +1123,26 @@ void Cpu::op_srav(u32 i) {
 
 void Cpu::op_jr(u32 i) {
   const u32 target = gpr_[rs(i)];
-  if (!is_plausible_exec_addr(target)) {
-    log_suspicious_jump(sys_, current_pc_, gpr_, target, rs(i));
-  }
-  if (is_low_helper_addr(target)) {
-    log_low_helper_call(sys_, current_pc_, next_pc_, gpr_, target, "jr");
+  if (cpu_diag_enabled()) {
+    if (!is_plausible_exec_addr(target)) {
+      log_suspicious_jump(sys_, current_pc_, gpr_, target, rs(i));
+    }
+    if (is_low_helper_addr(target)) {
+      log_low_helper_call(sys_, current_pc_, next_pc_, gpr_, target, "jr");
+    }
   }
   begin_branch(true, target);
 }
 
 void Cpu::op_jalr(u32 i) {
   const u32 target = gpr_[rs(i)];
-  if (!is_plausible_exec_addr(target)) {
-    log_suspicious_jump(sys_, current_pc_, gpr_, target, rs(i));
-  }
-  if (is_low_helper_addr(target)) {
-    log_low_helper_call(sys_, current_pc_, next_pc_, gpr_, target, "jalr");
+  if (cpu_diag_enabled()) {
+    if (!is_plausible_exec_addr(target)) {
+      log_suspicious_jump(sys_, current_pc_, gpr_, target, rs(i));
+    }
+    if (is_low_helper_addr(target)) {
+      log_low_helper_call(sys_, current_pc_, next_pc_, gpr_, target, "jalr");
+    }
   }
   set_reg(rd(i), next_pc_); // Save return address
   begin_branch(true, target);
@@ -1212,7 +1225,7 @@ void Cpu::op_sync(u32 /*i*/) {
 
 void Cpu::op_j(u32 i) {
   const u32 target = (pc_ & 0xF0000000) | (imm26(i) << 2);
-  if (is_low_helper_addr(target)) {
+  if (cpu_diag_enabled() && is_low_helper_addr(target)) {
     log_low_helper_call(sys_, current_pc_, next_pc_, gpr_, target, "j");
   }
   begin_branch(true, target);
@@ -1220,7 +1233,7 @@ void Cpu::op_j(u32 i) {
 
 void Cpu::op_jal(u32 i) {
   const u32 target = (pc_ & 0xF0000000) | (imm26(i) << 2);
-  if (is_low_helper_addr(target)) {
+  if (cpu_diag_enabled() && is_low_helper_addr(target)) {
     log_low_helper_call(sys_, current_pc_, next_pc_, gpr_, target, "jal");
   }
   set_reg(31, next_pc_); // $ra
@@ -1467,7 +1480,7 @@ void Cpu::op_lw(u32 i) {
   u32 val = load32(addr);
   if (exception_raised_)
     return;
-  if (rt(i) == 31 && !is_plausible_exec_addr(val)) {
+  if (cpu_diag_enabled() && rt(i) == 31 && !is_plausible_exec_addr(val)) {
     log_suspicious_ra_load(sys_, current_pc_, gpr_, addr, val);
   }
   schedule_load(rt(i), val);

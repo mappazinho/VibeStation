@@ -116,55 +116,6 @@ inline s32 adsr_step_base(u8 step, bool decreasing) {
   return decreasing ? ~base : base;
 }
 
-std::vector<s16> resample_stereo_linear(const std::vector<s16> &input,
-                                        u32 in_rate, u32 out_rate) {
-  if (input.empty() || in_rate == 0 || out_rate == 0) {
-    return {};
-  }
-  if ((input.size() & 1u) != 0) {
-    return {};
-  }
-  if (in_rate == out_rate) {
-    return input;
-  }
-
-  const size_t in_frames = input.size() / 2;
-  if (in_frames < 2) {
-    return input;
-  }
-
-  const double ratio =
-      static_cast<double>(in_rate) / static_cast<double>(out_rate);
-  const size_t out_frames = std::max<size_t>(
-      1, static_cast<size_t>(std::llround(static_cast<double>(in_frames) / ratio)));
-
-  std::vector<s16> output(out_frames * 2);
-  for (size_t i = 0; i < out_frames; ++i) {
-    const double src_pos = static_cast<double>(i) * ratio;
-    size_t idx0 = static_cast<size_t>(src_pos);
-    if (idx0 >= in_frames) {
-      idx0 = in_frames - 1;
-    }
-    const size_t idx1 = std::min(idx0 + 1, in_frames - 1);
-    const double frac =
-        std::clamp(src_pos - static_cast<double>(idx0), 0.0, 1.0);
-
-    const s16 l0 = input[idx0 * 2 + 0];
-    const s16 r0 = input[idx0 * 2 + 1];
-    const s16 l1 = input[idx1 * 2 + 0];
-    const s16 r1 = input[idx1 * 2 + 1];
-
-    const s32 l = static_cast<s32>(std::lround(
-        static_cast<double>(l0) + (static_cast<double>(l1 - l0) * frac)));
-    const s32 r = static_cast<s32>(std::lround(
-        static_cast<double>(r0) + (static_cast<double>(r1 - r0) * frac)));
-
-    output[i * 2 + 0] = static_cast<s16>(std::clamp(l, -32768, 32767));
-    output[i * 2 + 1] = static_cast<s16>(std::clamp(r, -32768, 32767));
-  }
-
-  return output;
-}
 } // namespace
 
 void Spu::init(System *sys) {
@@ -201,10 +152,16 @@ void Spu::init(System *sys) {
 
   host_buffer_bytes_ = static_cast<u32>(obtained.samples) *
                        static_cast<u32>(obtained.channels) * sizeof(s16);
+  const u32 latency_ms = std::clamp<u32>(g_spu_output_latency_ms, 16u, 1000u);
+  const u64 bytes_per_second =
+      static_cast<u64>(SAMPLE_RATE) * 2u * static_cast<u64>(sizeof(s16));
+  const u32 latency_bytes =
+      static_cast<u32>((bytes_per_second * latency_ms + 999u) / 1000u);
   host_target_queue_bytes_ =
-      std::max(HOST_TARGET_QUEUE_BYTES_MIN, host_buffer_bytes_ * 2u);
+      std::max({HOST_TARGET_QUEUE_BYTES_MIN, host_buffer_bytes_ * 3u, latency_bytes});
   host_max_queue_bytes_ =
-      std::max(HOST_MAX_QUEUE_BYTES_MIN, host_buffer_bytes_ * 4u);
+      std::max(HOST_MAX_QUEUE_BYTES_MIN,
+               std::max(host_buffer_bytes_ * 8u, host_target_queue_bytes_ * 2u));
   if (host_max_queue_bytes_ <= host_target_queue_bytes_) {
     host_max_queue_bytes_ = host_target_queue_bytes_ + host_buffer_bytes_;
   }
@@ -290,6 +247,7 @@ void Spu::reset() {
   cd_input_read_pos_ = 0;
   cd_last_sample_l_ = 0;
   cd_last_sample_r_ = 0;
+  cd_stream_started_ = false;
   cd_gap_ramp_samples_ = 0;
   cd_gap_active_ = false;
   cd_rejoin_blend_samples_ = 0;
@@ -300,6 +258,11 @@ void Spu::reset() {
   cd_resample_prev_valid_ = false;
   cd_resample_prev_l_ = 0;
   cd_resample_prev_r_ = 0;
+  turbo_resample_src_pos_ = 1.0;
+  turbo_resample_in_rate_ = SAMPLE_RATE;
+  turbo_resample_prev_valid_ = false;
+  turbo_resample_prev_l_ = 0;
+  turbo_resample_prev_r_ = 0;
 
   last_kon_sample_.fill(0);
   has_last_kon_.fill(false);
@@ -1563,11 +1526,94 @@ void Spu::queue_host_audio(const std::vector<s16> &samples) {
     const u32 in_rate =
         static_cast<u32>(std::clamp<int>(static_cast<int>(std::lround(scaled_rate)),
                                          SAMPLE_RATE, SAMPLE_RATE * 4));
-    turbo_adjusted_samples =
-        resample_stereo_linear(samples, in_rate, static_cast<u32>(SAMPLE_RATE));
+    const size_t in_frames = samples.size() / 2;
+    if (in_frames > 0) {
+      if (turbo_resample_in_rate_ != in_rate) {
+        turbo_resample_in_rate_ = in_rate;
+        turbo_resample_src_pos_ = 1.0;
+        turbo_resample_prev_valid_ = false;
+      }
+
+      if (!turbo_resample_prev_valid_) {
+        turbo_resample_prev_l_ = samples[0];
+        turbo_resample_prev_r_ = samples[1];
+        turbo_resample_prev_valid_ = true;
+        turbo_resample_src_pos_ = std::max(0.0, turbo_resample_src_pos_);
+      }
+
+      const double ratio =
+          static_cast<double>(in_rate) / static_cast<double>(SAMPLE_RATE);
+      const bool ratio_is_integer = (in_rate % SAMPLE_RATE) == 0u;
+      const u32 ratio_step = ratio_is_integer ? (in_rate / SAMPLE_RATE) : 0u;
+      auto read_frame = [&](int idx, s16 &l, s16 &r) {
+        if (idx <= 0) {
+          l = turbo_resample_prev_l_;
+          r = turbo_resample_prev_r_;
+          return;
+        }
+        const size_t frame = static_cast<size_t>(idx - 1);
+        if (frame >= in_frames) {
+          l = samples[(in_frames - 1) * 2 + 0];
+          r = samples[(in_frames - 1) * 2 + 1];
+          return;
+        }
+        l = samples[frame * 2 + 0];
+        r = samples[frame * 2 + 1];
+      };
+
+      double src_pos = turbo_resample_src_pos_;
+      turbo_adjusted_samples.reserve(samples.size());
+      const bool can_use_fast_step =
+          ratio_is_integer && (ratio_step >= 2u) && (ratio_step <= 4u) &&
+          (std::fabs(src_pos - std::round(src_pos)) < 1e-9);
+      if (can_use_fast_step) {
+        while (src_pos < static_cast<double>(in_frames)) {
+          s16 l = 0;
+          s16 r = 0;
+          read_frame(static_cast<int>(src_pos), l, r);
+          turbo_adjusted_samples.push_back(l);
+          turbo_adjusted_samples.push_back(r);
+          src_pos += static_cast<double>(ratio_step);
+        }
+      } else {
+        while (src_pos < static_cast<double>(in_frames)) {
+          const int idx0 = static_cast<int>(std::floor(src_pos));
+          const int idx1 = idx0 + 1;
+          const double frac =
+              std::clamp(src_pos - static_cast<double>(idx0), 0.0, 1.0);
+          s16 l0 = 0;
+          s16 r0 = 0;
+          s16 l1 = 0;
+          s16 r1 = 0;
+          read_frame(idx0, l0, r0);
+          read_frame(idx1, l1, r1);
+
+          const s32 l = static_cast<s32>(std::lround(
+              static_cast<double>(l0) + (static_cast<double>(l1 - l0) * frac)));
+          const s32 r = static_cast<s32>(std::lround(
+              static_cast<double>(r0) + (static_cast<double>(r1 - r0) * frac)));
+          turbo_adjusted_samples.push_back(
+              static_cast<s16>(std::clamp(l, -32768, 32767)));
+          turbo_adjusted_samples.push_back(
+              static_cast<s16>(std::clamp(r, -32768, 32767)));
+          src_pos += ratio;
+        }
+      }
+
+      turbo_resample_src_pos_ = src_pos - static_cast<double>(in_frames);
+      turbo_resample_prev_l_ = samples[(in_frames - 1) * 2 + 0];
+      turbo_resample_prev_r_ = samples[(in_frames - 1) * 2 + 1];
+      turbo_resample_prev_valid_ = true;
+    }
     if (!turbo_adjusted_samples.empty()) {
       queue_samples = &turbo_adjusted_samples;
     }
+  } else {
+    turbo_resample_src_pos_ = 1.0;
+    turbo_resample_in_rate_ = SAMPLE_RATE;
+    turbo_resample_prev_valid_ = false;
+    turbo_resample_prev_l_ = 0;
+    turbo_resample_prev_r_ = 0;
   }
 
   if (capture_enabled_) {
@@ -1591,6 +1637,56 @@ void Spu::queue_host_audio(const std::vector<s16> &samples) {
 
   if (!audio_enabled_ || audio_device_ == 0) {
     return;
+  }
+
+  if (!g_spu_enable_audio_queue) {
+    host_staging_samples_.clear();
+    host_staging_read_pos_ = 0;
+
+    u32 queued_before = SDL_GetQueuedAudioSize(audio_device_);
+    audio_diag_.queue_last_bytes = queued_before;
+    audio_diag_.queue_peak_bytes =
+        std::max(audio_diag_.queue_peak_bytes, queued_before);
+
+    const u32 direct_queue_cap =
+        std::max(host_buffer_bytes_ * 2u, 4096u);
+    if (queued_before > direct_queue_cap) {
+      SDL_ClearQueuedAudio(audio_device_);
+      audio_diag_.dropped_frames +=
+          queued_before / (static_cast<u32>(sizeof(s16)) * 2u);
+      ++audio_diag_.overrun_events;
+      queued_before = 0;
+    }
+
+    SDL_QueueAudio(audio_device_, queue_samples->data(),
+                   static_cast<Uint32>(queue_samples->size() * sizeof(s16)));
+    audio_diag_.queued_frames += queue_samples->size() / 2;
+
+    const u32 queued_after = SDL_GetQueuedAudioSize(audio_device_);
+    audio_diag_.queue_last_bytes = queued_after;
+    audio_diag_.queue_peak_bytes =
+        std::max(audio_diag_.queue_peak_bytes, queued_after);
+
+    if (!audio_started_) {
+      SDL_PauseAudioDevice(audio_device_, 0);
+      audio_started_ = true;
+    }
+    return;
+  }
+
+  // Allow runtime latency tuning without reinitializing the device.
+  const u32 latency_ms = std::clamp<u32>(g_spu_output_latency_ms, 16u, 1000u);
+  const u64 bytes_per_second =
+      static_cast<u64>(SAMPLE_RATE) * 2u * static_cast<u64>(sizeof(s16));
+  const u32 latency_bytes =
+      static_cast<u32>((bytes_per_second * latency_ms + 999u) / 1000u);
+  host_target_queue_bytes_ =
+      std::max({HOST_TARGET_QUEUE_BYTES_MIN, host_buffer_bytes_ * 3u, latency_bytes});
+  host_max_queue_bytes_ =
+      std::max(HOST_MAX_QUEUE_BYTES_MIN,
+               std::max(host_buffer_bytes_ * 8u, host_target_queue_bytes_ * 2u));
+  if (host_max_queue_bytes_ <= host_target_queue_bytes_) {
+    host_max_queue_bytes_ = host_target_queue_bytes_ + host_buffer_bytes_;
   }
 
   if (host_staging_read_pos_ >= host_staging_samples_.size()) {
@@ -1671,22 +1767,20 @@ void Spu::queue_host_audio(const std::vector<s16> &samples) {
   audio_diag_.queue_last_bytes = queued;
   audio_diag_.queue_peak_bytes = std::max(audio_diag_.queue_peak_bytes, queued);
 
-  // Queue starvation hysteresis: if queue starves while running, pause
-  // playback and re-enter prebuffer mode. Resume only after refilled.
-  if (audio_started_) {
-    const u32 starve_threshold = std::max(host_buffer_bytes_ / 8u, 1024u);
-    if (queued <= starve_threshold) {
-      ++audio_diag_.underrun_events;
-      SDL_PauseAudioDevice(audio_device_, 1);
-      audio_started_ = false;
-    }
-  }
-
   if (!audio_started_) {
     const u32 startup_threshold = std::max(host_target_queue_bytes_, 16384u);
     if (queued >= startup_threshold) {
       SDL_PauseAudioDevice(audio_device_, 0);
       audio_started_ = true;
+    }
+  } else {
+    // If we underrun, pause and re-enter prebuffer mode so configured latency
+    // headroom is rebuilt (important after turbo stress).
+    const u32 starve_threshold = std::max(host_buffer_bytes_ / 8u, 1024u);
+    if (queued <= starve_threshold) {
+      ++audio_diag_.underrun_events;
+      SDL_PauseAudioDevice(audio_device_, 1);
+      audio_started_ = false;
     }
   }
 }
@@ -2115,10 +2209,25 @@ void Spu::tick(u32 cycles) {
         return static_cast<s16>(std::clamp(s, -32768, 32767));
       };
 
+      const u32 xa_latency_ms = std::min<u32>(g_spu_xa_latency_ms, 2000u);
+      const size_t xa_prefill_frames =
+          (static_cast<size_t>(SAMPLE_RATE) * static_cast<size_t>(xa_latency_ms) +
+           999u) /
+          1000u;
+      const size_t unread_cd_samples =
+          (cd_input_read_pos_ < cd_input_samples_.size())
+              ? (cd_input_samples_.size() - cd_input_read_pos_)
+              : 0u;
+      const size_t unread_cd_frames = unread_cd_samples / 2u;
+      if (!cd_stream_started_ &&
+          (xa_prefill_frames == 0u || unread_cd_frames >= xa_prefill_frames)) {
+        cd_stream_started_ = true;
+      }
+
       float cd_l = 0.0f;
       float cd_r = 0.0f;
       bool have_cd_frame = false;
-      if (cd_input_read_pos_ + 1u < cd_input_samples_.size()) {
+      if (cd_stream_started_ && cd_input_read_pos_ + 1u < cd_input_samples_.size()) {
         have_cd_frame = true;
         const float raw_l = q15_to_float(cd_input_samples_[cd_input_read_pos_ + 0u]);
         const float raw_r = q15_to_float(cd_input_samples_[cd_input_read_pos_ + 1u]);
@@ -2149,6 +2258,10 @@ void Spu::tick(u32 cycles) {
         cd_last_sample_l_ = to_s16(cd_l);
         cd_last_sample_r_ = to_s16(cd_r);
       } else {
+        if (cd_stream_started_ && unread_cd_frames == 0u) {
+          // Re-enter prefill mode after underflow to avoid crackle bursts.
+          cd_stream_started_ = false;
+        }
         if (!cd_gap_active_ && (cd_last_sample_l_ != 0 || cd_last_sample_r_ != 0)) {
           cd_gap_active_ = true;
           cd_gap_ramp_samples_ = kCdGapRampSamples;

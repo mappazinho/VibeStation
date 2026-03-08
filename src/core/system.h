@@ -133,7 +133,8 @@ public:
   void shutdown();
 
   // Emulation control
-  void run_frame(bool sample_display_diag = true);
+  void run_frame(bool sample_display_diag = true,
+                 bool skip_spu_for_turbo = false);
   void step();
   double target_fps() const;
   void set_audio_output_speed(double speed) { spu_.set_output_speed(speed); }
@@ -164,6 +165,9 @@ public:
     return spu_.audio_capture_samples();
   }
   void push_cd_audio_samples(const std::vector<s16> &samples, u32 sample_rate) {
+    if (spu_skip_sync_for_turbo_) {
+      return;
+    }
     spu_.push_cd_audio_samples(samples, sample_rate);
   }
   void update_display_diag(const DisplaySampleInfo &display_sample);
@@ -270,6 +274,7 @@ private:
   bool saw_non_bios_exec_ = false;
   u32 bios_menu_streak_after_non_bios_ = 0;
   u64 spu_synced_cpu_cycle_ = 0;
+  bool spu_skip_sync_for_turbo_ = false;
   std::atomic<bool> ram_reaper_enabled_{false};
   std::atomic<u32> ram_reaper_range_start_{0};
   std::atomic<u32> ram_reaper_range_end_{psx::RAM_SIZE - 1u};

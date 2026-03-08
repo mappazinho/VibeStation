@@ -1,6 +1,8 @@
 #include "emu_runner.h"
 #include <algorithm>
 #include <chrono>
+#include <cmath>
+#include <cstring>
 #include <SDL.h>
 
 EmuRunner::~EmuRunner() { stop(); }
@@ -26,6 +28,12 @@ bool EmuRunner::start(System* system) {
         std::lock_guard<std::mutex> lock(snapshot_mutex_);
         latest_snapshot_ = {};
     }
+    {
+        std::lock_guard<std::mutex> lock(vram_mutex_);
+        latest_vram_snapshot_.clear();
+        has_latest_vram_snapshot_ = false;
+    }
+    capture_vram_debug_.store(false, std::memory_order_release);
 
     worker_ = std::thread(&EmuRunner::worker_main, this);
     return true;
@@ -53,6 +61,12 @@ void EmuRunner::stop() {
         std::lock_guard<std::mutex> lock(snapshot_mutex_);
         latest_snapshot_.running = false;
     }
+    {
+        std::lock_guard<std::mutex> lock(vram_mutex_);
+        latest_vram_snapshot_.clear();
+        has_latest_vram_snapshot_ = false;
+    }
+    capture_vram_debug_.store(false, std::memory_order_release);
 }
 
 void EmuRunner::set_running(bool running) {
@@ -107,6 +121,16 @@ bool EmuRunner::consume_latest_frame(FrameSnapshot& out_frame) {
     out_frame = std::move(pending_frame_);
     pending_frame_ = {};
     has_pending_frame_ = false;
+    return true;
+}
+
+bool EmuRunner::consume_latest_vram_snapshot(std::vector<u16>& out_vram) {
+    std::lock_guard<std::mutex> lock(vram_mutex_);
+    if (!has_latest_vram_snapshot_) {
+        return false;
+    }
+    out_vram = latest_vram_snapshot_;
+    has_latest_vram_snapshot_ = false;
     return true;
 }
 
@@ -202,15 +226,21 @@ void EmuRunner::worker_main() {
     using steady_clock = std::chrono::steady_clock;
     auto next_tick = steady_clock::now();
 
-    auto run_one_frame = [&]() {
+    auto run_one_frame = [&](bool publish_outputs, bool skip_audio_for_turbo,
+                             bool force_capture) {
         frame_active_.store(true, std::memory_order_release);
-
-        RuntimeSnapshot snapshot{};
 
         apply_input_state(*system_);
         apply_pending_disc_insert();
-        system_->run_frame(false);
+        system_->run_frame(false, skip_audio_for_turbo);
 
+        if (!publish_outputs) {
+            frame_active_.store(false, std::memory_order_release);
+            idle_cv_.notify_all();
+            return;
+        }
+
+        RuntimeSnapshot snapshot{};
         snapshot.frame_id = static_cast<u64>(system_->boot_diag().frame_counter);
         snapshot.running = running_.load(std::memory_order_acquire);
         snapshot.boot_diag = system_->boot_diag();
@@ -236,7 +266,7 @@ void EmuRunner::worker_main() {
         const u32 endx_hi = static_cast<u32>(spu.read16(0x19E) & 0x00FFu);
         snapshot.spu_endx_mask = endx_lo | (endx_hi << 16);
 
-        if (should_capture_frame()) {
+        if (force_capture || should_capture_frame()) {
             FrameSnapshot frame{};
             std::vector<u32> rgba;
             const DisplaySampleInfo sample =
@@ -252,6 +282,19 @@ void EmuRunner::worker_main() {
         }
         else {
             publish_snapshot(snapshot);
+        }
+
+        if (capture_vram_debug_.load(std::memory_order_acquire)) {
+            const size_t pixel_count =
+                static_cast<size_t>(psx::VRAM_WIDTH) * psx::VRAM_HEIGHT;
+            const u16* vram = system_->gpu().vram();
+            std::lock_guard<std::mutex> lock(vram_mutex_);
+            if (latest_vram_snapshot_.size() != pixel_count) {
+                latest_vram_snapshot_.resize(pixel_count);
+            }
+            std::memcpy(latest_vram_snapshot_.data(), vram,
+                pixel_count * sizeof(u16));
+            has_latest_vram_snapshot_ = true;
         }
 
         frame_active_.store(false, std::memory_order_release);
@@ -297,14 +340,18 @@ void EmuRunner::worker_main() {
             const double period_sec = std::chrono::duration<double>(frame_period).count();
             if (period_sec > 0.0) {
                 const int lag_frames = static_cast<int>(lag_sec / period_sec);
-                frames_to_run = std::min(2, std::max(1, lag_frames + 1));
+                const int max_catchup_frames =
+                    (speed > 1.001)
+                    ? std::clamp(static_cast<int>(std::ceil(speed * 2.0)), 2, 8)
+                    : 2;
+                frames_to_run = std::min(max_catchup_frames, std::max(1, lag_frames + 1));
             }
 
             for (int i = 0;
                 i < frames_to_run && running_.load(std::memory_order_acquire) &&
                 !stop_requested_.load(std::memory_order_acquire);
                 ++i) {
-                run_one_frame();
+                run_one_frame(true, false, false);
                 next_tick += frame_period;
             }
 
