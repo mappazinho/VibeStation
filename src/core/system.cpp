@@ -450,65 +450,66 @@ void System::run_frame(bool sample_display_diag, bool skip_spu_for_turbo) {
         if (sync_spu_now) {
             sync_spu_to_cpu();
         }
-        if (!boot_diag_.saw_pad_cmd42 && sio_.saw_pad_cmd42()) {
-            boot_diag_.saw_pad_cmd42 = true;
-        }
-        if (!boot_diag_.saw_tx_cmd42 && sio_.saw_tx_cmd42()) {
-            boot_diag_.saw_tx_cmd42 = true;
-        }
-        if (!boot_diag_.saw_pad_id && sio_.saw_pad_id()) {
-            boot_diag_.saw_pad_id = true;
-        }
-        if (!boot_diag_.saw_pad_button && sio_.saw_non_ff_button_byte()) {
-            boot_diag_.saw_pad_button = true;
-        }
-        if (!boot_diag_.saw_full_pad_poll && sio_.saw_full_pad_poll()) {
-            boot_diag_.saw_full_pad_poll = true;
-        }
-        boot_diag_.pad_cmd42_count = sio_.pad_cmd42_count();
-        boot_diag_.pad_poll_count = sio_.pad_poll_count();
-        boot_diag_.pad_packet_count = sio_.pad_packet_count();
-        boot_diag_.ch0_poll_count = sio_.channel0_poll_count();
-        boot_diag_.ch1_poll_count = sio_.channel1_poll_count();
-        boot_diag_.sio_invalid_seq_count = sio_.invalid_sequence_count();
-        boot_diag_.last_pad_buttons = sio_.last_pad_buttons();
-        boot_diag_.last_sio_tx = sio_.last_tx_byte();
-        boot_diag_.last_sio_rx = sio_.last_rx_byte();
-        boot_diag_.last_joy_stat = sio_.joy_stat_snapshot();
-        boot_diag_.last_joy_ctrl = sio_.joy_ctrl_snapshot();
-        boot_diag_.sio_irq_assert_count = sio_.irq_assert_count();
-        boot_diag_.sio_irq_ack_count = sio_.irq_ack_count();
-
-        if (!boot_diag_.saw_cd_read_cmd && cdrom_.saw_read_command()) {
-            boot_diag_.saw_cd_read_cmd = true;
-        }
-        if (!boot_diag_.saw_cd_sector_visible && cdrom_.saw_sector_visible()) {
-            boot_diag_.saw_cd_sector_visible = true;
-        }
-        if (!boot_diag_.saw_cd_getid && cdrom_.saw_getid()) {
-            boot_diag_.saw_cd_getid = true;
-        }
-        if (!boot_diag_.saw_cd_setloc && cdrom_.saw_setloc()) {
-            boot_diag_.saw_cd_setloc = true;
-        }
-        if (!boot_diag_.saw_cd_seekl && cdrom_.saw_seekl()) {
-            boot_diag_.saw_cd_seekl = true;
-        }
-        if (!boot_diag_.saw_cd_readn_or_reads && cdrom_.saw_readn_or_reads()) {
-            boot_diag_.saw_cd_readn_or_reads = true;
-        }
-        boot_diag_.cd_read_command_count = cdrom_.read_command_count();
-        boot_diag_.cd_irq_int1_count = cdrom_.irq_int1_count();
-        boot_diag_.cd_irq_int2_count = cdrom_.irq_int2_count();
-        boot_diag_.cd_irq_int3_count = cdrom_.irq_int3_count();
-        boot_diag_.cd_irq_int4_count = cdrom_.irq_int4_count();
-        boot_diag_.cd_irq_int5_count = cdrom_.irq_int5_count();
 
         if (scanline == vblank_scanline) {
             gpu_.vblank();
             irq_.request(Interrupt::VBlank);
         }
     }
+    if (!boot_diag_.saw_pad_cmd42 && sio_.saw_pad_cmd42()) {
+        boot_diag_.saw_pad_cmd42 = true;
+    }
+    if (!boot_diag_.saw_tx_cmd42 && sio_.saw_tx_cmd42()) {
+        boot_diag_.saw_tx_cmd42 = true;
+    }
+    if (!boot_diag_.saw_pad_id && sio_.saw_pad_id()) {
+        boot_diag_.saw_pad_id = true;
+    }
+    if (!boot_diag_.saw_pad_button && sio_.saw_non_ff_button_byte()) {
+        boot_diag_.saw_pad_button = true;
+    }
+    if (!boot_diag_.saw_full_pad_poll && sio_.saw_full_pad_poll()) {
+        boot_diag_.saw_full_pad_poll = true;
+    }
+    boot_diag_.pad_cmd42_count = sio_.pad_cmd42_count();
+    boot_diag_.pad_poll_count = sio_.pad_poll_count();
+    boot_diag_.pad_packet_count = sio_.pad_packet_count();
+    boot_diag_.ch0_poll_count = sio_.channel0_poll_count();
+    boot_diag_.ch1_poll_count = sio_.channel1_poll_count();
+    boot_diag_.sio_invalid_seq_count = sio_.invalid_sequence_count();
+    boot_diag_.last_pad_buttons = sio_.last_pad_buttons();
+    boot_diag_.last_sio_tx = sio_.last_tx_byte();
+    boot_diag_.last_sio_rx = sio_.last_rx_byte();
+    boot_diag_.last_joy_stat = sio_.joy_stat_snapshot();
+    boot_diag_.last_joy_ctrl = sio_.joy_ctrl_snapshot();
+    boot_diag_.sio_irq_assert_count = sio_.irq_assert_count();
+    boot_diag_.sio_irq_ack_count = sio_.irq_ack_count();
+
+    if (!boot_diag_.saw_cd_read_cmd && cdrom_.saw_read_command()) {
+        boot_diag_.saw_cd_read_cmd = true;
+    }
+    if (!boot_diag_.saw_cd_sector_visible && cdrom_.saw_sector_visible()) {
+        boot_diag_.saw_cd_sector_visible = true;
+    }
+    if (!boot_diag_.saw_cd_getid && cdrom_.saw_getid()) {
+        boot_diag_.saw_cd_getid = true;
+    }
+    if (!boot_diag_.saw_cd_setloc && cdrom_.saw_setloc()) {
+        boot_diag_.saw_cd_setloc = true;
+    }
+    if (!boot_diag_.saw_cd_seekl && cdrom_.saw_seekl()) {
+        boot_diag_.saw_cd_seekl = true;
+    }
+    if (!boot_diag_.saw_cd_readn_or_reads && cdrom_.saw_readn_or_reads()) {
+        boot_diag_.saw_cd_readn_or_reads = true;
+    }
+    boot_diag_.cd_read_command_count = cdrom_.read_command_count();
+    boot_diag_.cd_irq_int1_count = cdrom_.irq_int1_count();
+    boot_diag_.cd_irq_int2_count = cdrom_.irq_int2_count();
+    boot_diag_.cd_irq_int3_count = cdrom_.irq_int3_count();
+    boot_diag_.cd_irq_int4_count = cdrom_.irq_int4_count();
+    boot_diag_.cd_irq_int5_count = cdrom_.irq_int5_count();
+
     timers_.set_vblank(false);
     ++boot_diag_.frame_counter;
 

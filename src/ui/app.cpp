@@ -71,6 +71,72 @@ namespace {
     constexpr int kKeyboardBindEntryCount =
         static_cast<int>(sizeof(kKeyboardBindEntries) / sizeof(kKeyboardBindEntries[0]));
 
+    std::string cue_trim_copy(std::string text) {
+        const size_t begin = text.find_first_not_of(" \t\r\n");
+        if (begin == std::string::npos) {
+            return {};
+        }
+        const size_t end = text.find_last_not_of(" \t\r\n");
+        return text.substr(begin, end - begin + 1u);
+    }
+
+    std::string parse_cue_file_target(const std::string& line) {
+        const size_t q0 = line.find('"');
+        if (q0 != std::string::npos) {
+            const size_t q1 = line.find('"', q0 + 1u);
+            if (q1 != std::string::npos && q1 > q0 + 1u) {
+                return line.substr(q0 + 1u, q1 - q0 - 1u);
+            }
+        }
+
+        std::istringstream iss(line);
+        std::string token;
+        std::string file_name;
+        iss >> token >> file_name;
+        return file_name;
+    }
+
+    std::string resolve_first_bin_from_cue(const std::filesystem::path& cue_path) {
+        std::ifstream cue(cue_path);
+        if (!cue.is_open()) {
+            return {};
+        }
+
+        std::string line;
+        while (std::getline(cue, line)) {
+            line = cue_trim_copy(line);
+            if (line.empty() || line[0] == ';') {
+                continue;
+            }
+            if (line.size() < 4u) {
+                continue;
+            }
+
+            std::string head = line.substr(0u, 4u);
+            std::transform(head.begin(), head.end(), head.begin(), [](unsigned char c) {
+                return static_cast<char>(std::toupper(c));
+                });
+            if (head != "FILE") {
+                continue;
+            }
+
+            std::string file_name = parse_cue_file_target(line);
+            if (file_name.empty()) {
+                continue;
+            }
+
+            std::filesystem::path resolved(file_name);
+            if (!resolved.is_absolute()) {
+                resolved = cue_path.parent_path() / resolved;
+            }
+            if (std::filesystem::exists(resolved)) {
+                return resolved.string();
+            }
+            return {};
+        }
+        return {};
+    }
+
     struct ParsedCorruptionPreset {
         enum class Type {
             Invalid,
@@ -1547,15 +1613,18 @@ void App::panel_settings() {
                     g_spu_desired_samples = static_cast<u32>(desired_samples);
                 }
                 ImGui::TextDisabled("Applied on next audio device init.");
-                int output_latency_ms = static_cast<int>(g_spu_output_latency_ms);
-                if (ImGui::InputInt("Output Latency (ms)", &output_latency_ms, 5, 20)) {
-                    output_latency_ms = std::max(16, std::min(1000, output_latency_ms));
-                    g_spu_output_latency_ms = static_cast<u32>(output_latency_ms);
+                float output_buffer_seconds = g_spu_output_buffer_seconds;
+                if (ImGui::InputFloat("Output Buffer (seconds)",
+                    &output_buffer_seconds, 0.1f, 0.5f, "%.2f")) {
+                    output_buffer_seconds =
+                        std::max(0.05f, std::min(8.0f, output_buffer_seconds));
+                    g_spu_output_buffer_seconds = output_buffer_seconds;
                 }
-                int xa_latency_ms = static_cast<int>(g_spu_xa_latency_ms);
-                if (ImGui::InputInt("XA Latency (ms)", &xa_latency_ms, 5, 20)) {
-                    xa_latency_ms = std::max(0, std::min(2000, xa_latency_ms));
-                    g_spu_xa_latency_ms = static_cast<u32>(xa_latency_ms);
+                float xa_buffer_seconds = g_spu_xa_buffer_seconds;
+                if (ImGui::InputFloat("XA Buffer (seconds)",
+                    &xa_buffer_seconds, 0.01f, 0.1f, "%.3f")) {
+                    xa_buffer_seconds = std::max(0.0f, std::min(5.0f, xa_buffer_seconds));
+                    g_spu_xa_buffer_seconds = xa_buffer_seconds;
                 }
                 ImGui::Checkbox("Enable Audio Queue", &g_spu_enable_audio_queue);
                 ImGui::Checkbox("Advanced Sound Status Logging", &g_spu_advanced_sound_status);
@@ -3053,16 +3122,21 @@ bool App::resolve_disc_paths(const std::string& selected_path,
 
     if (ext == ".cue") {
         cue_path = selected.string();
-        std::filesystem::path sibling_bin = selected;
-        sibling_bin.replace_extension(".bin");
-        if (std::filesystem::exists(sibling_bin)) {
-            bin_path = sibling_bin.string();
-        }
-        else {
-            std::filesystem::path sibling_bin_upper = selected;
-            sibling_bin_upper.replace_extension(".BIN");
-            if (std::filesystem::exists(sibling_bin_upper)) {
-                bin_path = sibling_bin_upper.string();
+        // Multi-track cues often point to "Track 1/2/3..." filenames that do
+        // not match the cue basename, so parse the first FILE entry first.
+        bin_path = resolve_first_bin_from_cue(selected);
+        if (bin_path.empty()) {
+            std::filesystem::path sibling_bin = selected;
+            sibling_bin.replace_extension(".bin");
+            if (std::filesystem::exists(sibling_bin)) {
+                bin_path = sibling_bin.string();
+            }
+            else {
+                std::filesystem::path sibling_bin_upper = selected;
+                sibling_bin_upper.replace_extension(".BIN");
+                if (std::filesystem::exists(sibling_bin_upper)) {
+                    bin_path = sibling_bin_upper.string();
+                }
             }
         }
         return true;
@@ -3142,7 +3216,7 @@ bool App::boot_disc_from_ui() {
         return false;
     }
 
-    if (!game_bin_path_.empty()) {
+    if (!game_bin_path_.empty() || !game_cue_path_.empty()) {
         // Always (re)attach the currently selected game so changing selection
         // after a prior boot takes effect.
         if (!system_->load_game(game_bin_path_, game_cue_path_)) {
@@ -3769,15 +3843,26 @@ void App::load_persistent_config() {
             const u32 clamped = static_cast<u32>(std::max(64ul, std::min(65535ul, parsed)));
             g_spu_desired_samples = clamped;
         }
+        else if (key == "spu_output_buffer_seconds") {
+            const float parsed = std::strtof(value.c_str(), nullptr);
+            const float clamped = std::max(0.05f, std::min(8.0f, parsed));
+            g_spu_output_buffer_seconds = clamped;
+        }
+        else if (key == "spu_xa_buffer_seconds") {
+            const float parsed = std::strtof(value.c_str(), nullptr);
+            const float clamped = std::max(0.0f, std::min(5.0f, parsed));
+            g_spu_xa_buffer_seconds = clamped;
+        }
+        // Backward compatibility with older config keys in milliseconds.
         else if (key == "spu_output_latency_ms") {
             const unsigned long parsed = std::strtoul(value.c_str(), nullptr, 10);
             const u32 clamped = static_cast<u32>(std::max(16ul, std::min(1000ul, parsed)));
-            g_spu_output_latency_ms = clamped;
+            g_spu_output_buffer_seconds = static_cast<float>(clamped) / 1000.0f;
         }
         else if (key == "spu_xa_latency_ms") {
             const unsigned long parsed = std::strtoul(value.c_str(), nullptr, 10);
             const u32 clamped = static_cast<u32>(std::min(2000ul, parsed));
-            g_spu_xa_latency_ms = clamped;
+            g_spu_xa_buffer_seconds = static_cast<float>(clamped) / 1000.0f;
         }
         else if (key == "spu_enable_audio_queue") {
             g_spu_enable_audio_queue = parse_bool(value, g_spu_enable_audio_queue);
@@ -3811,6 +3896,11 @@ void App::load_persistent_config() {
         }
     }
 
+    g_spu_output_buffer_seconds =
+        std::max(0.05f, std::min(8.0f, g_spu_output_buffer_seconds));
+    g_spu_xa_buffer_seconds =
+        std::max(0.0f, std::min(5.0f, g_spu_xa_buffer_seconds));
+
     if (g_unsafe_ps2_bios_mode) {
         g_experimental_bios_size_mode = true;
     }
@@ -3834,8 +3924,10 @@ void App::save_persistent_config() const {
             << static_cast<int>(input_->key_for_button(entry.button)) << "\n";
     }
     out << "spu_desired_samples=" << static_cast<unsigned>(g_spu_desired_samples) << "\n";
-    out << "spu_output_latency_ms=" << static_cast<unsigned>(g_spu_output_latency_ms) << "\n";
-    out << "spu_xa_latency_ms=" << static_cast<unsigned>(g_spu_xa_latency_ms) << "\n";
+    out << std::fixed << std::setprecision(3);
+    out << "spu_output_buffer_seconds=" << g_spu_output_buffer_seconds << "\n";
+    out << "spu_xa_buffer_seconds=" << g_spu_xa_buffer_seconds << "\n";
+    out.unsetf(std::ios::floatfield);
     out << "spu_enable_audio_queue=" << (g_spu_enable_audio_queue ? 1 : 0) << "\n";
     out << "advanced_sound_status_logging=" << (g_spu_advanced_sound_status ? 1 : 0) << "\n";
     out << "detailed_profiling=" << (g_profile_detailed_timing ? 1 : 0) << "\n";

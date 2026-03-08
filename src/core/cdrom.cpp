@@ -7,6 +7,7 @@
 #include <cctype>
 #include <filesystem>
 #include <sstream>
+#include <unordered_map>
 
 namespace {
 constexpr u8 kHintTypeMask = 0x07u;
@@ -27,6 +28,90 @@ std::string upper_copy(std::string text) {
     return static_cast<char>(std::toupper(c));
   });
   return text;
+}
+
+std::string normalize_path_key(std::string path) {
+  std::replace(path.begin(), path.end(), '\\', '/');
+  return upper_copy(path);
+}
+
+u64 file_size_bytes(const std::string &path) {
+  std::error_code ec;
+  const u64 size = std::filesystem::file_size(std::filesystem::path(path), ec);
+  return ec ? 0 : size;
+}
+
+bool resolve_track_layout(std::vector<CdTrack> &tracks,
+                          const std::string &default_file,
+                          bool &single_file, bool &monotonic_abs,
+                          std::string &error) {
+  if (tracks.empty()) {
+    error = "No tracks found in cue";
+    return false;
+  }
+
+  std::vector<std::string> file_order;
+  std::unordered_map<std::string, std::string> file_path;
+  std::unordered_map<std::string, int> file_sector_size;
+  std::unordered_map<std::string, u64> file_bytes;
+
+  for (CdTrack &track : tracks) {
+    if (track.filename.empty()) {
+      track.filename = default_file;
+    }
+    if (track.filename.empty()) {
+      error = "Track file path is empty";
+      return false;
+    }
+    if (track.sector_size <= 0) {
+      track.sector_size = 2352;
+    }
+
+    const std::string key = normalize_path_key(track.filename);
+    if (file_path.find(key) == file_path.end()) {
+      const u64 bytes = file_size_bytes(track.filename);
+      if (bytes == 0) {
+        error = "Missing or empty track file: " + track.filename;
+        return false;
+      }
+      file_order.push_back(key);
+      file_path[key] = track.filename;
+      file_sector_size[key] = track.sector_size;
+      file_bytes[key] = bytes;
+    }
+  }
+
+  std::unordered_map<std::string, int> file_base_abs;
+  int next_base_abs = 150;
+  for (const std::string &key : file_order) {
+    const int sector_size = std::max(1, file_sector_size[key]);
+    const int sectors =
+        static_cast<int>(file_bytes[key] / static_cast<u64>(sector_size));
+    if (sectors <= 0) {
+      error = "Track file has no readable sectors: " + file_path[key];
+      return false;
+    }
+    file_base_abs[key] = next_base_abs;
+    next_base_abs += sectors;
+  }
+
+  single_file = (file_order.size() == 1u);
+  monotonic_abs = true;
+  int prev_abs = -1;
+  for (CdTrack &track : tracks) {
+    const std::string key = normalize_path_key(track.filename);
+    const int base_abs = file_base_abs[key];
+    track.index01_abs_lba = base_abs + std::max(0, track.index01_file_lba);
+    track.index01_file_offset =
+        static_cast<u64>(std::max(0, track.index01_file_lba)) *
+        static_cast<u64>(std::max(1, track.sector_size));
+    if (prev_abs > track.index01_abs_lba) {
+      monotonic_abs = false;
+    }
+    prev_abs = track.index01_abs_lba;
+  }
+
+  return true;
 }
 
 bool starts_with_ci(const std::string &line, const char *prefix) {
@@ -275,18 +360,6 @@ bool CdRom::load_bin_cue(const std::string &bin_path,
     return false;
   }
 
-  bin_file_.open(bin_fs, std::ios::binary);
-  if (!bin_file_.is_open()) {
-    LOG_ERROR("CDROM: Failed opening BIN image: %s", bin_fs.string().c_str());
-    return false;
-  }
-
-  std::error_code ec;
-  bin_size_ = std::filesystem::file_size(bin_fs, ec);
-  if (ec) {
-    bin_size_ = 0;
-  }
-
   if (tracks_.empty()) {
     CdTrack track;
     track.number = 1;
@@ -299,54 +372,184 @@ bool CdRom::load_bin_cue(const std::string &bin_path,
     tracks_.push_back(track);
   }
 
-  const std::string first_file = tracks_.front().filename;
-  bool single_file = true;
+  std::string layout_error;
   bool monotonic = true;
-  const int first_index01 = tracks_.front().index01_file_lba;
-  int prev_file_lba = first_index01;
-  for (CdTrack &track : tracks_) {
-    if (track.filename.empty()) {
-      track.filename = first_file;
-    }
-    if (track.filename != first_file) {
-      single_file = false;
-    }
-    if (track.sector_size <= 0) {
-      track.sector_size = 2352;
-    }
-    if (track.index01_file_lba < prev_file_lba) {
-      monotonic = false;
-    }
-    prev_file_lba = track.index01_file_lba;
-    const int delta = std::max(0, track.index01_file_lba - first_index01);
-    track.index01_abs_lba = 150 + delta;
-    track.index01_file_offset =
-        static_cast<u64>(std::max(0, track.index01_file_lba)) *
-        static_cast<u64>(track.sector_size);
+  const std::string default_file =
+      !tracks_.front().filename.empty() ? tracks_.front().filename : bin_fs.string();
+  bool unused_single_file = true;
+  if (!resolve_track_layout(tracks_, default_file, unused_single_file, monotonic,
+                            layout_error)) {
+    LOG_ERROR("CDROM: Invalid CUE track layout: %s", layout_error.c_str());
+    return false;
   }
 
-  if (!single_file) {
-    LOG_WARN("CDROM: Multi-file CUE detected; this implementation currently "
-             "supports single-file read mapping only");
+  const std::filesystem::path primary_fs = tracks_.front().filename.empty()
+                                               ? bin_fs
+                                               : std::filesystem::path(tracks_.front().filename);
+  bin_file_.open(primary_fs, std::ios::binary);
+  if (!bin_file_.is_open()) {
+    LOG_ERROR("CDROM: Failed opening BIN image: %s", primary_fs.string().c_str());
+    return false;
   }
+  bin_size_ = file_size_bytes(primary_fs.string());
 
-  resolved_disc_path_ = bin_fs.string();
+  resolved_disc_path_ = primary_fs.string();
   disc_loaded_ = true;
-  track_map_valid_ = single_file && monotonic;
+  track_map_valid_ = monotonic;
 
   reset();
   notify_disc_inserted();
-  LOG_INFO("CDROM: Loaded image: %s", resolved_disc_path_.c_str());
+  LOG_INFO("CDROM: Loaded disc - %zu track(s) from %s", tracks_.size(),
+           resolved_disc_path_.c_str());
+  if (!track_map_valid_) {
+    LOG_WARN("CDROM: Track map is non-monotonic; compatibility may be reduced");
+  }
   return true;
 }
 
 bool CdRom::swap_disc_image(const std::string &bin_path,
                             const std::string &cue_path) {
-  const bool ok = load_bin_cue(bin_path, cue_path);
-  if (ok) {
-    notify_disc_inserted();
+  const std::vector<CdTrack> old_tracks = tracks_;
+  const std::string old_resolved_disc_path = resolved_disc_path_;
+  const bool old_track_map_valid = track_map_valid_;
+  const bool old_disc_loaded = disc_loaded_;
+  const u64 old_bin_size = bin_size_;
+
+  auto restore_previous_disc = [&]() {
+    tracks_ = old_tracks;
+    resolved_disc_path_ = old_resolved_disc_path;
+    track_map_valid_ = old_track_map_valid;
+    disc_loaded_ = old_disc_loaded;
+    bin_size_ = old_bin_size;
+    if (!old_resolved_disc_path.empty()) {
+      bin_file_.clear();
+      bin_file_.open(old_resolved_disc_path, std::ios::binary);
+    }
+  };
+
+  if (bin_file_.is_open()) {
+    bin_file_.close();
   }
-  return ok;
+
+  std::vector<CdTrack> parsed_tracks;
+  std::filesystem::path cue_dir;
+  std::filesystem::path bin_fs(bin_path);
+  tracks_.clear();
+
+  if (!cue_path.empty()) {
+    const std::filesystem::path cue_fs(cue_path);
+    cue_dir = cue_fs.parent_path();
+    if (!parse_cue(cue_path, cue_dir.string())) {
+      restore_previous_disc();
+      LOG_ERROR("CDROM: Failed to parse CUE file for live insert: %s",
+                cue_path.c_str());
+      return false;
+    }
+    parsed_tracks = tracks_;
+  }
+
+  if (bin_fs.empty() && !parsed_tracks.empty() &&
+      !parsed_tracks.front().filename.empty()) {
+    bin_fs = parsed_tracks.front().filename;
+  }
+  if (!bin_fs.empty() && !bin_fs.is_absolute() && !cue_dir.empty()) {
+    bin_fs = cue_dir / bin_fs;
+  }
+  if (bin_fs.empty()) {
+    restore_previous_disc();
+    LOG_ERROR("CDROM: No BIN image specified for live insert");
+    return false;
+  }
+
+  if (parsed_tracks.empty()) {
+    CdTrack track;
+    track.number = 1;
+    track.type = "MODE2/2352";
+    track.filename = bin_fs.string();
+    track.sector_size = 2352;
+    track.index01_file_lba = 0;
+    track.index01_abs_lba = 150;
+    track.index01_file_offset = 0;
+    parsed_tracks.push_back(track);
+  }
+
+  std::string layout_error;
+  bool monotonic = true;
+  bool unused_single_file = true;
+  const std::string default_file = !parsed_tracks.front().filename.empty()
+                                       ? parsed_tracks.front().filename
+                                       : bin_fs.string();
+  if (!resolve_track_layout(parsed_tracks, default_file, unused_single_file, monotonic,
+                            layout_error)) {
+    restore_previous_disc();
+    LOG_ERROR("CDROM: Invalid CUE track layout for live insert: %s",
+              layout_error.c_str());
+    return false;
+  }
+
+  const std::filesystem::path primary_fs =
+      parsed_tracks.front().filename.empty()
+          ? bin_fs
+          : std::filesystem::path(parsed_tracks.front().filename);
+  std::ifstream replacement_bin(primary_fs, std::ios::binary);
+  if (!replacement_bin.is_open()) {
+    restore_previous_disc();
+    LOG_ERROR("CDROM: Failed opening BIN image for live insert: %s",
+              primary_fs.string().c_str());
+    return false;
+  }
+
+  tracks_ = std::move(parsed_tracks);
+  bin_file_ = std::move(replacement_bin);
+  resolved_disc_path_ = primary_fs.string();
+  bin_size_ = file_size_bytes(primary_fs.string());
+  disc_loaded_ = true;
+  track_map_valid_ = monotonic;
+
+  // Keep controller configuration (notably IRQ enable) intact for hot-swap,
+  // but clear in-flight transfer/decoder state from the previous disc.
+  state_ = State::Idle;
+  pending_second_ = {};
+  pending_irqs_.clear();
+  param_fifo_.clear();
+  response_fifo_.clear();
+  response_index_ = 0;
+  data_buffer_.clear();
+  data_index_ = 0;
+  data_ready_ = false;
+  data_request_ = false;
+  command_busy_ = false;
+  command_busy_cycles_ = 0;
+  seek_mm_ = 0;
+  seek_ss_ = 0;
+  seek_ff_ = 0;
+  read_lba_ = 0;
+  pending_cycles_ = 0;
+  seek_target_lba_ = 0;
+  seek_target_valid_ = false;
+  seek_complete_ = false;
+  pending_read_start_ = false;
+  pending_reads_mode_ = false;
+  cdda_playing_ = false;
+  seek_error_ = false;
+  id_error_ = false;
+  shell_open_ = false;
+  motor_on_ = true;
+  adpcm_busy_cycles_ = 0;
+  xa_hist1_ = {};
+  xa_hist2_ = {};
+  xa_stream_valid_ = false;
+  xa_stream_file_ = 0;
+  xa_stream_channel_ = 0;
+  interrupt_flag_ = 0;
+  refresh_irq_line();
+
+  LOG_INFO("CDROM: Live inserted disc - %zu track(s) from %s", tracks_.size(),
+           resolved_disc_path_.c_str());
+  if (!track_map_valid_) {
+    LOG_WARN("CDROM: Track map is non-monotonic; compatibility may be reduced");
+  }
+  return true;
 }
 
 void CdRom::notify_disc_inserted() {
@@ -357,15 +560,11 @@ void CdRom::notify_disc_inserted() {
   seek_error_ = false;
   id_error_ = false;
   motor_on_ = true;
-  // FIX C: do NOT fire a spontaneous INT2 on insert.  DuckStation (and real
-  // hardware) simply spin up the motor and wait for the BIOS/game to issue
-  // GetID / Init — it discovers the disc through those commands, not through
-  // an unsolicited interrupt.  The spurious INT2 was arriving before the game
-  // had set up its IRQ handler and corrupting early IRQ state, causing GT2
-  // (and likely others) to hang on the disclaimer screen.
-  insert_probe_active_ = false;
+  // Issue a light-weight probe sequence after hot-insert so BIOS/game-side
+  // polling sees the same command cadence as on hardware.
+  insert_probe_active_ = true;
+  insert_probe_delay_cycles_ = 1;
   insert_probe_stage_ = 0;
-  insert_probe_delay_cycles_ = 0;
 }
 
 bool CdRom::parse_cue(const std::string &cue_path, const std::string &bin_dir) {
@@ -467,7 +666,7 @@ u8 CdRom::stat_byte() const {
   } else if (state_ == State::Reading) {
     stat |= 0x20u;
   }
-  if (shell_open_) {
+  if (shell_open_ || !disc_loaded_) {
     stat |= 0x10u;
   }
   if (id_error_) {
@@ -584,7 +783,10 @@ int CdRom::track_end_lba(const CdTrack *track) const {
   if (idx + 1u < tracks_.size()) {
     return tracks_[idx + 1u].index01_abs_lba - 151;
   }
-  const int sectors = static_cast<int>(bin_size_ / std::max(1, track->sector_size));
+  const u64 file_bytes = !track->filename.empty() ? file_size_bytes(track->filename)
+                                                   : bin_size_;
+  const int sectors =
+      static_cast<int>(file_bytes / static_cast<u64>(std::max(1, track->sector_size)));
   const int rel_len = std::max(1, sectors - track->index01_file_lba);
   return (track->index01_abs_lba - 150) + rel_len - 1;
 }
@@ -592,7 +794,7 @@ int CdRom::track_end_lba(const CdTrack *track) const {
 bool CdRom::read_raw_sector_for_lba(int psx_lba, std::vector<u8> &raw_sector,
                                     const CdTrack **track_out) {
   raw_sector.clear();
-  if (!disc_loaded_ || !bin_file_.is_open()) {
+  if (!disc_loaded_) {
     return false;
   }
 
@@ -612,18 +814,45 @@ bool CdRom::read_raw_sector_for_lba(int psx_lba, std::vector<u8> &raw_sector,
   const int file_lba = track->index01_file_lba + rel;
   const int sector_size = std::max(1, track->sector_size);
   const u64 offset = static_cast<u64>(file_lba) * static_cast<u64>(sector_size);
-  if (offset + static_cast<u64>(sector_size) > bin_size_) {
+  const std::string target_path =
+      !track->filename.empty() ? track->filename : resolved_disc_path_;
+  if (target_path.empty()) {
+    return false;
+  }
+
+  std::ifstream alt_file;
+  std::ifstream *stream = nullptr;
+  u64 target_size = 0;
+
+  const bool use_primary =
+      !resolved_disc_path_.empty() &&
+      normalize_path_key(target_path) == normalize_path_key(resolved_disc_path_) &&
+      bin_file_.is_open();
+  if (use_primary) {
+    stream = &bin_file_;
+    target_size = bin_size_;
+  } else {
+    alt_file.open(std::filesystem::path(target_path), std::ios::binary);
+    if (!alt_file.is_open()) {
+      return false;
+    }
+    stream = &alt_file;
+    target_size = file_size_bytes(target_path);
+  }
+
+  if (target_size > 0 &&
+      offset + static_cast<u64>(sector_size) > target_size) {
     return false;
   }
 
   raw_sector.resize(static_cast<size_t>(sector_size));
-  bin_file_.clear();
-  bin_file_.seekg(static_cast<std::streamoff>(offset), std::ios::beg);
-  if (!bin_file_.good()) {
+  stream->clear();
+  stream->seekg(static_cast<std::streamoff>(offset), std::ios::beg);
+  if (!stream->good()) {
     return false;
   }
-  bin_file_.read(reinterpret_cast<char *>(raw_sector.data()), sector_size);
-  return bin_file_.good();
+  stream->read(reinterpret_cast<char *>(raw_sector.data()), sector_size);
+  return stream->gcount() == sector_size;
 }
 
 bool CdRom::cd_audio_muted() const { return cdda_cmd_muted_ || cdda_adp_muted_; }
@@ -973,6 +1202,9 @@ void CdRom::service_pending_irq() {
   if ((interrupt_flag_ & kHintTypeMask) != 0) {
     return;
   }
+  if (response_index_ < static_cast<int>(response_fifo_.size())) {
+    return;
+  }
 
   PendingIrq &front = pending_irqs_.front();
   if (front.wait_for_command_idle && command_busy_) {
@@ -1002,11 +1234,7 @@ void CdRom::refresh_irq_line() {
 }
 
 void CdRom::cmd_getstat() {
-  const u8 stat = stat_byte();
-  enqueue_irq(3, {stat});
-  if (!shell_open_) {
-    shell_open_ = false;
-  }
+  enqueue_irq(3, {stat_byte()});
 }
 
 void CdRom::cmd_setloc() {
@@ -1145,15 +1373,8 @@ void CdRom::cmd_seekl() {
 
 void CdRom::cmd_getid() {
   saw_getid_ = true;
-  if (shell_open_) {
+  if (shell_open_ || !disc_loaded_) {
     enqueue_irq(5, {0x11u, 0x80u}); // 0x11 = Shell Open (0x10) | Error (0x01)
-    return;
-  }
-
-  if (!disc_loaded_) {
-    enqueue_irq(3, {stat_byte()});
-    schedule_second_response(33868, 5,
-                             {static_cast<u8>(stat_byte() | 0x01u), 0x40u, 0x00u, 0x00u, 0x00u, 0x00u, 0x00u, 0x00u});
     return;
   }
 
@@ -1378,8 +1599,22 @@ void CdRom::cmd_readtoc() {
 
 void CdRom::execute_internal_command(u8 cmd,
                                      std::initializer_list<u8> params) {
+  if (command_busy_ || command_busy_cycles_ > 0) {
+    return;
+  }
+  if ((interrupt_flag_ & kHintTypeMask) != 0) {
+    return;
+  }
+  if (response_index_ < static_cast<int>(response_fifo_.size())) {
+    return;
+  }
+
+  last_command_ = cmd;
+  command_busy_cycles_ = command_busy_for(cmd);
+  command_busy_ = command_busy_cycles_ > 0;
   param_fifo_.assign(params.begin(), params.end());
   execute_command(cmd);
+  param_fifo_.clear();
 }
 
 void CdRom::execute_command(u8 cmd) {
@@ -1392,6 +1627,10 @@ void CdRom::execute_command(u8 cmd) {
     break;
   case 0x03:
     cmd_play();
+    break;
+  case 0x04:
+  case 0x05:
+    enqueue_irq(3, {stat_byte()});
     break;
   case 0x06:
     cmd_readn();
@@ -1520,8 +1759,7 @@ u8 CdRom::read8(u32 offset) {
     return 0;
 
   case 2: {
-    if (data_ready_ && data_request_ &&
-        data_index_ < static_cast<int>(data_buffer_.size())) {
+    if (data_ready_ && data_index_ < static_cast<int>(data_buffer_.size())) {
       const u8 value = data_buffer_[static_cast<size_t>(data_index_++)];
       if (data_index_ >= static_cast<int>(data_buffer_.size())) {
         data_ready_ = false;
@@ -1567,13 +1805,10 @@ void CdRom::write8(u32 offset, u8 value) {
       last_command_ = value;
       ++command_counter_;
       ++command_hist_[static_cast<size_t>(value)];
-      command_busy_ = true;
       command_busy_cycles_ = command_busy_for(value);
+      command_busy_ = command_busy_cycles_ > 0;
       execute_command(value);
       param_fifo_.clear();
-      // BUSYSTS goes low as soon as the controller accepts the command.
-      command_busy_ = false;
-      command_busy_cycles_ = 0;
       return;
     case 1:
       host_audio_regs_[6] = value;
@@ -1628,10 +1863,6 @@ void CdRom::write8(u32 offset, u8 value) {
       return;
 
     case 1:
-      if ((value & 0x80u) != 0) {
-        reset();
-        return;
-      }
       if ((value & 0x40u) != 0) {
         param_fifo_.clear();
       }
@@ -1645,9 +1876,16 @@ void CdRom::write8(u32 offset, u8 value) {
         if ((old_mask & ack_mask) != 0u) {
           interrupt_flag_ =
               static_cast<u8>(interrupt_flag_ & static_cast<u8>(~kHintTypeMask));
+          response_fifo_.clear();
+          response_index_ = 0;
         }
-        refresh_irq_line();
       }
+      if ((value & 0x80u) != 0) {
+        response_fifo_.clear();
+        response_index_ = 0;
+      }
+      refresh_irq_line();
+      service_pending_irq();
       return;
 
     case 2:
@@ -1704,9 +1942,28 @@ void CdRom::tick(u32 cycles) {
   if (insert_probe_active_) {
     insert_probe_delay_cycles_ -= step;
     if (insert_probe_delay_cycles_ <= 0) {
-      enqueue_irq(2, {stat_byte()}, false);
-      insert_probe_active_ = false;
-      insert_probe_stage_ = 0;
+      switch (insert_probe_stage_) {
+      case 0:
+        execute_internal_command(0x19u, {0x20u});
+        break;
+      case 1:
+        execute_internal_command(0x01u, {});
+        break;
+      case 2:
+        execute_internal_command(0x01u, {});
+        break;
+      default:
+        insert_probe_active_ = false;
+        break;
+      }
+
+      if (insert_probe_active_) {
+        ++insert_probe_stage_;
+        insert_probe_delay_cycles_ = 4000;
+        if (insert_probe_stage_ > 2) {
+          insert_probe_active_ = false;
+        }
+      }
     }
   }
 
@@ -1828,3 +2085,4 @@ u32 CdRom::dma_read() {
   }
   return value;
 }
+
