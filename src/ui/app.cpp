@@ -1319,6 +1319,11 @@ void App::menu_bar() {
                     return;
                 }
             }
+            if (ImGui::MenuItem("Direct Disc Boot (Skip BIOS Intro)", nullptr,
+                config_direct_disc_boot_)) {
+                config_direct_disc_boot_ = !config_direct_disc_boot_;
+                save_persistent_config();
+            }
             if (ImGui::MenuItem("Start / Resume BIOS", "F5", false,
                 bios_loaded && !emu_running)) {
                 if (has_started_emulation_) {
@@ -1838,6 +1843,12 @@ void App::panel_settings() {
                 if (ImGui::Checkbox("VSync Playback", &config_vsync_)) {
                     SDL_GL_SetSwapInterval(config_vsync_ ? 1 : 0);
                 }
+                if (ImGui::Checkbox("Direct Disc Boot (Skip BIOS Intro)",
+                    &config_direct_disc_boot_)) {
+                    save_persistent_config();
+                }
+                ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f),
+                    "Applies to Emulation > Boot Disc only.");
                 ImGui::Checkbox("Detailed Profiling", &g_profile_detailed_timing);
                 if (ImGui::Checkbox("Low-spec Mode", &config_low_spec_mode_)) {
                     g_low_spec_mode = config_low_spec_mode_;
@@ -3448,14 +3459,16 @@ bool App::boot_disc_from_ui() {
         return false;
     }
 
-    if (!system_->boot_disc()) {
+    if (!system_->boot_disc(config_direct_disc_boot_)) {
         status_message_ = "Boot Disc failed. Check BIOS/disc image.";
         return false;
     }
 
     has_started_emulation_ = true;
     emu_runner_.set_running(true);
-    status_message_ = "Booting disc from BIOS...";
+    status_message_ = config_direct_disc_boot_
+        ? "Direct booting disc (BIOS intro skipped)..."
+        : "Booting disc from BIOS...";
     return true;
 }
 
@@ -4030,6 +4043,10 @@ void App::load_persistent_config() {
             config_low_spec_mode_ = parse_bool(value, config_low_spec_mode_);
             g_low_spec_mode = config_low_spec_mode_;
         }
+        else if (key == "direct_disc_boot") {
+            config_direct_disc_boot_ =
+                parse_bool(value, config_direct_disc_boot_);
+        }
         else if (key == "turbo_speed_percent") {
             const int parsed = static_cast<int>(std::strtol(value.c_str(), nullptr, 10));
             config_turbo_speed_percent_ = normalize_turbo_speed_percent(parsed);
@@ -4137,6 +4154,7 @@ void App::save_persistent_config() const {
     out << "rom_directory=" << rom_directory_ << "\n";
     out << "vsync=" << (config_vsync_ ? 1 : 0) << "\n";
     out << "low_spec_mode=" << (config_low_spec_mode_ ? 1 : 0) << "\n";
+    out << "direct_disc_boot=" << (config_direct_disc_boot_ ? 1 : 0) << "\n";
     out << "turbo_speed_percent=" << config_turbo_speed_percent_ << "\n";
     out << "slowdown_speed_percent=" << config_slowdown_speed_percent_ << "\n";
     out << "spu_diagnostic_mode=" << (config_spu_diagnostic_mode_ ? 1 : 0) << "\n";

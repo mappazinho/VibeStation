@@ -78,6 +78,7 @@ private:
 	// Configurable performance options
 	bool config_vsync_ = true;
 	bool config_low_spec_mode_ = false;
+	bool config_direct_disc_boot_ = false;
 	int config_turbo_speed_percent_ = 200;
 	int config_slowdown_speed_percent_ = 50;
 	bool config_spu_diagnostic_mode_ = false;
