@@ -29,6 +29,7 @@ class Controller {
 public:
   void press(PsxButton btn) { buttons_ &= ~static_cast<u16>(btn); }
   void release(PsxButton btn) { buttons_ |= static_cast<u16>(btn); }
+  void set_button_state(u16 buttons) { buttons_ = buttons; }
 
   void set_left_stick(u8 x, u8 y) {
     lx_ = x;

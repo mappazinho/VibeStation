@@ -366,11 +366,17 @@ void System::run_frame(bool sample_display_diag, bool skip_spu_for_turbo) {
     frame_cycle_remainder_ -= static_cast<double>(cycles_per_frame);
     const u32 base_cycles_per_scanline = cycles_per_frame / scanlines_per_frame;
     const u32 extra_cycles_per_frame = cycles_per_frame % scanlines_per_frame;
-    static constexpr u32 kCpuInstructionSlice = 32;
-    static constexpr u32 kDmaTickStride = 16;
-    static constexpr u32 kSpuSyncScanlineStride = 4;
+    // Aggressive fast mode intentionally trades timing stability for throughput.
+    const bool aggressive_fast_mode = g_gpu_fast_mode;
+    const u32 cpu_instruction_slice = aggressive_fast_mode ? 128u : 32u;
+    // FMV/CD streaming is sensitive to DMA and CDROM service jitter.
+    // Keep those devices at near-baseline cadence even in fast mode.
+    const u32 dma_tick_stride = 16u;
+    const u32 spu_sync_scanline_stride = aggressive_fast_mode ? 16u : 4u;
+    const u32 cdrom_tick_scanline_stride = 1u;
     u32 extra_cycle_error = 0;
     u32 dma_tick_budget = 0;
+    u32 cdrom_tick_budget = 0;
 
     for (u32 scanline = 0; scanline < scanlines_per_frame; scanline++) {
         u32 cycles_this_scanline = base_cycles_per_scanline;
@@ -391,27 +397,36 @@ void System::run_frame(bool sample_display_diag, bool skip_spu_for_turbo) {
         u32 cycles_remaining = cycles_this_scanline;
         while (cycles_remaining > 0) {
             const u32 target_slice_cycles =
-                std::min(cycles_remaining, kCpuInstructionSlice * 4u);
+                std::min(cycles_remaining, cpu_instruction_slice * 4u);
             u32 spent_in_slice = 0;
             u32 instructions_executed = 0;
+            u32 sio_slice_cycles = 0;
             while (cycles_remaining > 0 && spent_in_slice < target_slice_cycles &&
-                   instructions_executed < kCpuInstructionSlice) {
+                   instructions_executed < cpu_instruction_slice) {
                 const u32 consumed = cpu_.step();
                 spent_in_slice += consumed;
                 frame_cycles_ += consumed;
-                // Advance SIO at instruction granularity so JOYPAD serial
-                // handshakes don't stall for an entire scanline worth of CPU
-                // polling loops.
-                sio_.tick(consumed);
+                if (aggressive_fast_mode) {
+                    sio_slice_cycles += consumed;
+                }
+                else {
+                    // Advance SIO at instruction granularity so JOYPAD serial
+                    // handshakes don't stall for an entire scanline worth of CPU
+                    // polling loops.
+                    sio_.tick(consumed);
+                }
                 ++instructions_executed;
                 cycles_remaining =
                     (consumed >= cycles_remaining) ? 0 : (cycles_remaining - consumed);
             }
+            if (aggressive_fast_mode && sio_slice_cycles > 0) {
+                sio_.tick(sio_slice_cycles);
+            }
 
             dma_tick_budget += spent_in_slice;
-            while (dma_tick_budget >= kDmaTickStride) {
+            while (dma_tick_budget >= dma_tick_stride) {
                 dma_.tick();
-                dma_tick_budget -= kDmaTickStride;
+                dma_tick_budget -= dma_tick_stride;
             }
         }
         if (dma_tick_budget > 0) {
@@ -443,72 +458,78 @@ void System::run_frame(bool sample_display_diag, bool skip_spu_for_turbo) {
                 .count());
         }
 
-        cdrom_.tick(cycles_this_scanline);
+        cdrom_tick_budget += cycles_this_scanline;
+        if (((scanline + 1u) % cdrom_tick_scanline_stride) == 0u ||
+            ((scanline + 1u) == scanlines_per_frame)) {
+            cdrom_.tick(cdrom_tick_budget);
+            cdrom_tick_budget = 0;
+        }
         const bool sync_spu_now =
-            (((scanline + 1u) % kSpuSyncScanlineStride) == 0u) ||
+            (((scanline + 1u) % spu_sync_scanline_stride) == 0u) ||
             ((scanline + 1u) == scanlines_per_frame);
         if (sync_spu_now) {
             sync_spu_to_cpu();
         }
-        if (!boot_diag_.saw_pad_cmd42 && sio_.saw_pad_cmd42()) {
-            boot_diag_.saw_pad_cmd42 = true;
-        }
-        if (!boot_diag_.saw_tx_cmd42 && sio_.saw_tx_cmd42()) {
-            boot_diag_.saw_tx_cmd42 = true;
-        }
-        if (!boot_diag_.saw_pad_id && sio_.saw_pad_id()) {
-            boot_diag_.saw_pad_id = true;
-        }
-        if (!boot_diag_.saw_pad_button && sio_.saw_non_ff_button_byte()) {
-            boot_diag_.saw_pad_button = true;
-        }
-        if (!boot_diag_.saw_full_pad_poll && sio_.saw_full_pad_poll()) {
-            boot_diag_.saw_full_pad_poll = true;
-        }
-        boot_diag_.pad_cmd42_count = sio_.pad_cmd42_count();
-        boot_diag_.pad_poll_count = sio_.pad_poll_count();
-        boot_diag_.pad_packet_count = sio_.pad_packet_count();
-        boot_diag_.ch0_poll_count = sio_.channel0_poll_count();
-        boot_diag_.ch1_poll_count = sio_.channel1_poll_count();
-        boot_diag_.sio_invalid_seq_count = sio_.invalid_sequence_count();
-        boot_diag_.last_pad_buttons = sio_.last_pad_buttons();
-        boot_diag_.last_sio_tx = sio_.last_tx_byte();
-        boot_diag_.last_sio_rx = sio_.last_rx_byte();
-        boot_diag_.last_joy_stat = sio_.joy_stat_snapshot();
-        boot_diag_.last_joy_ctrl = sio_.joy_ctrl_snapshot();
-        boot_diag_.sio_irq_assert_count = sio_.irq_assert_count();
-        boot_diag_.sio_irq_ack_count = sio_.irq_ack_count();
-
-        if (!boot_diag_.saw_cd_read_cmd && cdrom_.saw_read_command()) {
-            boot_diag_.saw_cd_read_cmd = true;
-        }
-        if (!boot_diag_.saw_cd_sector_visible && cdrom_.saw_sector_visible()) {
-            boot_diag_.saw_cd_sector_visible = true;
-        }
-        if (!boot_diag_.saw_cd_getid && cdrom_.saw_getid()) {
-            boot_diag_.saw_cd_getid = true;
-        }
-        if (!boot_diag_.saw_cd_setloc && cdrom_.saw_setloc()) {
-            boot_diag_.saw_cd_setloc = true;
-        }
-        if (!boot_diag_.saw_cd_seekl && cdrom_.saw_seekl()) {
-            boot_diag_.saw_cd_seekl = true;
-        }
-        if (!boot_diag_.saw_cd_readn_or_reads && cdrom_.saw_readn_or_reads()) {
-            boot_diag_.saw_cd_readn_or_reads = true;
-        }
-        boot_diag_.cd_read_command_count = cdrom_.read_command_count();
-        boot_diag_.cd_irq_int1_count = cdrom_.irq_int1_count();
-        boot_diag_.cd_irq_int2_count = cdrom_.irq_int2_count();
-        boot_diag_.cd_irq_int3_count = cdrom_.irq_int3_count();
-        boot_diag_.cd_irq_int4_count = cdrom_.irq_int4_count();
-        boot_diag_.cd_irq_int5_count = cdrom_.irq_int5_count();
 
         if (scanline == vblank_scanline) {
             gpu_.vblank();
             irq_.request(Interrupt::VBlank);
         }
     }
+    if (!boot_diag_.saw_pad_cmd42 && sio_.saw_pad_cmd42()) {
+        boot_diag_.saw_pad_cmd42 = true;
+    }
+    if (!boot_diag_.saw_tx_cmd42 && sio_.saw_tx_cmd42()) {
+        boot_diag_.saw_tx_cmd42 = true;
+    }
+    if (!boot_diag_.saw_pad_id && sio_.saw_pad_id()) {
+        boot_diag_.saw_pad_id = true;
+    }
+    if (!boot_diag_.saw_pad_button && sio_.saw_non_ff_button_byte()) {
+        boot_diag_.saw_pad_button = true;
+    }
+    if (!boot_diag_.saw_full_pad_poll && sio_.saw_full_pad_poll()) {
+        boot_diag_.saw_full_pad_poll = true;
+    }
+    boot_diag_.pad_cmd42_count = sio_.pad_cmd42_count();
+    boot_diag_.pad_poll_count = sio_.pad_poll_count();
+    boot_diag_.pad_packet_count = sio_.pad_packet_count();
+    boot_diag_.ch0_poll_count = sio_.channel0_poll_count();
+    boot_diag_.ch1_poll_count = sio_.channel1_poll_count();
+    boot_diag_.sio_invalid_seq_count = sio_.invalid_sequence_count();
+    boot_diag_.last_pad_buttons = sio_.last_pad_buttons();
+    boot_diag_.last_sio_tx = sio_.last_tx_byte();
+    boot_diag_.last_sio_rx = sio_.last_rx_byte();
+    boot_diag_.last_joy_stat = sio_.joy_stat_snapshot();
+    boot_diag_.last_joy_ctrl = sio_.joy_ctrl_snapshot();
+    boot_diag_.sio_irq_assert_count = sio_.irq_assert_count();
+    boot_diag_.sio_irq_ack_count = sio_.irq_ack_count();
+
+    if (!boot_diag_.saw_cd_read_cmd && cdrom_.saw_read_command()) {
+        boot_diag_.saw_cd_read_cmd = true;
+    }
+    if (!boot_diag_.saw_cd_sector_visible && cdrom_.saw_sector_visible()) {
+        boot_diag_.saw_cd_sector_visible = true;
+    }
+    if (!boot_diag_.saw_cd_getid && cdrom_.saw_getid()) {
+        boot_diag_.saw_cd_getid = true;
+    }
+    if (!boot_diag_.saw_cd_setloc && cdrom_.saw_setloc()) {
+        boot_diag_.saw_cd_setloc = true;
+    }
+    if (!boot_diag_.saw_cd_seekl && cdrom_.saw_seekl()) {
+        boot_diag_.saw_cd_seekl = true;
+    }
+    if (!boot_diag_.saw_cd_readn_or_reads && cdrom_.saw_readn_or_reads()) {
+        boot_diag_.saw_cd_readn_or_reads = true;
+    }
+    boot_diag_.cd_read_command_count = cdrom_.read_command_count();
+    boot_diag_.cd_irq_int1_count = cdrom_.irq_int1_count();
+    boot_diag_.cd_irq_int2_count = cdrom_.irq_int2_count();
+    boot_diag_.cd_irq_int3_count = cdrom_.irq_int3_count();
+    boot_diag_.cd_irq_int4_count = cdrom_.irq_int4_count();
+    boot_diag_.cd_irq_int5_count = cdrom_.irq_int5_count();
+
     timers_.set_vblank(false);
     ++boot_diag_.frame_counter;
 

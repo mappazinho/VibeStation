@@ -16,6 +16,7 @@
 #include <limits>
 #include <random>
 #include <sstream>
+#include <ctime>
 #include <vector>
 
 #ifdef _WIN32
@@ -70,6 +71,72 @@ namespace {
 
     constexpr int kKeyboardBindEntryCount =
         static_cast<int>(sizeof(kKeyboardBindEntries) / sizeof(kKeyboardBindEntries[0]));
+
+    std::string cue_trim_copy(std::string text) {
+        const size_t begin = text.find_first_not_of(" \t\r\n");
+        if (begin == std::string::npos) {
+            return {};
+        }
+        const size_t end = text.find_last_not_of(" \t\r\n");
+        return text.substr(begin, end - begin + 1u);
+    }
+
+    std::string parse_cue_file_target(const std::string& line) {
+        const size_t q0 = line.find('"');
+        if (q0 != std::string::npos) {
+            const size_t q1 = line.find('"', q0 + 1u);
+            if (q1 != std::string::npos && q1 > q0 + 1u) {
+                return line.substr(q0 + 1u, q1 - q0 - 1u);
+            }
+        }
+
+        std::istringstream iss(line);
+        std::string token;
+        std::string file_name;
+        iss >> token >> file_name;
+        return file_name;
+    }
+
+    std::string resolve_first_bin_from_cue(const std::filesystem::path& cue_path) {
+        std::ifstream cue(cue_path);
+        if (!cue.is_open()) {
+            return {};
+        }
+
+        std::string line;
+        while (std::getline(cue, line)) {
+            line = cue_trim_copy(line);
+            if (line.empty() || line[0] == ';') {
+                continue;
+            }
+            if (line.size() < 4u) {
+                continue;
+            }
+
+            std::string head = line.substr(0u, 4u);
+            std::transform(head.begin(), head.end(), head.begin(), [](unsigned char c) {
+                return static_cast<char>(std::toupper(c));
+                });
+            if (head != "FILE") {
+                continue;
+            }
+
+            std::string file_name = parse_cue_file_target(line);
+            if (file_name.empty()) {
+                continue;
+            }
+
+            std::filesystem::path resolved(file_name);
+            if (!resolved.is_absolute()) {
+                resolved = cue_path.parent_path() / resolved;
+            }
+            if (std::filesystem::exists(resolved)) {
+                return resolved.string();
+            }
+            return {};
+        }
+        return {};
+    }
 
     struct ParsedCorruptionPreset {
         enum class Type {
@@ -162,6 +229,127 @@ namespace {
 
     double slowdown_speed_multiplier_from_percent(int percent) {
         return static_cast<double>(normalize_slowdown_speed_percent(percent)) / 100.0;
+    }
+
+    constexpr double kSpuDiagnosticSpeedMultiplier = 0.83;
+    constexpr double kSpuDiagnosticReverbMixMultiplier = 1.30;
+
+    void append_be32(std::vector<u8>& out, u32 value) {
+        out.push_back(static_cast<u8>((value >> 24) & 0xFFu));
+        out.push_back(static_cast<u8>((value >> 16) & 0xFFu));
+        out.push_back(static_cast<u8>((value >> 8) & 0xFFu));
+        out.push_back(static_cast<u8>(value & 0xFFu));
+    }
+
+    u32 crc32_png(const u8* data, size_t size) {
+        u32 crc = 0xFFFFFFFFu;
+        for (size_t i = 0; i < size; ++i) {
+            crc ^= data[i];
+            for (int bit = 0; bit < 8; ++bit) {
+                const u32 mask = static_cast<u32>(-(static_cast<int>(crc & 1u)));
+                crc = (crc >> 1) ^ (0xEDB88320u & mask);
+            }
+        }
+        return ~crc;
+    }
+
+    u32 adler32_zlib(const u8* data, size_t size) {
+        constexpr u32 kMod = 65521u;
+        u32 a = 1u;
+        u32 b = 0u;
+        for (size_t i = 0; i < size; ++i) {
+            a = (a + data[i]) % kMod;
+            b = (b + a) % kMod;
+        }
+        return (b << 16) | a;
+    }
+
+    void append_png_chunk(std::vector<u8>& out, const char type[4],
+        const std::vector<u8>& data) {
+        append_be32(out, static_cast<u32>(data.size()));
+        const size_t type_offset = out.size();
+        out.push_back(static_cast<u8>(type[0]));
+        out.push_back(static_cast<u8>(type[1]));
+        out.push_back(static_cast<u8>(type[2]));
+        out.push_back(static_cast<u8>(type[3]));
+        out.insert(out.end(), data.begin(), data.end());
+        const u32 crc =
+            crc32_png(out.data() + type_offset, static_cast<size_t>(4u + data.size()));
+        append_be32(out, crc);
+    }
+
+    bool encode_rgba_png(const std::vector<u32>& rgba, int width, int height,
+        std::vector<u8>& out_png) {
+        if (width <= 0 || height <= 0) {
+            return false;
+        }
+        const size_t pixel_count =
+            static_cast<size_t>(width) * static_cast<size_t>(height);
+        if (rgba.size() < pixel_count) {
+            return false;
+        }
+
+        const size_t row_bytes = static_cast<size_t>(width) * 4u;
+        std::vector<u8> filtered;
+        filtered.reserve(static_cast<size_t>(height) * (row_bytes + 1u));
+        for (int y = 0; y < height; ++y) {
+            filtered.push_back(0u); // PNG filter type: None.
+            const size_t row_base = static_cast<size_t>(y) * static_cast<size_t>(width);
+            for (int x = 0; x < width; ++x) {
+                const u32 px = rgba[row_base + static_cast<size_t>(x)];
+                filtered.push_back(static_cast<u8>(px & 0xFFu));
+                filtered.push_back(static_cast<u8>((px >> 8) & 0xFFu));
+                filtered.push_back(static_cast<u8>((px >> 16) & 0xFFu));
+                filtered.push_back(static_cast<u8>((px >> 24) & 0xFFu));
+            }
+        }
+
+        // Minimal zlib stream using uncompressed DEFLATE blocks.
+        std::vector<u8> idat;
+        idat.reserve(filtered.size() + 6u +
+            ((filtered.size() / 65535u) + 1u) * 5u);
+        idat.push_back(0x78u);
+        idat.push_back(0x01u); // Low compression/fastest profile header.
+
+        size_t offset = 0;
+        size_t remaining = filtered.size();
+        while (remaining > 0) {
+            const u16 block_len =
+                static_cast<u16>(std::min<size_t>(remaining, 65535u));
+            const bool is_final = (remaining <= 65535u);
+            idat.push_back(static_cast<u8>(is_final ? 1u : 0u)); // BFINAL + BTYPE=00
+            idat.push_back(static_cast<u8>(block_len & 0xFFu));
+            idat.push_back(static_cast<u8>((block_len >> 8) & 0xFFu));
+            const u16 nlen = static_cast<u16>(~block_len);
+            idat.push_back(static_cast<u8>(nlen & 0xFFu));
+            idat.push_back(static_cast<u8>((nlen >> 8) & 0xFFu));
+            const u8* block_data = filtered.data() + offset;
+            idat.insert(idat.end(), block_data, block_data + block_len);
+            offset += block_len;
+            remaining -= block_len;
+        }
+        append_be32(idat, adler32_zlib(filtered.data(), filtered.size()));
+
+        out_png.clear();
+        out_png.reserve(idat.size() + 128u);
+        static constexpr u8 kPngSignature[8] = {
+            0x89u, 0x50u, 0x4Eu, 0x47u, 0x0Du, 0x0Au, 0x1Au, 0x0Au
+        };
+        out_png.insert(out_png.end(), kPngSignature, kPngSignature + 8);
+
+        std::vector<u8> ihdr;
+        ihdr.reserve(13u);
+        append_be32(ihdr, static_cast<u32>(width));
+        append_be32(ihdr, static_cast<u32>(height));
+        ihdr.push_back(8u); // bit depth
+        ihdr.push_back(6u); // color type RGBA
+        ihdr.push_back(0u); // compression method
+        ihdr.push_back(0u); // filter method
+        ihdr.push_back(0u); // interlace method
+        append_png_chunk(out_png, "IHDR", ihdr);
+        append_png_chunk(out_png, "IDAT", idat);
+        append_png_chunk(out_png, "IEND", {});
+        return true;
     }
 
     bool parse_u64_value(const std::string& value, u64& out) {
@@ -524,7 +712,7 @@ bool App::init() {
     ImGuiIO& io = ImGui::GetIO();
     (void)io; // Reserved for future config flags
 
-    // Style — Dark with custom colors
+    // Style â€” Dark with custom colors
     ImGui::StyleColorsDark();
     ImGuiStyle& style = ImGui::GetStyle();
     style.WindowRounding = 6.0f;
@@ -536,7 +724,7 @@ bool App::init() {
     style.ScrollbarRounding = 6.0f;
     style.WindowPadding = ImVec2(10, 10);
 
-    // Custom color palette — deep purple/blue
+    // Custom color palette â€” deep purple/blue
     auto& colors = style.Colors;
     colors[ImGuiCol_WindowBg] = ImVec4(0.08f, 0.06f, 0.12f, 0.95f);
     colors[ImGuiCol_TitleBg] = ImVec4(0.10f, 0.08f, 0.18f, 1.00f);
@@ -628,11 +816,29 @@ bool App::init_runtime() {
         return false;
     }
     emu_runner_.set_speed(1.0);
+    apply_speed_override();
 
     runtime_ready_ = true;
     printf("[App::init_runtime] Runtime ready\n");
     fflush(stdout);
     return true;
+}
+
+double App::current_speed_override() const {
+    if (turbo_hold_active_) {
+        return turbo_speed_multiplier_from_percent(config_turbo_speed_percent_);
+    }
+    if (slowdown_hold_active_) {
+        return slowdown_speed_multiplier_from_percent(config_slowdown_speed_percent_);
+    }
+    if (config_spu_diagnostic_mode_) {
+        return kSpuDiagnosticSpeedMultiplier;
+    }
+    return 1.0;
+}
+
+void App::apply_speed_override() {
+    emu_runner_.set_speed(current_speed_override());
 }
 
 void App::run() {
@@ -653,6 +859,9 @@ void App::run() {
         FrameSnapshot frame;
         if (emu_runner_.consume_latest_frame(frame)) {
             renderer_->upload_frame(frame.rgba, frame.width, frame.height);
+            latest_frame_width_ = frame.width;
+            latest_frame_height_ = frame.height;
+            latest_frame_rgba_ = std::move(frame.rgba);
         }
         runtime_snapshot_ = emu_runner_.runtime_snapshot();
         emu_runner_.set_vram_debug_capture_enabled(show_vram_);
@@ -749,17 +958,6 @@ void App::run() {
 }
 
 void App::process_events(bool& quit) {
-    auto apply_speed_override = [this]() {
-        double speed = 1.0;
-        if (turbo_hold_active_) {
-            speed = turbo_speed_multiplier_from_percent(config_turbo_speed_percent_);
-        }
-        else if (slowdown_hold_active_) {
-            speed = slowdown_speed_multiplier_from_percent(config_slowdown_speed_percent_);
-        }
-        emu_runner_.set_speed(speed);
-        };
-
     SDL_Event event;
     while (SDL_PollEvent(&event)) {
         ImGui_ImplSDL2_ProcessEvent(&event);
@@ -907,6 +1105,9 @@ void App::process_events(bool& quit) {
                     status_message_ = "Emulation stopped";
                 }
             }
+            else if (no_mod && key == SDLK_F8) {
+                save_snapshot_png();
+            }
             else if (no_mod && key == SDLK_F9) {
                 show_debug_cpu_ = !show_debug_cpu_;
             }
@@ -934,6 +1135,11 @@ void App::process_events(bool& quit) {
 
 void App::update() {
     input_->update();
+    if (system_) {
+        const double reverb_mix =
+            config_spu_diagnostic_mode_ ? kSpuDiagnosticReverbMixMultiplier : 1.0;
+        system_->set_spu_reverb_mix_multiplier(reverb_mix);
+    }
     g_spu_force_audio_queue = slowdown_hold_active_ && !g_spu_enable_audio_queue;
     sync_ram_reaper_config();
     sync_gpu_reaper_config();
@@ -1139,6 +1345,10 @@ void App::menu_bar() {
                 disable_sound_reaper_mode();
                 has_started_emulation_ = false;
                 status_message_ = "Emulation stopped";
+            }
+            if (ImGui::MenuItem("Take Snapshot", "F8", false,
+                !latest_frame_rgba_.empty())) {
+                save_snapshot_png();
             }
             if (ImGui::MenuItem("Restart BIOS", nullptr, false, bios_loaded)) {
                 emu_runner_.pause_and_wait_idle();
@@ -1394,6 +1604,20 @@ void App::panel_emulator_screen() {
         }
     }
     else {
+        if (latest_frame_rgba_.empty()) {
+            ImGui::BeginDisabled();
+        }
+        if (ImGui::Button("Snapshot (F8)", ImVec2(130.0f, 0.0f))) {
+            save_snapshot_png();
+        }
+        if (latest_frame_rgba_.empty()) {
+            ImGui::EndDisabled();
+        }
+        ImGui::SameLine();
+        ImGui::TextDisabled("%dx%d", std::max(0, latest_frame_width_),
+            std::max(0, latest_frame_height_));
+        ImGui::Spacing();
+
         if (show_fast_mode_notice_) {
             ImGui::TextColored(ImVec4(0.95f, 0.3f, 0.3f, 1.0f),
                 "%s",
@@ -1494,7 +1718,7 @@ void App::panel_settings() {
                 ImGui::Text("Gamepad: %s", input_->gamepad_name().c_str());
                 if (input_->has_gamepad()) {
                     ImGui::TextColored(ImVec4(0.4f, 0.9f, 0.4f, 1.0f),
-                        "Connected — auto-mapped");
+                        "Connected â€” auto-mapped");
                 }
                 else {
                     ImGui::TextColored(
@@ -1547,18 +1771,37 @@ void App::panel_settings() {
                     g_spu_desired_samples = static_cast<u32>(desired_samples);
                 }
                 ImGui::TextDisabled("Applied on next audio device init.");
-                int output_latency_ms = static_cast<int>(g_spu_output_latency_ms);
-                if (ImGui::InputInt("Output Latency (ms)", &output_latency_ms, 5, 20)) {
-                    output_latency_ms = std::max(16, std::min(1000, output_latency_ms));
-                    g_spu_output_latency_ms = static_cast<u32>(output_latency_ms);
+                float output_buffer_seconds = g_spu_output_buffer_seconds;
+                if (ImGui::InputFloat("Output Buffer (seconds)",
+                    &output_buffer_seconds, 0.1f, 0.5f, "%.2f")) {
+                    output_buffer_seconds =
+                        std::max(0.05f, std::min(8.0f, output_buffer_seconds));
+                    g_spu_output_buffer_seconds = output_buffer_seconds;
                 }
-                int xa_latency_ms = static_cast<int>(g_spu_xa_latency_ms);
-                if (ImGui::InputInt("XA Latency (ms)", &xa_latency_ms, 5, 20)) {
-                    xa_latency_ms = std::max(0, std::min(2000, xa_latency_ms));
-                    g_spu_xa_latency_ms = static_cast<u32>(xa_latency_ms);
+                float xa_buffer_seconds = g_spu_xa_buffer_seconds;
+                if (ImGui::InputFloat("XA Buffer (seconds)",
+                    &xa_buffer_seconds, 0.01f, 0.1f, "%.3f")) {
+                    xa_buffer_seconds = std::max(0.0f, std::min(5.0f, xa_buffer_seconds));
+                    g_spu_xa_buffer_seconds = xa_buffer_seconds;
                 }
                 ImGui::Checkbox("Enable Audio Queue", &g_spu_enable_audio_queue);
                 ImGui::Checkbox("Advanced Sound Status Logging", &g_spu_advanced_sound_status);
+                if (!config_spu_diagnostic_mode_) {
+                    if (ImGui::Button("Slowed + Reverb Mode (0.83x / Reverb +30%)")) {
+                        config_spu_diagnostic_mode_ = true;
+                        apply_speed_override();
+                        save_persistent_config();
+                    }
+                }
+                else {
+                    if (ImGui::Button("Disable Slowed + Reverb Mode")) {
+                        config_spu_diagnostic_mode_ = false;
+                        apply_speed_override();
+                        save_persistent_config();
+                    }
+                }
+                ImGui::SameLine();
+                ImGui::TextUnformatted(config_spu_diagnostic_mode_ ? "Active" : "Inactive");
                 ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f),
                     "Enables per-sample SPU diagnostics. Voice level meters stay live.");
 
@@ -1581,13 +1824,7 @@ void App::panel_settings() {
                 if (ImGui::Combo("Turbo Speed (Hold Backspace)", &turbo_mode_index,
                     turbo_modes, IM_ARRAYSIZE(turbo_modes))) {
                     config_turbo_speed_percent_ = (turbo_mode_index == 1) ? 400 : 200;
-                    if (turbo_hold_active_ || slowdown_hold_active_) {
-                        const double speed = turbo_hold_active_
-                            ? turbo_speed_multiplier_from_percent(config_turbo_speed_percent_)
-                            : slowdown_speed_multiplier_from_percent(
-                                config_slowdown_speed_percent_);
-                        emu_runner_.set_speed(speed);
-                    }
+                    apply_speed_override();
                     save_persistent_config();
                 }
                 int slowdown_speed_percent = config_slowdown_speed_percent_;
@@ -1595,13 +1832,7 @@ void App::panel_settings() {
                     &slowdown_speed_percent, 10, 100, "%d%%")) {
                     config_slowdown_speed_percent_ =
                         normalize_slowdown_speed_percent(slowdown_speed_percent);
-                    if (turbo_hold_active_ || slowdown_hold_active_) {
-                        const double speed = turbo_hold_active_
-                            ? turbo_speed_multiplier_from_percent(config_turbo_speed_percent_)
-                            : slowdown_speed_multiplier_from_percent(
-                                config_slowdown_speed_percent_);
-                        emu_runner_.set_speed(speed);
-                    }
+                    apply_speed_override();
                     save_persistent_config();
                 }
                 if (ImGui::Checkbox("VSync Playback", &config_vsync_)) {
@@ -3036,7 +3267,7 @@ void App::panel_vram() {
     ImGui::End();
 }
 
-// ── File Dialog ────────────────────────────────────────────────────
+// â”€â”€ File Dialog â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 bool App::resolve_disc_paths(const std::string& selected_path,
     std::string& bin_path, std::string& cue_path,
@@ -3053,16 +3284,21 @@ bool App::resolve_disc_paths(const std::string& selected_path,
 
     if (ext == ".cue") {
         cue_path = selected.string();
-        std::filesystem::path sibling_bin = selected;
-        sibling_bin.replace_extension(".bin");
-        if (std::filesystem::exists(sibling_bin)) {
-            bin_path = sibling_bin.string();
-        }
-        else {
-            std::filesystem::path sibling_bin_upper = selected;
-            sibling_bin_upper.replace_extension(".BIN");
-            if (std::filesystem::exists(sibling_bin_upper)) {
-                bin_path = sibling_bin_upper.string();
+        // Multi-track cues often point to "Track 1/2/3..." filenames that do
+        // not match the cue basename, so parse the first FILE entry first.
+        bin_path = resolve_first_bin_from_cue(selected);
+        if (bin_path.empty()) {
+            std::filesystem::path sibling_bin = selected;
+            sibling_bin.replace_extension(".bin");
+            if (std::filesystem::exists(sibling_bin)) {
+                bin_path = sibling_bin.string();
+            }
+            else {
+                std::filesystem::path sibling_bin_upper = selected;
+                sibling_bin_upper.replace_extension(".BIN");
+                if (std::filesystem::exists(sibling_bin_upper)) {
+                    bin_path = sibling_bin_upper.string();
+                }
             }
         }
         return true;
@@ -3114,6 +3350,62 @@ bool App::load_disc_from_ui(const std::string& bin_path,
     return true;
 }
 
+bool App::save_snapshot_png() {
+    if (latest_frame_rgba_.empty() || latest_frame_width_ <= 0 ||
+        latest_frame_height_ <= 0) {
+        status_message_ = "Snapshot unavailable: no frame captured yet.";
+        return false;
+    }
+
+    std::error_code ec;
+    const std::filesystem::path snapshot_dir =
+        std::filesystem::current_path() / "snapshots";
+    std::filesystem::create_directories(snapshot_dir, ec);
+    if (ec) {
+        status_message_ = "Snapshot failed: couldn't create snapshots directory.";
+        return false;
+    }
+
+    const std::time_t now_time = std::time(nullptr);
+    std::tm now_tm{};
+#ifdef _WIN32
+    localtime_s(&now_tm, &now_time);
+#else
+    localtime_r(&now_time, &now_tm);
+#endif
+    char stamp[32] = {};
+    std::strftime(stamp, sizeof(stamp), "%Y%m%d_%H%M%S", &now_tm);
+
+    std::filesystem::path output_path =
+        snapshot_dir / ("snapshot_" + std::string(stamp) + ".png");
+    for (int suffix = 1; std::filesystem::exists(output_path); ++suffix) {
+        output_path = snapshot_dir /
+            ("snapshot_" + std::string(stamp) + "_" + std::to_string(suffix) + ".png");
+    }
+
+    std::vector<u8> png_bytes;
+    if (!encode_rgba_png(latest_frame_rgba_, latest_frame_width_, latest_frame_height_,
+        png_bytes)) {
+        status_message_ = "Snapshot failed: PNG encode error.";
+        return false;
+    }
+
+    std::ofstream out(output_path, std::ios::binary);
+    if (!out.is_open()) {
+        status_message_ = "Snapshot failed: couldn't open output file.";
+        return false;
+    }
+    out.write(reinterpret_cast<const char*>(png_bytes.data()),
+        static_cast<std::streamsize>(png_bytes.size()));
+    if (!out.good()) {
+        status_message_ = "Snapshot failed: write error.";
+        return false;
+    }
+
+    status_message_ = "Snapshot saved: " + output_path.string();
+    return true;
+}
+
 bool App::start_bios_from_ui() {
     if (!system_->bios_loaded()) {
         status_message_ = "Load a BIOS first.";
@@ -3142,7 +3434,7 @@ bool App::boot_disc_from_ui() {
         return false;
     }
 
-    if (!game_bin_path_.empty()) {
+    if (!game_bin_path_.empty() || !game_cue_path_.empty()) {
         // Always (re)attach the currently selected game so changing selection
         // after a prior boot takes effect.
         if (!system_->load_game(game_bin_path_, game_cue_path_)) {
@@ -3746,6 +4038,9 @@ void App::load_persistent_config() {
             const int parsed = static_cast<int>(std::strtol(value.c_str(), nullptr, 10));
             config_slowdown_speed_percent_ = normalize_slowdown_speed_percent(parsed);
         }
+        else if (key == "spu_diagnostic_mode") {
+            config_spu_diagnostic_mode_ = parse_bool(value, config_spu_diagnostic_mode_);
+        }
         else if (key == "gpu_fast_mode") {
             g_gpu_fast_mode = parse_bool(value, g_gpu_fast_mode);
         }
@@ -3769,15 +4064,26 @@ void App::load_persistent_config() {
             const u32 clamped = static_cast<u32>(std::max(64ul, std::min(65535ul, parsed)));
             g_spu_desired_samples = clamped;
         }
+        else if (key == "spu_output_buffer_seconds") {
+            const float parsed = std::strtof(value.c_str(), nullptr);
+            const float clamped = std::max(0.05f, std::min(8.0f, parsed));
+            g_spu_output_buffer_seconds = clamped;
+        }
+        else if (key == "spu_xa_buffer_seconds") {
+            const float parsed = std::strtof(value.c_str(), nullptr);
+            const float clamped = std::max(0.0f, std::min(5.0f, parsed));
+            g_spu_xa_buffer_seconds = clamped;
+        }
+        // Backward compatibility with older config keys in milliseconds.
         else if (key == "spu_output_latency_ms") {
             const unsigned long parsed = std::strtoul(value.c_str(), nullptr, 10);
             const u32 clamped = static_cast<u32>(std::max(16ul, std::min(1000ul, parsed)));
-            g_spu_output_latency_ms = clamped;
+            g_spu_output_buffer_seconds = static_cast<float>(clamped) / 1000.0f;
         }
         else if (key == "spu_xa_latency_ms") {
             const unsigned long parsed = std::strtoul(value.c_str(), nullptr, 10);
             const u32 clamped = static_cast<u32>(std::min(2000ul, parsed));
-            g_spu_xa_latency_ms = clamped;
+            g_spu_xa_buffer_seconds = static_cast<float>(clamped) / 1000.0f;
         }
         else if (key == "spu_enable_audio_queue") {
             g_spu_enable_audio_queue = parse_bool(value, g_spu_enable_audio_queue);
@@ -3811,6 +4117,11 @@ void App::load_persistent_config() {
         }
     }
 
+    g_spu_output_buffer_seconds =
+        std::max(0.05f, std::min(8.0f, g_spu_output_buffer_seconds));
+    g_spu_xa_buffer_seconds =
+        std::max(0.0f, std::min(5.0f, g_spu_xa_buffer_seconds));
+
     if (g_unsafe_ps2_bios_mode) {
         g_experimental_bios_size_mode = true;
     }
@@ -3828,14 +4139,17 @@ void App::save_persistent_config() const {
     out << "low_spec_mode=" << (config_low_spec_mode_ ? 1 : 0) << "\n";
     out << "turbo_speed_percent=" << config_turbo_speed_percent_ << "\n";
     out << "slowdown_speed_percent=" << config_slowdown_speed_percent_ << "\n";
+    out << "spu_diagnostic_mode=" << (config_spu_diagnostic_mode_ ? 1 : 0) << "\n";
     out << "gpu_fast_mode=" << (g_gpu_fast_mode ? 1 : 0) << "\n";
     for (const auto& entry : kKeyboardBindEntries) {
         out << entry.config_key << "="
             << static_cast<int>(input_->key_for_button(entry.button)) << "\n";
     }
     out << "spu_desired_samples=" << static_cast<unsigned>(g_spu_desired_samples) << "\n";
-    out << "spu_output_latency_ms=" << static_cast<unsigned>(g_spu_output_latency_ms) << "\n";
-    out << "spu_xa_latency_ms=" << static_cast<unsigned>(g_spu_xa_latency_ms) << "\n";
+    out << std::fixed << std::setprecision(3);
+    out << "spu_output_buffer_seconds=" << g_spu_output_buffer_seconds << "\n";
+    out << "spu_xa_buffer_seconds=" << g_spu_xa_buffer_seconds << "\n";
+    out.unsetf(std::ios::floatfield);
     out << "spu_enable_audio_queue=" << (g_spu_enable_audio_queue ? 1 : 0) << "\n";
     out << "advanced_sound_status_logging=" << (g_spu_advanced_sound_status ? 1 : 0) << "\n";
     out << "detailed_profiling=" << (g_profile_detailed_timing ? 1 : 0) << "\n";
@@ -3906,5 +4220,3 @@ void App::shutdown() {
     }
     SDL_Quit();
 }
-
-

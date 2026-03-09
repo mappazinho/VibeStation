@@ -48,12 +48,16 @@ private:
   Controller controller_;
   SDL_GameController *gamepad_ = nullptr;
   SDL_JoystickID gamepad_id_ = -1;
+  u16 keyboard_buttons_ = 0xFFFF;
+  u16 gamepad_buttons_ = 0xFFFF;
 
   // Keyboard bindings: scancode → PS1 button
   std::unordered_map<SDL_Scancode, PsxButton> key_bindings_;
 
   // Gamepad button mapping (using SDL_GameController standard)
   void apply_gamepad_state();
+  void set_button_bit(u16 &mask, PsxButton button, bool pressed);
+  void sync_combined_buttons();
 
   // Analog stick deadzone
   static constexpr s16 DEADZONE = 4096;

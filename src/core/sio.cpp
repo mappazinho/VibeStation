@@ -499,7 +499,5 @@ void Sio::tick(u32 cycles) {
   }
   if (stat_dirty) {
     rebuild_stat();
-    return;
   }
-  rebuild_stat();
 }

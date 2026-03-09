@@ -89,6 +89,27 @@ constexpr std::array<s16, 39> kReverbFirTable = {
 
 constexpr u32 kCdGapRampSamples = 96u;
 constexpr u32 kCdRejoinBlendSamples = 32u;
+constexpr double kOutputBufferSecondsMin = 0.05;
+constexpr double kOutputBufferSecondsMax = 8.0;
+constexpr double kXaBufferSecondsMin = 0.0;
+constexpr double kXaBufferSecondsMax = 5.0;
+
+double clamp_output_buffer_seconds() {
+  return std::clamp(static_cast<double>(g_spu_output_buffer_seconds),
+                    kOutputBufferSecondsMin, kOutputBufferSecondsMax);
+}
+
+double clamp_xa_buffer_seconds() {
+  return std::clamp(static_cast<double>(g_spu_xa_buffer_seconds),
+                    kXaBufferSecondsMin, kXaBufferSecondsMax);
+}
+
+u32 bytes_from_seconds(double seconds, u32 sample_rate, u32 channels) {
+  const double samples =
+      seconds * static_cast<double>(sample_rate) * static_cast<double>(channels);
+  const double bytes = samples * static_cast<double>(sizeof(s16));
+  return static_cast<u32>(std::max(0.0, std::ceil(bytes)));
+}
 
 void push_history(std::array<s16, 39> &history, s16 sample) {
   for (size_t i = 0; i + 1 < history.size(); ++i) {
@@ -152,16 +173,15 @@ void Spu::init(System *sys) {
 
   host_buffer_bytes_ = static_cast<u32>(obtained.samples) *
                        static_cast<u32>(obtained.channels) * sizeof(s16);
-  const u32 latency_ms = std::clamp<u32>(g_spu_output_latency_ms, 16u, 1000u);
-  const u64 bytes_per_second =
-      static_cast<u64>(SAMPLE_RATE) * 2u * static_cast<u64>(sizeof(s16));
-  const u32 latency_bytes =
-      static_cast<u32>((bytes_per_second * latency_ms + 999u) / 1000u);
+  const double target_seconds = clamp_output_buffer_seconds();
+  const u32 target_bytes = bytes_from_seconds(target_seconds, SAMPLE_RATE, 2u);
   host_target_queue_bytes_ =
-      std::max({HOST_TARGET_QUEUE_BYTES_MIN, host_buffer_bytes_ * 3u, latency_bytes});
+      std::max({HOST_TARGET_QUEUE_BYTES_MIN, host_buffer_bytes_ * 3u, target_bytes});
+  const u32 max_bytes = bytes_from_seconds(
+      std::min(kOutputBufferSecondsMax, target_seconds + 2.0), SAMPLE_RATE, 2u);
   host_max_queue_bytes_ =
       std::max(HOST_MAX_QUEUE_BYTES_MIN,
-               std::max(host_buffer_bytes_ * 8u, host_target_queue_bytes_ * 2u));
+               std::max(host_buffer_bytes_ * 8u, max_bytes));
   if (host_max_queue_bytes_ <= host_target_queue_bytes_) {
     host_max_queue_bytes_ = host_target_queue_bytes_ + host_buffer_bytes_;
   }
@@ -170,10 +190,10 @@ void Spu::init(System *sys) {
   audio_started_ = false;
   opened_audio_samples_ = requested_samples;
   SDL_PauseAudioDevice(audio_device_, 1);
-  LOG_INFO("SPU: Audio initialized (%d Hz, device samples=%u, queue target/max=%u/%u bytes)",
+  LOG_INFO("SPU: Audio initialized (%d Hz, device samples=%u, queue target/max=%u/%u bytes, target=%.2fs)",
            obtained.freq, static_cast<unsigned>(obtained.samples),
            static_cast<unsigned>(host_target_queue_bytes_),
-           static_cast<unsigned>(host_max_queue_bytes_));
+           static_cast<unsigned>(host_max_queue_bytes_), target_seconds);
 }
 
 void Spu::shutdown() {
@@ -1681,33 +1701,33 @@ void Spu::queue_host_audio(const std::vector<s16> &samples) {
     return;
   }
 
-  // Allow runtime latency tuning without reinitializing the device.
-  const u32 latency_ms = std::clamp<u32>(g_spu_output_latency_ms, 16u, 1000u);
-  const double queue_speed = std::clamp(output_speed, 0.1, 4.0);
-  const u32 slowdown_scale = (queue_speed < 0.999)
-                                 ? static_cast<u32>(std::clamp(
-                                       static_cast<int>(std::lround(1.0 / queue_speed)), 1, 8))
-                                 : 1u;
-  const u32 effective_latency_ms = std::min<u32>(1000u, latency_ms * slowdown_scale);
-  const u64 bytes_per_second =
-      static_cast<u64>(SAMPLE_RATE) * 2u * static_cast<u64>(sizeof(s16));
-  const u32 latency_bytes =
-      static_cast<u32>((bytes_per_second * effective_latency_ms + 999u) / 1000u);
+  // Seconds-based queue model: keep buffering toward the configured target.
+  const double target_seconds = clamp_output_buffer_seconds();
+  const u32 bytes_per_second = static_cast<u32>(SAMPLE_RATE * 2u * sizeof(s16));
+  const u32 target_bytes = bytes_from_seconds(target_seconds, SAMPLE_RATE, 2u);
   host_target_queue_bytes_ =
-      std::max({HOST_TARGET_QUEUE_BYTES_MIN, host_buffer_bytes_ * 3u, latency_bytes});
+      std::max({HOST_TARGET_QUEUE_BYTES_MIN, host_buffer_bytes_ * 3u, target_bytes});
+  const u32 max_bytes = bytes_from_seconds(
+      std::min(kOutputBufferSecondsMax, target_seconds + 2.0), SAMPLE_RATE, 2u);
   host_max_queue_bytes_ =
-      std::max(HOST_MAX_QUEUE_BYTES_MIN,
-               std::max(host_buffer_bytes_ * 8u, host_target_queue_bytes_ * 2u));
+      std::max(HOST_MAX_QUEUE_BYTES_MIN, std::max(host_buffer_bytes_ * 8u, max_bytes));
   if (host_max_queue_bytes_ <= host_target_queue_bytes_) {
     host_max_queue_bytes_ = host_target_queue_bytes_ + host_buffer_bytes_;
   }
+
+  const double staging_seconds =
+      std::min(20.0, std::max(2.0, target_seconds * 2.0 + 1.0));
+  const size_t staging_max_samples = std::max<size_t>(
+      HOST_STAGING_MAX_SAMPLES,
+      static_cast<size_t>(std::ceil(staging_seconds * static_cast<double>(SAMPLE_RATE) *
+                                    2.0)));
 
   if (host_staging_read_pos_ >= host_staging_samples_.size()) {
     host_staging_samples_.clear();
     host_staging_read_pos_ = 0;
   } else if (host_staging_read_pos_ > 0 &&
              (host_staging_read_pos_ >= 16384u ||
-              host_staging_samples_.size() >= (HOST_STAGING_MAX_SAMPLES * 2u))) {
+              host_staging_samples_.size() >= staging_max_samples)) {
     const size_t unread = host_staging_samples_.size() - host_staging_read_pos_;
     std::move(host_staging_samples_.begin() +
                   static_cast<s64>(host_staging_read_pos_),
@@ -1717,8 +1737,6 @@ void Spu::queue_host_audio(const std::vector<s16> &samples) {
   }
 
   const size_t unread = host_staging_samples_.size() - host_staging_read_pos_;
-  const size_t staging_max_samples =
-      HOST_STAGING_MAX_SAMPLES * static_cast<size_t>(slowdown_scale);
   if (unread + queue_samples->size() > staging_max_samples) {
     size_t drop = unread + queue_samples->size() - staging_max_samples;
     drop = std::min(drop, unread);
@@ -1737,21 +1755,24 @@ void Spu::queue_host_audio(const std::vector<s16> &samples) {
   host_staging_samples_.insert(host_staging_samples_.end(),
                                queue_samples->begin(), queue_samples->end());
 
+  u32 queued = SDL_GetQueuedAudioSize(audio_device_);
+  if (queued > host_max_queue_bytes_) {
+    SDL_ClearQueuedAudio(audio_device_);
+    audio_diag_.dropped_frames += queued / (static_cast<u32>(sizeof(s16)) * 2u);
+    ++audio_diag_.overrun_events;
+    queued = 0;
+  }
+
   while (host_staging_read_pos_ < host_staging_samples_.size()) {
-    const u32 queued = SDL_GetQueuedAudioSize(audio_device_);
+    queued = SDL_GetQueuedAudioSize(audio_device_);
     audio_diag_.queue_last_bytes = queued;
     audio_diag_.queue_peak_bytes = std::max(audio_diag_.queue_peak_bytes, queued);
 
-    if (queued >= host_max_queue_bytes_) {
+    if (queued >= host_target_queue_bytes_) {
       break;
     }
 
-    u32 room = 0;
-    if (queued < host_target_queue_bytes_) {
-      room = host_target_queue_bytes_ - queued;
-    } else {
-      room = host_max_queue_bytes_ - queued;
-    }
+    const u32 room = host_target_queue_bytes_ - queued;
     if (room < sizeof(s16) * 2u) {
       break;
     }
@@ -1778,24 +1799,24 @@ void Spu::queue_host_audio(const std::vector<s16> &samples) {
     host_staging_read_pos_ = 0;
   }
 
-  u32 queued = SDL_GetQueuedAudioSize(audio_device_);
+  queued = SDL_GetQueuedAudioSize(audio_device_);
   audio_diag_.queue_last_bytes = queued;
   audio_diag_.queue_peak_bytes = std::max(audio_diag_.queue_peak_bytes, queued);
 
   if (!audio_started_) {
-    const u32 startup_threshold = std::max(host_target_queue_bytes_, 16384u);
+      const u32 startup_threshold =
+          std::min(host_target_queue_bytes_,
+              std::max(host_buffer_bytes_ * 2u,
+                  bytes_from_seconds(0.10, SAMPLE_RATE, 2u)));
     if (queued >= startup_threshold) {
       SDL_PauseAudioDevice(audio_device_, 0);
       audio_started_ = true;
     }
   } else {
-    // If we underrun, pause and re-enter prebuffer mode so configured latency
-    // headroom is rebuilt (important after turbo stress).
-    const u32 starve_threshold = std::max(host_buffer_bytes_ / 8u, 1024u);
-    if (queued <= starve_threshold) {
+    // Continuous streaming mode: keep audio device running and report underruns,
+    // but do not pause/rebuffer in large bursts.
+    if (queued == 0u && host_staging_read_pos_ >= host_staging_samples_.size()) {
       ++audio_diag_.underrun_events;
-      SDL_PauseAudioDevice(audio_device_, 1);
-      audio_started_ = false;
     }
   }
 }
@@ -2075,6 +2096,10 @@ void Spu::tick(u32 cycles) {
   const bool track_sample_diag = g_spu_advanced_sound_status;
   audio_diag_.gaussian_active = true;
   audio_diag_.reverb_enabled = (spucnt_eff & 0x0080u) != 0u;
+  const size_t xa_prefill_frames = static_cast<size_t>(std::ceil(
+      static_cast<double>(SAMPLE_RATE) * clamp_xa_buffer_seconds()));
+  const size_t xa_low_frames =
+      (xa_prefill_frames > 0u) ? std::max<size_t>(1u, xa_prefill_frames / 2u) : 0u;
   for (int s = 0; s < samples_to_generate; ++s) {
     ++sample_clock_;
     capture_half_ ^= 1u;
@@ -2224,11 +2249,6 @@ void Spu::tick(u32 cycles) {
         return static_cast<s16>(std::clamp(s, -32768, 32767));
       };
 
-      const u32 xa_latency_ms = std::min<u32>(g_spu_xa_latency_ms, 2000u);
-      const size_t xa_prefill_frames =
-          (static_cast<size_t>(SAMPLE_RATE) * static_cast<size_t>(xa_latency_ms) +
-           999u) /
-          1000u;
       const size_t unread_cd_samples =
           (cd_input_read_pos_ < cd_input_samples_.size())
               ? (cd_input_samples_.size() - cd_input_read_pos_)
@@ -2237,6 +2257,11 @@ void Spu::tick(u32 cycles) {
       if (!cd_stream_started_ &&
           (xa_prefill_frames == 0u || unread_cd_frames >= xa_prefill_frames)) {
         cd_stream_started_ = true;
+      }
+      if (cd_stream_started_ && xa_low_frames > 0u &&
+          unread_cd_frames <= xa_low_frames) {
+        // Pause output until buffer recovers to prefill threshold.
+        cd_stream_started_ = false;
       }
 
       float cd_l = 0.0f;
@@ -2325,8 +2350,10 @@ void Spu::tick(u32 cycles) {
     float wet_r = 0.0f;
     if (!g_low_spec_mode) {
       const std::array<float, 2> wet = step_reverb(rev_send_l, rev_send_r, spucnt_eff);
-      wet_l = wet[0];
-      wet_r = wet[1];
+      const float reverb_mix =
+          static_cast<float>(reverb_mix_multiplier_.load(std::memory_order_acquire));
+      wet_l = wet[0] * reverb_mix;
+      wet_r = wet[1] * reverb_mix;
     }
     if (track_sample_diag) {
       audio_diag_.peak_wet_l = std::max(audio_diag_.peak_wet_l, std::abs(wet_l));
