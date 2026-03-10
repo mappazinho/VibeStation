@@ -2,6 +2,7 @@
 #include "system.h"
 #include <algorithm>
 #include <chrono>
+#include <vector>
 
 void DmaController::recompute_dicr_master(bool request_irq_on_rise) {
   const bool old_master = (dicr_ & 0x80000000u) != 0;
@@ -32,89 +33,14 @@ void DmaController::reset() {
   }
   dpcr_ = 0x07654321;
   dicr_ = 0;
-  reset_mdec_out_reorder_state();
-}
-
-void DmaController::reset_mdec_out_reorder_state() {
-  mdec_out_reorder_active_ = false;
-  mdec_out_mb_base_addr_ = 0;
-  mdec_out_block_id_ = 0xFF;
-  mdec_out_word_index_in_block_ = 0;
-  mdec_out_last_linear_addr_ = 0;
-  mdec_out_last_step_ = 0;
-}
-
-u32 DmaController::map_mdec_out_word_addr(u32 linear_addr, s32 step, u8 block_id,
-                                          u8 depth) {
-  const u32 addr = linear_addr & 0x001FFFFCu;
-  // DMA1 block re-ordering is needed for colored macroblocks in both:
-  // depth=2 (24bpp, 8x8 block = 48 words) and depth=3 (15bpp, 32 words).
-  if (step != 4 || block_id >= 4u || (depth != 2u && depth != 3u)) {
-    reset_mdec_out_reorder_state();
-    return addr;
-  }
-
-  if (mdec_out_reorder_active_) {
-    const u32 expected =
-        static_cast<u32>(static_cast<s32>(mdec_out_last_linear_addr_) +
-                         mdec_out_last_step_) &
-        0x001FFFFCu;
-    const bool discontinuity =
-        (step != mdec_out_last_step_) || (addr != expected);
-    if (discontinuity) {
-      // DMA1 can be reprogrammed between MDEC bursts; stale reorder state
-      // causes macroblock data to be mapped onto old destinations.
-      reset_mdec_out_reorder_state();
-    }
-  }
-
-  const u32 words_per_row_in_block = (depth == 2u) ? 6u : 4u;
-  const u32 words_per_block = words_per_row_in_block * 8u;
-  const u32 macroblock_row_words = words_per_row_in_block * 2u;
-
-  if (!mdec_out_reorder_active_) {
-    mdec_out_reorder_active_ = true;
-    mdec_out_mb_base_addr_ = addr;
-    mdec_out_block_id_ = block_id;
-    mdec_out_word_index_in_block_ = 0;
-  } else if (block_id != mdec_out_block_id_) {
-    mdec_out_block_id_ = block_id;
-    mdec_out_word_index_in_block_ = 0;
-    if (block_id == 0u) {
-      // Y1 marks the start of a new 16x16 macroblock in destination RAM.
-      mdec_out_mb_base_addr_ = addr;
-    }
-  } else if (block_id == 0u && mdec_out_word_index_in_block_ == 0u) {
-    // Some streams can begin a fresh DMA burst right at a Y1 block boundary.
-    // Refresh macroblock base even if block id didn't toggle.
-    mdec_out_mb_base_addr_ = addr;
-  }
-
-  const u32 word_index = mdec_out_word_index_in_block_++;
-  if (mdec_out_word_index_in_block_ >= words_per_block) {
-    mdec_out_word_index_in_block_ = 0;
-  }
-
-  const u32 row = word_index / words_per_row_in_block;
-  const u32 col = word_index % words_per_row_in_block;
-  const u32 block_x_words = (block_id & 0x1u) ? words_per_row_in_block : 0u;
-  const u32 block_y_rows = (block_id >= 2u) ? 8u : 0u;
-  const u32 offset_words =
-      (block_y_rows + row) * macroblock_row_words + block_x_words + col;
-  mdec_out_last_linear_addr_ = addr;
-  mdec_out_last_step_ = step;
-  return (mdec_out_mb_base_addr_ + offset_words * 4u) & 0x001FFFFCu;
 }
 
 u32 DmaController::read(u32 offset) const {
-  // Channels are at 0x80-0xFF in the DMA register space
-  // 0x1F801080 + channel * 0x10 + register
   if (offset < 0x70) {
     int channel = (offset >> 4) & 0x7;
     int reg = offset & 0xF;
 
     if (channel >= 7) {
-      LOG_WARN("DMA: Read from invalid channel %d", channel);
       return 0;
     }
 
@@ -127,7 +53,6 @@ u32 DmaController::read(u32 offset) const {
     case 0x8:
       return ch.channel_ctrl;
     default:
-      LOG_WARN("DMA: Unhandled channel %d reg 0x%X read", channel, reg);
       return 0;
     }
   }
@@ -138,7 +63,6 @@ u32 DmaController::read(u32 offset) const {
   case 0x74:
     return dicr_;
   default:
-    LOG_WARN("DMA: Unhandled read at offset 0x%X", offset);
     return 0;
   }
 }
@@ -149,14 +73,13 @@ void DmaController::write(u32 offset, u32 value) {
     int reg = offset & 0xF;
 
     if (channel >= 7) {
-      LOG_WARN("DMA: Write to invalid channel %d", channel);
       return;
     }
 
     auto &ch = channels_[channel];
     switch (reg) {
     case 0x0:
-      ch.base_addr = value & 0x00FFFFFF; // 24-bit address
+      ch.base_addr = value & 0x00FFFFFF;
       break;
     case 0x4:
       ch.block_ctrl = value;
@@ -165,24 +88,9 @@ void DmaController::write(u32 offset, u32 value) {
     case 0x8:
       ch.block_words_remaining = 0;
       ch.channel_ctrl = value;
-      if (g_trace_dma) {
-        static u64 chcr_log_count = 0;
-        if (trace_should_log(chcr_log_count, g_trace_burst_dma,
-                             g_trace_stride_dma)) {
-          LOG_DEBUG("DMA: CH%d CHCR=0x%08X (enabled=%d trigger=%d sync=%d "
-                    "dpcr_en=%d)",
-                    channel, ch.channel_ctrl, ch.enabled() ? 1 : 0,
-                    ch.trigger() ? 1 : 0, static_cast<int>(ch.sync_mode()),
-                    channel_enabled(channel) ? 1 : 0);
-        }
-      }
       if (ch.is_active() && channel_enabled(channel) && request_active(channel)) {
         execute_dma(channel);
       }
-      break;
-    default:
-      LOG_WARN("DMA: Unhandled channel %d reg 0x%X write = 0x%08X", channel,
-               reg, value);
       break;
     }
     return;
@@ -191,44 +99,22 @@ void DmaController::write(u32 offset, u32 value) {
   switch (offset) {
   case 0x70:
     dpcr_ = value;
-    if (g_trace_dma) {
-      static u64 dpcr_log_count = 0;
-      if (trace_should_log(dpcr_log_count, g_trace_burst_dma,
-                           g_trace_stride_dma)) {
-        LOG_DEBUG("DMA: DPCR=0x%08X", dpcr_);
-      }
-    }
     break;
   case 0x74: {
-    // DICR: bits 24-30 are W1C flags, bit31 is derived master-IRQ flag.
     const u32 old_flags = (dicr_ >> 24) & 0x7Fu;
     const u32 ack_flags = (value >> 24) & 0x7Fu;
     const u32 new_flags = old_flags & ~ack_flags;
-    const u32 writable_control = value & 0x00FF803Fu; // 0-5,15,16-23
+    const u32 writable_control = value & 0x00FF803Fu;
     const u32 old_master = dicr_ & 0x80000000u;
     dicr_ = old_master | writable_control | (new_flags << 24);
     recompute_dicr_master(true);
     break;
   }
-  default:
-    LOG_WARN("DMA: Unhandled write at offset 0x%X = 0x%08X", offset, value);
-    break;
   }
 }
 
 void DmaController::execute_dma(int channel) {
   auto &ch = channels_[channel];
-  if (g_trace_dma) {
-    static u64 exec_log_count = 0;
-    if (trace_should_log(exec_log_count, g_trace_burst_dma,
-                         g_trace_stride_dma)) {
-      LOG_DEBUG("DMA: Execute ch=%d madr=0x%08X bcr=0x%08X chcr=0x%08X sync=%d "
-                "from_ram=%d",
-                channel, ch.base_addr, ch.block_ctrl, ch.channel_ctrl,
-                static_cast<int>(ch.sync_mode()), ch.from_ram() ? 1 : 0);
-    }
-  }
-
   switch (ch.sync_mode()) {
   case DmaChannel::SyncMode::Immediate:
     dma_block(channel);
@@ -278,9 +164,6 @@ void DmaController::dma_block(int channel) {
   }
 
   bool from_ram = ch.from_ram();
-  if (channel == 1 && from_ram) {
-    reset_mdec_out_reorder_state();
-  }
   auto &dbg = last_debug_[channel];
   dbg.base_addr = addr & 0x00FFFFFFu;
   dbg.block_ctrl = ch.block_ctrl;
@@ -298,29 +181,30 @@ void DmaController::dma_block(int channel) {
   }
 
   if (!from_ram && ch.sync_mode() == DmaChannel::SyncMode::Block) {
-    switch (channel) {
-    case 1:
-      transfer_words =
-          std::min(transfer_words, sys_->mdec_dma_out_words_available());
-      break;
-    case 3:
-      transfer_words = std::min(transfer_words, sys_->cdrom_dma_words_available());
-      break;
-    default:
-      break;
+    if (channel == 1 && sys_->mdec_dma_out_words_available() < transfer_words) {
+       transfer_words = sys_->mdec_dma_out_words_available();
+    } else if (channel == 3 && sys_->cdrom_dma_words_available() < transfer_words) {
+       transfer_words = sys_->cdrom_dma_words_available();
     }
     if (transfer_words == 0) {
       return;
     }
   }
 
+  // Only truncate MDEC in if it is block mode.
+  if (from_ram && channel == 0 && ch.sync_mode() == DmaChannel::SyncMode::Block) {
+    transfer_words = std::min(transfer_words, sys_->mdec_dma_in_words_capacity());
+    if (transfer_words == 0) {
+      return;
+    }
+  }
+
   if (channel == 6) {
-    // OTC (Ordering Table Clear): always writes to RAM, backwards.
     u32 current = addr;
     for (u32 i = 0; i < transfer_words; i++) {
       u32 val;
       if (i == transfer_words - 1) {
-        val = 0x00FFFFFF; // End-of-list marker
+        val = 0x00FFFFFF;
       } else {
         val = (current - 4) & 0x001FFFFC;
       }
@@ -344,54 +228,58 @@ void DmaController::dma_block(int channel) {
     return;
   }
 
-  for (u32 i = 0; i < transfer_words; i++) {
-    u32 current_addr = addr & 0x001FFFFC;
-
-    if (from_ram) {
-      u32 data = sys_->read32(current_addr);
-      // Send to device
-      switch (channel) {
-      case 0: // MDEC in
-        sys_->mdec_dma_write(data);
-        break;
-      case 2: // GPU
-        sys_->gpu_gp0(data);
-        break;
-      case 4: // SPU
-        sys_->spu_dma_write(data);
-        break;
-      default:
-        LOG_WARN("DMA: Unhandled from-RAM channel %d", channel);
-        break;
-      }
-    } else {
-      u32 data = 0;
-      u32 write_addr = current_addr;
-      // Read from device
-      switch (channel) {
-      case 1: // MDEC out
-        write_addr = map_mdec_out_word_addr(current_addr, step,
-                                            sys_->mdec_dma_out_block(),
-                                            sys_->mdec_dma_out_depth());
-        data = sys_->mdec_dma_read();
-        break;
-      case 2: // GPU (GPUREAD)
-        data = sys_->gpu_read();
-        break;
-      case 3: // CDROM
-        data = sys_->cdrom_dma_read();
-        break;
-      case 4: // SPU
-        data = sys_->spu_dma_read();
-        break;
-      default:
-        LOG_WARN("DMA: Unhandled to-RAM channel %d", channel);
-        break;
-      }
-      sys_->write32(write_addr, data);
+  if (from_ram && channel == 0 && transfer_words != 0u) {
+    std::vector<u32> words(transfer_words);
+    u32 current = ch.base_addr;
+    for (u32 i = 0; i < transfer_words; ++i) {
+      words[i] = sys_->read32(current & 0x001FFFFCu);
+      current = static_cast<u32>(static_cast<s32>(current) + step);
     }
-
-    addr = static_cast<u32>(static_cast<s32>(addr) + step);
+    sys_->mdec_dma_write(words.data(), transfer_words);
+    addr = current;
+  } else if (!from_ram && channel == 1 && transfer_words != 0u) {
+    std::vector<u32> words(transfer_words);
+    sys_->mdec_dma_read(words.data(), transfer_words);
+    u32 current = ch.base_addr;
+    for (u32 i = 0; i < transfer_words; ++i) {
+      sys_->write32(current & 0x001FFFFCu, words[i]);
+      current = static_cast<u32>(static_cast<s32>(current) + step);
+    }
+    addr = current;
+  } else {
+    for (u32 i = 0; i < transfer_words; ++i) {
+      const u32 current_addr = addr & 0x001FFFFCu;
+      if (from_ram) {
+        const u32 data = sys_->read32(current_addr);
+        switch (channel) {
+        case 2:
+          sys_->gpu_gp0(data);
+          break;
+        case 4:
+          sys_->spu_dma_write(data);
+          break;
+        default:
+          break;
+        }
+      } else {
+        u32 data = 0;
+        switch (channel) {
+        case 2:
+          data = sys_->gpu_read();
+          break;
+        case 3:
+          data = sys_->cdrom_dma_read();
+          break;
+        case 4:
+          data = sys_->spu_dma_read();
+          break;
+        default:
+          break;
+        }
+        sys_->write32(current_addr, data);
+      }
+      addr = static_cast<u32>(static_cast<s32>(addr) + step);
+    }
   }
 
   ch.base_addr = addr & 0x00FFFFFF;
@@ -411,72 +299,35 @@ void DmaController::dma_block(int channel) {
 }
 
 void DmaController::dma_linked_list(int channel) {
-  // Only GPU (channel 2) uses linked list mode
-  if (channel != 2) {
-    LOG_WARN("DMA: Linked list mode on non-GPU channel %d", channel);
-    return;
-  }
-
+  if (channel != 2) return;
   u32 addr = channels_[channel].base_addr & 0x001FFFFC;
   u32 safety = 0;
-
   while (safety < 0x100000) {
     u32 header = sys_->read32(addr);
     u32 word_count = header >> 24;
-
-    // Send words to GP0
     for (u32 i = 0; i < word_count; i++) {
       addr = (addr + 4) & 0x001FFFFC;
-      u32 command = sys_->read32(addr);
-      sys_->gpu_gp0(command);
+      sys_->gpu_gp0(sys_->read32(addr));
     }
-
-    // Follow link to next node
-    if (header & 0x00800000) {
-      break; // End-of-list marker
-    }
-
+    if (header & 0x00800000) break;
     addr = header & 0x001FFFFC;
     safety++;
-  }
-
-  if (safety >= 0x100000) {
-    LOG_ERROR("DMA: Linked list loop detected!");
   }
 }
 
 void DmaController::transfer_complete(int channel) {
   auto &ch = channels_[channel];
-
-  // Clear enable + trigger bits
-  ch.channel_ctrl &= ~(1u << 24); // Disable
-  ch.channel_ctrl &= ~(1u << 28); // Clear trigger
+  ch.channel_ctrl &= ~(1u << 24);
+  ch.channel_ctrl &= ~(1u << 28);
   ch.block_words_remaining = 0;
-  // Keep MDEC-out reorder state across DMA1 transfer boundaries.
-  // Some clients issue a sequence of DMA1 transfers while consuming one
-  // continuous MDEC output stream; resetting here can desynchronize macroblock
-  // base tracking when a transfer ends mid-macroblock.
-
-  // Set completion flag in DICR and update IRQ state.
   dicr_ |= (1u << (24 + channel));
   recompute_dicr_master(true);
 }
 
 void DmaController::tick() {
-  const bool profile_detailed = g_profile_detailed_timing;
-  // Check if any channels need to start
   for (int i = 0; i < 7; i++) {
     if (channels_[i].is_active() && channel_enabled(i) && request_active(i)) {
-      std::chrono::high_resolution_clock::time_point start{};
-      if (profile_detailed) {
-        start = std::chrono::high_resolution_clock::now();
-      }
       execute_dma(i);
-      if (profile_detailed && sys_) {
-        const auto end = std::chrono::high_resolution_clock::now();
-        sys_->add_dma_time(
-            std::chrono::duration<double, std::milli>(end - start).count());
-      }
     }
   }
 }
@@ -484,24 +335,22 @@ void DmaController::tick() {
 bool DmaController::request_active(int channel) const {
   const DmaChannel &ch = channels_[channel];
   if (ch.sync_mode() == DmaChannel::SyncMode::Immediate) {
+    if (channel == 0) return sys_->mdec_dma_in_request();
+    if (channel == 3) {
+      u32 words = ch.block_size();
+      if (words == 0u) words = 0x10000u;
+      return sys_->cdrom_dma_request() && (sys_->cdrom_dma_words_available() >= words);
+    }
     return true;
   }
-  if (ch.sync_mode() == DmaChannel::SyncMode::LinkedList) {
-    return true;
-  }
+  if (ch.sync_mode() == DmaChannel::SyncMode::LinkedList) return true;
 
   switch (channel) {
-  case 0:
-    return sys_->mdec_dma_in_request();
-  case 1:
-    return sys_->mdec_dma_out_request();
-  case 2:
-    return sys_->gpu_dma_request();
-  case 3:
-    return sys_->cdrom_dma_request();
-  case 4:
-    return sys_->spu_dma_request();
-  default:
-    return true;
+  case 0: return sys_->mdec_dma_in_request();
+  case 1: return sys_->mdec_dma_out_request();
+  case 2: return sys_->gpu_dma_request();
+  case 3: return sys_->cdrom_dma_request();
+  case 4: return sys_->spu_dma_request();
+  default: return true;
   }
 }

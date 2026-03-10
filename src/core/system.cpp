@@ -11,6 +11,8 @@ namespace {
     constexpr u32 kRamWatchEnd = 0x00047A10u;
     constexpr u32 kRamWatchWord0 = 0x000479D0u;
     constexpr u32 kRamWatchLogLimit = 64u;
+    constexpr u64 kMdecMmioLogLimit = 256u;
+    u64 g_mdec_mmio_log_count = 0;
 
     struct BusWarnLimiter {
         u32 last_addr = 0xFFFFFFFFu;
@@ -309,6 +311,14 @@ bool System::boot_disc(bool direct_boot) {
 
     set_running(true);
     return true;
+}
+
+bool should_log_mdec_mmio() {
+    if (g_mdec_mmio_log_count < kMdecMmioLogLimit) {
+        ++g_mdec_mmio_log_count;
+        return true;
+    }
+    return false;
 }
 
 void System::reset() {
@@ -1307,6 +1317,34 @@ u32 System::read32(u32 addr) {
     return 0xFFFFFFFFu;
 }
 
+void System::push_mdec_command_byte(u8 value) {
+    const u32 shift = (mdec_command_shadow_mask_ & 0x3u) * 8u;
+    mdec_command_shadow_ |= static_cast<u32>(value) << shift;
+    ++mdec_command_shadow_mask_;
+    if (mdec_command_shadow_mask_ >= 4u) {
+        mdec_.write_command(mdec_command_shadow_);
+        mdec_command_shadow_ = 0;
+        mdec_command_shadow_mask_ = 0;
+    }
+}
+
+void System::push_mdec_command_halfword(u16 value) {
+    push_mdec_command_byte(static_cast<u8>(value & 0xFFu));
+    push_mdec_command_byte(static_cast<u8>((value >> 8) & 0xFFu));
+}
+
+void System::push_mdec_command_word(u32 value) {
+    if (mdec_command_shadow_mask_ == 0u) {
+        mdec_.write_command(value);
+        return;
+    }
+    // Preserve FIFO ordering if the host mixed widths mid-stream.
+    push_mdec_command_byte(static_cast<u8>(value & 0xFFu));
+    push_mdec_command_byte(static_cast<u8>((value >> 8) & 0xFFu));
+    push_mdec_command_byte(static_cast<u8>((value >> 16) & 0xFFu));
+    push_mdec_command_byte(static_cast<u8>((value >> 24) & 0xFFu));
+}
+
 void System::write8(u32 addr, u8 val) {
     u32 phys = psx::mask_address(addr);
     if (g_trace_bus && phys >= 0x1F801000 && phys < 0x1F803000) {
@@ -1354,8 +1392,17 @@ void System::write8(u32 addr, u8 val) {
             return;
         }
         if (io >= 0x820 && io < 0x828) {
-            // Games can update the MDEC control register with partial writes.
-            if ((io & ~0x3u) == 0x824) {
+            const u32 reg_base = (io & ~0x3u);
+            if (reg_base == 0x820) {
+                if (should_log_mdec_mmio()) {
+                    LOG_INFO("BUS: MDEC W8 cmd io=0x%03X val=0x%02X", io, val);
+                }
+                push_mdec_command_byte(val);
+            } else if (reg_base == 0x824) {
+                if (should_log_mdec_mmio()) {
+                    LOG_INFO("BUS: MDEC W8 ctl io=0x%03X val=0x%02X", io, val);
+                }
+                // Games can update the MDEC control register with partial writes.
                 const u32 shift = (io & 0x3u) * 8u;
                 const u32 mask = 0xFFu << shift;
                 mdec_control_shadow_ =
@@ -1363,6 +1410,8 @@ void System::write8(u32 addr, u8 val) {
                 mdec_.write_control(mdec_control_shadow_);
                 if ((mdec_control_shadow_ & 0x80000000u) != 0) {
                     mdec_control_shadow_ = 0;
+                    mdec_command_shadow_ = 0;
+                    mdec_command_shadow_mask_ = 0;
                 }
             }
             return;
@@ -1444,7 +1493,16 @@ void System::write16(u32 addr, u16 val) {
             return;
         }
         if (io >= 0x820 && io < 0x828) {
-            if ((io & ~0x3u) == 0x824) {
+            const u32 reg_base = (io & ~0x3u);
+            if (reg_base == 0x820) {
+                if (should_log_mdec_mmio()) {
+                    LOG_INFO("BUS: MDEC W16 cmd io=0x%03X val=0x%04X", io, val);
+                }
+                push_mdec_command_halfword(val);
+            } else if (reg_base == 0x824) {
+                if (should_log_mdec_mmio()) {
+                    LOG_INFO("BUS: MDEC W16 ctl io=0x%03X val=0x%04X", io, val);
+                }
                 const u32 shift = (io & 0x2u) * 8u;
                 const u32 mask = 0xFFFFu << shift;
                 mdec_control_shadow_ =
@@ -1452,6 +1510,8 @@ void System::write16(u32 addr, u16 val) {
                 mdec_.write_control(mdec_control_shadow_);
                 if ((mdec_control_shadow_ & 0x80000000u) != 0) {
                     mdec_control_shadow_ = 0;
+                    mdec_command_shadow_ = 0;
+                    mdec_command_shadow_mask_ = 0;
                 }
             }
             return;
@@ -1555,11 +1615,21 @@ void System::write32(u32 addr, u32 val) {
         }
         // MDEC
         if (io == 0x820) {
-            mdec_.write_command(val);
+            if (should_log_mdec_mmio()) {
+                LOG_INFO("BUS: MDEC W32 cmd val=0x%08X", val);
+            }
+            push_mdec_command_word(val);
             return;
         }
         if (io == 0x824) {
+            if (should_log_mdec_mmio()) {
+                LOG_INFO("BUS: MDEC W32 ctl val=0x%08X", val);
+            }
             mdec_control_shadow_ = ((val & 0x80000000u) != 0) ? 0u : val;
+            if ((val & 0x80000000u) != 0) {
+                mdec_command_shadow_ = 0;
+                mdec_command_shadow_mask_ = 0;
+            }
             mdec_.write_control(val);
             return;
         }

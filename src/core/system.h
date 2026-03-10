@@ -416,14 +416,16 @@ public:
   bool cdrom_dma_request() const { return cdrom_.dma_request(); }
   u32 cdrom_dma_words_available() const { return cdrom_.dma_words_available(); }
   void mdec_dma_write(u32 val) { mdec_.dma_write(val); }
+  void mdec_dma_write(const u32 *vals, u32 count) { mdec_.dma_write(vals, count); }
   u32 mdec_dma_read() { return mdec_.dma_read(); }
-  u8 mdec_dma_out_block() const { return mdec_.dma_out_block(); }
-  u8 mdec_dma_out_depth() const { return mdec_.dma_out_depth(); }
+  void mdec_dma_read(u32 *vals, u32 count) { mdec_.dma_read(vals, count); }
   bool mdec_dma_in_request() const { return mdec_.dma_in_request(); }
   bool mdec_dma_out_request() const { return mdec_.dma_out_request(); }
+  u32 mdec_dma_in_words_capacity() const { return mdec_.dma_in_words_capacity(); }
   u32 mdec_dma_out_words_available() const {
     return mdec_.dma_out_words_available();
   }
+  const Mdec::DebugStats &mdec_debug_stats() const { return mdec_.debug_stats(); }
   void spu_dma_write(u32 val);
   u32 spu_dma_read();
   bool spu_dma_request() const { return spu_.dma_request(); }
@@ -465,6 +467,7 @@ private:
   u32 mem_ctrl_[9] = {};
   u32 ram_size_ = 0;
   u32 cache_ctrl_ = 0;
+  // Byte-stream packer for sub-32-bit host writes to MDEC command/data port.
   u32 mdec_command_shadow_ = 0;
   u32 mdec_command_shadow_mask_ = 0;
   u32 mdec_control_shadow_ = 0;
@@ -527,6 +530,9 @@ private:
   void note_cdrom_io(u32 phys_addr);
   void note_sio_io(u32 phys_addr);
   void maybe_log_ram_watch_write(u32 phys_addr, u32 value, u32 size_bytes);
+  void push_mdec_command_byte(u8 value);
+  void push_mdec_command_halfword(u16 value);
+  void push_mdec_command_word(u32 value);
   void sync_spu_to_cpu();
   void apply_ram_reaper_for_frame();
   void apply_gpu_reaper_for_frame();

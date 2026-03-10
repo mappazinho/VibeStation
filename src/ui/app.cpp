@@ -29,6 +29,28 @@
 namespace {
     constexpr const char* kAppConfigFileName = "vibestation_config.ini";
     constexpr const char* kCorruptionPresetDirName = "corruption_presets";
+    void clear_stdout_console() {
+#if defined(_WIN32)
+        HANDLE console = GetStdHandle(STD_OUTPUT_HANDLE);
+        if (console != INVALID_HANDLE_VALUE && console != nullptr) {
+            CONSOLE_SCREEN_BUFFER_INFO info{};
+            if (GetConsoleScreenBufferInfo(console, &info)) {
+                const DWORD cell_count =
+                    static_cast<DWORD>(info.dwSize.X) * static_cast<DWORD>(info.dwSize.Y);
+                DWORD written = 0;
+                COORD home = { 0, 0 };
+                FillConsoleOutputCharacterA(console, ' ', cell_count, home, &written);
+                FillConsoleOutputAttribute(console, info.wAttributes, cell_count, home, &written);
+                SetConsoleCursorPosition(console, home);
+                std::fflush(stdout);
+                return;
+            }
+        }
+#endif
+        std::fputs("\x1b[2J\x1b[H", stdout);
+        std::fflush(stdout);
+    }
+
     struct GrimReaperRange {
         const char* label;
         const char* slug;
@@ -2013,6 +2035,12 @@ void App::panel_settings() {
                 int dedupe_flush = static_cast<int>(g_log_dedupe_flush);
                 if (ImGui::InputInt("Repeat Flush", &dedupe_flush)) {
                     g_log_dedupe_flush = static_cast<u32>(std::max(1, dedupe_flush));
+                }
+                if (ImGui::Button("Clear Console Log")) {
+                    g_log_last_line.clear();
+                    g_log_repeat_count = 0;
+                    clear_stdout_console();
+                    status_message_ = "Console log cleared";
                 }
                 ImGui::Separator();
                 ImGui::Text("Categories");
