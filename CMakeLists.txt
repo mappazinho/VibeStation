@@ -51,6 +51,7 @@ set(VIBESTATION_SOURCES
     src/core/timer.cpp
     src/core/spu.cpp
     src/core/sio.cpp
+    src/core/pad_controller.cpp
     src/core/cdrom.cpp
     src/core/dma.cpp
     src/core/mdec.cpp
