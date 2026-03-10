@@ -89,6 +89,9 @@ private:
 	int config_turbo_speed_percent_ = 200;
 	int config_slowdown_speed_percent_ = 50;
 	bool config_spu_diagnostic_mode_ = false;
+	static constexpr int kMemoryCardSlotCount = 2;
+	std::array<int, kMemoryCardSlotCount> config_memory_card_mode_ = { 0, 0 };
+	std::array<std::string, kMemoryCardSlotCount> memory_card_target_paths_{};
 	bool turbo_hold_active_ = false;
 	bool slowdown_hold_active_ = false;
 
@@ -209,6 +212,8 @@ private:
 	bool save_snapshot_png();
 	bool reap_and_reboot_bios();
 	bool reap_and_reboot_bios_batch();
+	std::array<std::string, kMemoryCardSlotCount> resolve_memory_card_paths() const;
+	void apply_memory_card_settings(bool save_config);
 	bool save_current_grim_preset(bool batch_mode);
 	bool save_current_ram_preset();
 	bool save_current_gpu_preset();
