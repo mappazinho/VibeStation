@@ -11,8 +11,10 @@
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
+#include <deque>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -61,6 +63,18 @@ inline bool g_log_dedupe = true;
 inline u32 g_log_dedupe_flush = 1000;
 inline std::string g_log_last_line;
 inline u64 g_log_repeat_count = 0;
+struct LogUiEntry {
+  u64 seq = 0;
+  LogLevel level = LogLevel::Info;
+  LogCategory category = LogCategory::General;
+  std::string timestamp;
+  std::string prefix;
+  std::string message;
+};
+inline constexpr size_t kLogUiEntryLimit = 2000u;
+inline std::deque<LogUiEntry> g_log_ui_entries;
+inline std::mutex g_log_ui_mutex;
+inline u64 g_log_ui_next_seq = 1u;
 
 inline bool g_trace_dma = false;
 inline bool g_trace_cdrom = false;
@@ -223,7 +237,30 @@ inline LogCategory log_detect_category(const char *msg) {
   return LogCategory::General;
 }
 
-inline void log_emit_line(const char *prefix, const char *buffer) {
+inline void log_push_ui_entry(LogLevel level, LogCategory category,
+                              const char *prefix, const char *buffer,
+                              const char *timestamp) {
+  std::lock_guard<std::mutex> lock(g_log_ui_mutex);
+  if (g_log_ui_entries.size() >= kLogUiEntryLimit) {
+    g_log_ui_entries.pop_front();
+  }
+  LogUiEntry entry;
+  entry.seq = g_log_ui_next_seq++;
+  entry.level = level;
+  entry.category = category;
+  entry.timestamp = timestamp ? std::string(timestamp) : std::string();
+  entry.prefix = prefix ? std::string(prefix) : std::string();
+  entry.message = buffer ? std::string(buffer) : std::string();
+  g_log_ui_entries.push_back(std::move(entry));
+}
+
+inline void log_clear_ui_entries() {
+  std::lock_guard<std::mutex> lock(g_log_ui_mutex);
+  g_log_ui_entries.clear();
+}
+
+inline void log_emit_line(LogLevel level, LogCategory category,
+                          const char *prefix, const char *buffer) {
   char ts[32] = {};
   if (g_log_timestamp) {
     const auto now = std::chrono::system_clock::now();
@@ -243,6 +280,7 @@ inline void log_emit_line(const char *prefix, const char *buffer) {
     std::printf("%s%s\n", prefix, buffer);
   }
   std::fflush(stdout);
+  log_push_ui_entry(level, category, prefix, buffer, g_log_timestamp ? ts : "");
 
   if (g_log_file) {
     if (g_log_timestamp) {
@@ -262,7 +300,7 @@ inline void log_flush_repeats() {
   char msg[128];
   std::snprintf(msg, sizeof(msg), "Previous line repeated %llu times",
                 static_cast<unsigned long long>(g_log_repeat_count));
-  log_emit_line("[INF] ", msg);
+  log_emit_line(LogLevel::Info, LogCategory::General, "[INF] ", msg);
   g_log_repeat_count = 0;
 }
 
@@ -293,7 +331,16 @@ inline void log_write_categorized(LogCategory cat, const char *prefix, const cha
     g_log_last_line = composed;
   }
 
-  log_emit_line(prefix, buffer);
+  LogLevel level = LogLevel::Info;
+  if (std::strcmp(prefix, "[DBG] ") == 0) {
+    level = LogLevel::Debug;
+  } else if (std::strcmp(prefix, "[WRN] ") == 0) {
+    level = LogLevel::Warn;
+  } else if (std::strcmp(prefix, "[ERR] ") == 0) {
+    level = LogLevel::Error;
+  }
+
+  log_emit_line(level, cat, prefix, buffer);
 }
 
 #define LOG_DEBUG(fmt, ...)                                                     \

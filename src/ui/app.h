@@ -50,6 +50,9 @@ private:
 	std::string game_cue_path_;
 	std::string status_message_ = "Welcome to VibeStation!";
 	char log_path_[260] = "vibestation_runtime.log";
+	char log_search_[128] = "";
+	u64 selected_log_seq_ = 0;
+	bool log_auto_scroll_ = true;
 	bool has_started_emulation_ = false;
 	bool emu_input_focused_ = false;
 	u16 last_button_state_ = 0xFFFF;
