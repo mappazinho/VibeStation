@@ -278,140 +278,27 @@ u16 read_le16(const std::vector<u8> &data, size_t offset) {
                           (static_cast<u16>(data[offset + 1u]) << 8));
 }
 
-u32 read_le32(const std::vector<u8> &data, size_t offset) {
-  if (offset + 3u >= data.size()) {
-    return 0;
+bool looks_like_str_header_at(const std::vector<u8> &raw_sector,
+                              size_t user_offset) {
+  if (user_offset + 8u > raw_sector.size()) {
+    return false;
   }
-  return static_cast<u32>(data[offset]) |
-         (static_cast<u32>(data[offset + 1u]) << 8) |
-         (static_cast<u32>(data[offset + 2u]) << 16) |
-         (static_cast<u32>(data[offset + 3u]) << 24);
-}
 
-bool looks_like_str_chunk_index_pair(u16 chunk_no, u16 chunks_per_frame) {
+  // Standard STR stream header starts with 0160h at user-data offset.
+  if (read_le16(raw_sector, user_offset + 0u) != 0x0160u) {
+    return false;
+  }
+
+  // Validate chunk counters to reduce false positives.
+  const u16 chunk_no = read_le16(raw_sector, user_offset + 4u);
+  const u16 chunks_per_frame = read_le16(raw_sector, user_offset + 6u);
   if (chunks_per_frame == 0u || chunks_per_frame > 1024u) {
     return false;
   }
-  return chunk_no < chunks_per_frame;
-}
-
-struct StrChunkHeaderInfo {
-  u16 chunk_no = 0;
-  u16 chunks_per_frame = 0;
-  u32 frame_no = 0;
-  u32 frame_size = 0;
-  u16 width = 0;
-  u16 height = 0;
-  size_t offset = 0;
-};
-
-constexpr std::array<size_t, 4> kRawStrHeaderOffsets = {24u, 8u, 0u, 16u};
-constexpr std::array<size_t, 6> kPayloadStrHeaderOffsets = {0u, 12u, 4u, 8u,
-                                                             16u, 24u};
-
-struct SectorLocLInfo {
-  u8 minute = 0;
-  u8 second = 0;
-  u8 frame = 0;
-  u8 mode = 0x01u;
-  u8 file = 0;
-  u8 channel = 0;
-  u8 submode = 0;
-  u8 coding = 0;
-};
-
-bool parse_str_header_layout_a(const std::vector<u8> &data, size_t offset,
-                               StrChunkHeaderInfo &out) {
-  // [0160][chunk][chunks/frame][frame][frame_size][w][h]
-  if (offset + 16u > data.size()) {
+  if (chunk_no >= chunks_per_frame) {
     return false;
   }
-  if (read_le16(data, offset + 0u) != 0x0160u) {
-    return false;
-  }
-  const u16 chunk_no = read_le16(data, offset + 2u);
-  const u16 chunks_per_frame = read_le16(data, offset + 4u);
-  if (!looks_like_str_chunk_index_pair(chunk_no, chunks_per_frame)) {
-    return false;
-  }
-  const u32 frame_no = static_cast<u32>(read_le16(data, offset + 6u));
-  const u32 frame_size = read_le32(data, offset + 8u);
-  const u16 width = read_le16(data, offset + 12u);
-  const u16 height = read_le16(data, offset + 14u);
-  out.chunk_no = chunk_no;
-  out.chunks_per_frame = chunks_per_frame;
-  out.frame_no = frame_no;
-  out.frame_size = frame_size;
-  out.width = width;
-  out.height = height;
-  out.offset = offset;
   return true;
-}
-
-bool parse_str_header_layout_b(const std::vector<u8> &data, size_t offset,
-                               StrChunkHeaderInfo &out) {
-  // Alternate legacy layout seen in some demux paths:
-  // [0160][type?][chunk][chunks/frame][frame(16)][frame_size][w][h]
-  if (offset + 20u > data.size()) {
-    return false;
-  }
-  if (read_le16(data, offset + 0u) != 0x0160u) {
-    return false;
-  }
-  const u16 chunk_no = read_le16(data, offset + 4u);
-  const u16 chunks_per_frame = read_le16(data, offset + 6u);
-  if (!looks_like_str_chunk_index_pair(chunk_no, chunks_per_frame)) {
-    return false;
-  }
-  const u32 frame_no = static_cast<u32>(read_le16(data, offset + 8u));
-  const u32 frame_size = read_le32(data, offset + 10u);
-  const u16 width = read_le16(data, offset + 14u);
-  const u16 height = read_le16(data, offset + 16u);
-  out.chunk_no = chunk_no;
-  out.chunks_per_frame = chunks_per_frame;
-  out.frame_no = frame_no;
-  out.frame_size = frame_size;
-  out.width = width;
-  out.height = height;
-  out.offset = offset;
-  return true;
-}
-
-bool parse_str_header_layout_c(const std::vector<u8> &data, size_t offset,
-                               StrChunkHeaderInfo &out) {
-  // Common XA STR layout:
-  // [0160][type][chunk][chunks/frame][frame(32)][frame_size(32)][w][h]
-  if (offset + 22u > data.size()) {
-    return false;
-  }
-  if (read_le16(data, offset + 0u) != 0x0160u) {
-    return false;
-  }
-  const u16 chunk_no = read_le16(data, offset + 4u);
-  const u16 chunks_per_frame = read_le16(data, offset + 6u);
-  if (!looks_like_str_chunk_index_pair(chunk_no, chunks_per_frame)) {
-    return false;
-  }
-  out.chunk_no = chunk_no;
-  out.chunks_per_frame = chunks_per_frame;
-  out.frame_no = read_le32(data, offset + 8u);
-  out.frame_size = read_le32(data, offset + 12u);
-  out.width = read_le16(data, offset + 16u);
-  out.height = read_le16(data, offset + 18u);
-  out.offset = offset;
-  return true;
-}
-
-bool looks_like_str_header_at(const std::vector<u8> &raw_sector,
-                              size_t user_offset) {
-  StrChunkHeaderInfo info{};
-  if (parse_str_header_layout_a(raw_sector, user_offset, info)) {
-    return true;
-  }
-  if (parse_str_header_layout_b(raw_sector, user_offset, info)) {
-    return true;
-  }
-  return parse_str_header_layout_c(raw_sector, user_offset, info);
 }
 
 bool is_probable_str_video_sector(const std::vector<u8> &raw_sector) {
@@ -422,24 +309,6 @@ bool is_probable_str_video_sector(const std::vector<u8> &raw_sector) {
   static constexpr std::array<size_t, 4> kCandidateOffsets = {24u, 8u, 0u, 16u};
   for (size_t offset : kCandidateOffsets) {
     if (looks_like_str_header_at(raw_sector, offset)) {
-      return true;
-    }
-  }
-  return false;
-}
-
-template <size_t N>
-bool find_str_header_with_offsets(const std::vector<u8> &data,
-                                  const std::array<size_t, N> &offsets,
-                                  StrChunkHeaderInfo &out) {
-  for (size_t offset : offsets) {
-    if (offset >= data.size()) {
-      continue;
-    }
-    if (parse_str_header_layout_a(data, offset, out) ||
-        parse_str_header_layout_b(data, offset, out) ||
-        parse_str_header_layout_c(data, offset, out)) {
-      out.offset = offset;
       return true;
     }
   }
@@ -458,49 +327,6 @@ void lba_to_msf_bcd(int abs_lba, u8 &mm, u8 &ss, u8 &ff) {
   mm = to_bcd8(clip_u8(m % 100));
   ss = to_bcd8(clip_u8(s));
   ff = to_bcd8(clip_u8(f));
-}
-
-bool build_sector_locl_info(const std::vector<u8> &raw_sector, int abs_lba,
-                            SectorLocLInfo &out) {
-  if (raw_sector.empty()) {
-    return false;
-  }
-
-  const bool cooked = raw_sector.size() <= 2048u;
-  if (!cooked) {
-    if (raw_sector.size() < 20u) {
-      return false;
-    }
-    out.minute = raw_sector[12];
-    out.second = raw_sector[13];
-    out.frame = raw_sector[14];
-    out.mode = raw_sector[15];
-    out.file = raw_sector[16];
-    out.channel = raw_sector[17];
-    out.submode = raw_sector[18];
-    out.coding = raw_sector[19];
-    return true;
-  }
-
-  StrChunkHeaderInfo raw_str_header{};
-  const bool raw_has_str =
-      find_str_header_with_offsets(raw_sector, kRawStrHeaderOffsets,
-                                   raw_str_header);
-  const bool looks_like_str_video = is_probable_str_video_sector(raw_sector);
-
-  lba_to_msf_bcd(abs_lba, out.minute, out.second, out.frame);
-  out.mode = 0x01u;
-  out.file = 0;
-  out.channel = 0;
-  out.submode = 0;
-  out.coding = 0;
-
-  if (looks_like_str_video || raw_has_str) {
-    out.mode = 0x02u;
-    out.submode = 0x62u;
-  }
-
-  return true;
 }
 
 constexpr std::array<s32, 4> kXaPosFilter = {0, 60, 115, 98};
@@ -553,7 +379,9 @@ void CdRom::reset() {
   response_fifo_.clear();
   response_index_ = 0;
 
-  clear_host_data_sectors();
+  data_buffer_.clear();
+  data_index_ = 0;
+  data_ready_ = false;
   data_request_ = false;
 
   state_ = State::Idle;
@@ -596,21 +424,11 @@ void CdRom::reset() {
   status_e0_poll_count_ = 0;
   status_e0_streak_max_ = 0;
   status_e0_streak_current_ = 0;
-  if (sys_ != nullptr) {
-    const u64 now = sys_->cpu().cycle_count();
-    last_interrupt_cycle_ =
-        (now > kMinDataReadyInterruptDelayCycles)
-            ? (now - kMinDataReadyInterruptDelayCycles)
-            : 0u;
-  } else {
-    last_interrupt_cycle_ = 0;
-  }
 
   seek_target_lba_ = 0;
   seek_target_valid_ = false;
   seek_complete_ = false;
   read_whole_sector_ = true;
-  read_stream_force_user_2048_ = false;
   pending_read_start_ = false;
   pending_reads_mode_ = false;
   cdda_playing_ = false;
@@ -633,180 +451,6 @@ void CdRom::reset() {
   shell_open_ = false;
   seek_error_ = false;
   id_error_ = false;
-  reset_str_diagnostics();
-}
-
-void CdRom::queue_host_data_sector(std::vector<u8> payload) {
-  last_read_had_host_data_ = false;
-  if (payload.empty()) {
-    return;
-  }
-  if (pending_data_sectors_.size() >= kHostSectorQueueCapacity) {
-    pending_data_sectors_.pop_front();
-    ++read_buffer_stall_count_;
-  }
-  pending_data_sectors_.push_back(std::move(payload));
-  last_read_had_host_data_ = true;
-}
-
-void CdRom::promote_host_data_sector_for_int1() {
-  if (pending_data_sectors_.empty()) {
-    data_buffer_.clear();
-    data_index_ = 0;
-    data_ready_ = false;
-    return;
-  }
-
-  if (data_ready_ && data_index_ < static_cast<int>(data_buffer_.size())) {
-    ++read_buffer_stall_count_;
-  }
-
-  data_buffer_ = std::move(pending_data_sectors_.front());
-  pending_data_sectors_.pop_front();
-  data_index_ = 0;
-  data_ready_ = !data_buffer_.empty();
-  if (data_ready_) {
-    saw_sector_visible_ = true;
-  }
-}
-
-void CdRom::clear_host_data_sectors() {
-  pending_data_sectors_.clear();
-  data_buffer_.clear();
-  data_index_ = 0;
-  data_ready_ = false;
-  last_read_had_host_data_ = false;
-}
-
-void CdRom::reset_str_diagnostics() {
-  str_frame_diag_.clear();
-  str_sector_detect_count_ = 0;
-  str_chunk_accept_count_ = 0;
-  str_frame_complete_count_ = 0;
-  str_frame_submit_count_ = 0;
-  str_read_sector_count_ = 0;
-  str_magic_candidate_count_ = 0;
-  str_header_reject_count_ = 0;
-  str_payload_header_miss_count_ = 0;
-  str_cooked_payload_offset0_count_ = 0;
-  str_cooked_payload_nonzero_count_ = 0;
-  str_last_logged_detect_count_ = 0;
-  str_last_logged_complete_count_ = 0;
-  str_last_logged_read_sector_count_ = 0;
-  str_warned_payload_miss_ = false;
-  str_warned_cooked_nonzero_ = false;
-  str_warned_header_reject_ = false;
-}
-
-void CdRom::note_str_chunk_accepted(u32 frame_no, u16 chunk_no,
-                                    u16 chunks_per_frame) {
-  auto it = str_frame_diag_.find(frame_no);
-  if (it == str_frame_diag_.end() ||
-      it->second.chunks_per_frame != chunks_per_frame) {
-    StrFrameDiagState fresh{};
-    fresh.chunks_per_frame = chunks_per_frame;
-    fresh.seen_chunks.assign(static_cast<size_t>(chunks_per_frame), 0u);
-    fresh.seen_count = 0;
-    fresh.last_sector_seen = sector_counter_;
-    it = str_frame_diag_.insert_or_assign(frame_no, std::move(fresh)).first;
-  }
-
-  StrFrameDiagState &state = it->second;
-  state.last_sector_seen = sector_counter_;
-  const size_t chunk_index = static_cast<size_t>(chunk_no);
-  if (chunk_index >= state.seen_chunks.size()) {
-    return;
-  }
-  if (state.seen_chunks[chunk_index] == 0u) {
-    state.seen_chunks[chunk_index] = 1u;
-    if (state.seen_count < chunks_per_frame) {
-      ++state.seen_count;
-    }
-  }
-
-  if (state.seen_count >= chunks_per_frame) {
-    ++str_frame_complete_count_;
-    // This emulator does not have a CDROM-side STR decoder; this is an
-    // inferred "frame became ready for client/MDEC submission" count.
-    ++str_frame_submit_count_;
-    str_frame_diag_.erase(it);
-  }
-}
-
-void CdRom::prune_str_frame_diagnostics() {
-  if (str_frame_diag_.empty()) {
-    return;
-  }
-  // Drop stale partial frames to keep diagnostics bounded.
-  constexpr u64 kMaxAgeSectors = 4096u;
-  for (auto it = str_frame_diag_.begin(); it != str_frame_diag_.end();) {
-    const u64 age = sector_counter_ - it->second.last_sector_seen;
-    if (age > kMaxAgeSectors) {
-      it = str_frame_diag_.erase(it);
-    } else {
-      ++it;
-    }
-  }
-}
-
-void CdRom::log_str_diagnostics(const char *reason, bool force) {
-  if (str_read_sector_count_ == 0u && !force) {
-    return;
-  }
-  const bool progressed =
-      (str_sector_detect_count_ >= str_last_logged_detect_count_ + 64u) ||
-      (str_frame_complete_count_ > str_last_logged_complete_count_) ||
-      (str_read_sector_count_ >= str_last_logged_read_sector_count_ + 1024u);
-  if (!force && !progressed) {
-    return;
-  }
-
-  LOG_INFO(
-      "CDROM: STR diag (%s) read=%llu magic=%llu detected=%llu chunks=%llu "
-      "reject=%llu frames_complete=%llu "
-      "frames_submitted=%llu payload_miss=%llu cooked2048_off0=%llu "
-      "cooked2048_nonzero=%llu inflight=%zu",
-      reason != nullptr ? reason : "periodic",
-      static_cast<unsigned long long>(str_read_sector_count_),
-      static_cast<unsigned long long>(str_magic_candidate_count_),
-      static_cast<unsigned long long>(str_sector_detect_count_),
-      static_cast<unsigned long long>(str_chunk_accept_count_),
-      static_cast<unsigned long long>(str_header_reject_count_),
-      static_cast<unsigned long long>(str_frame_complete_count_),
-      static_cast<unsigned long long>(str_frame_submit_count_),
-      static_cast<unsigned long long>(str_payload_header_miss_count_),
-      static_cast<unsigned long long>(str_cooked_payload_offset0_count_),
-      static_cast<unsigned long long>(str_cooked_payload_nonzero_count_),
-      str_frame_diag_.size());
-
-  if (sys_ != nullptr) {
-    const Mdec::DebugStats &ms = sys_->mdec_debug_stats();
-    LOG_INFO(
-        "CDROM: MDEC diag cmd=%llu id0=%llu id1=%llu id2=%llu id3=%llu "
-        "id_oth=%llu last=0x%08X dec_cmd=%llu dec_words=%llu exec=%llu "
-        "mb=%llu out_push=%llu out_read=%llu wait_break=%llu out_avail=%u "
-        "in_req=%d out_req=%d",
-        static_cast<unsigned long long>(ms.command_words),
-        static_cast<unsigned long long>(ms.command_id0),
-        static_cast<unsigned long long>(ms.command_id1),
-        static_cast<unsigned long long>(ms.command_id2),
-        static_cast<unsigned long long>(ms.command_id3),
-        static_cast<unsigned long long>(ms.command_id_other),
-        ms.last_command_word,
-        static_cast<unsigned long long>(ms.decode_commands),
-        static_cast<unsigned long long>(ms.decode_data_words),
-        static_cast<unsigned long long>(ms.decode_execute_calls),
-        static_cast<unsigned long long>(ms.decode_macroblocks),
-        static_cast<unsigned long long>(ms.out_words_pushed),
-        static_cast<unsigned long long>(ms.out_words_read),
-        static_cast<unsigned long long>(ms.decode_wait_breaks),
-        sys_->mdec_dma_out_words_available(), sys_->mdec_dma_in_request() ? 1 : 0,
-        sys_->mdec_dma_out_request() ? 1 : 0);
-  }
-
-  str_last_logged_detect_count_ = str_sector_detect_count_;
-  str_last_logged_complete_count_ = str_frame_complete_count_;
-  str_last_logged_read_sector_count_ = str_read_sector_count_;
 }
 
 bool CdRom::load_bin_cue(const std::string &bin_path,
@@ -997,7 +641,9 @@ bool CdRom::swap_disc_image(const std::string &bin_path,
   param_fifo_.clear();
   response_fifo_.clear();
   response_index_ = 0;
-  clear_host_data_sectors();
+  data_buffer_.clear();
+  data_index_ = 0;
+  data_ready_ = false;
   data_request_ = false;
   command_busy_ = false;
   command_busy_cycles_ = 0;
@@ -1011,7 +657,6 @@ bool CdRom::swap_disc_image(const std::string &bin_path,
   seek_complete_ = false;
   pending_read_start_ = false;
   pending_reads_mode_ = false;
-  read_stream_force_user_2048_ = false;
   cdda_playing_ = false;
   seek_error_ = false;
   id_error_ = false;
@@ -1023,7 +668,6 @@ bool CdRom::swap_disc_image(const std::string &bin_path,
   xa_stream_valid_ = false;
   xa_stream_file_ = 0;
   xa_stream_channel_ = 0;
-  reset_str_diagnostics();
   interrupt_flag_ = 0;
   refresh_irq_line();
 
@@ -1221,9 +865,6 @@ void CdRom::schedule_second_response(int delay_cycles, u8 irq,
 }
 
 void CdRom::start_read_stream(bool reads_mode) {
-  reset_str_diagnostics();
-  clear_host_data_sectors();
-  read_stream_force_user_2048_ = false;
   pending_reads_mode_ = reads_mode;
   if (seek_target_valid_ && seek_target_lba_ != read_lba_) {
     state_ = State::Seeking;
@@ -1569,13 +1210,11 @@ void CdRom::maybe_decode_xa_audio(const std::vector<u8> &raw_sector,
 }
 
 bool CdRom::read_sector() {
-  last_read_had_host_data_ = false;
   std::vector<u8> raw;
   const CdTrack *track = nullptr;
   if (!read_raw_sector_for_lba(read_lba_, raw, &track)) {
     return false;
   }
-  ++str_read_sector_count_;
 
   if (is_audio_track(track) && (mode_ & 0x01u) == 0) {
     return false;
@@ -1589,24 +1228,6 @@ bool CdRom::read_sector() {
   const bool has_subheader =
       read_sector_subheader(raw, layout, file, channel, submode, ignored_codinginfo);
   const bool looks_like_str_video = is_probable_str_video_sector(raw);
-
-  // For cooked sectors, infer MODE2 and subheader from the payload content.
-  // STR (FMV) sectors on PS1 are always MODE2/Form2, so if we detect an STR
-  // header in a cooked sector, treat it as a MODE2 video sector.
-  if (cooked && (looks_like_str_video || raw_has_str_header)) {
-    mode2 = true;
-    has_subheader = true;
-    // Synthesize submode: bit 5 (Form2) | bit 3 (Data) | bit 1 (Video) = 0x28 | 0x02 = 0x2A
-    // Actually PS1 STR video uses submode 0x48 (Real-time + Data) or 0x64
-    // (Real-time + Audio + Form2).  For video sectors, the critical bits are
-    // bit 1 (video) and bit 5 (form2): 0x22.  However the game primarily
-    // inspects its own parsed STR header, not the submode, so a minimal
-    // synthetic value with bit1 (video) set is sufficient.
-    submode = 0x62u; // Form2 | Real-time | Video | Data
-    file = 0;
-    channel = 0;
-  }
-
   const bool is_video_sector =
       looks_like_str_video || (has_subheader && ((submode & 0x02u) != 0));
   const bool is_audio_sector =
@@ -1629,13 +1250,6 @@ bool CdRom::read_sector() {
     deliver_data = false;
   }
   if (!deliver_data) {
-    if (raw_has_str_header && !str_warned_payload_miss_) {
-      str_warned_payload_miss_ = true;
-      LOG_WARN("CDROM: STR sector dropped before host payload delivery "
-               "(lba=%d submode=%02X audio=%d video=%d)",
-               read_lba_, static_cast<unsigned>(submode), is_audio_sector ? 1 : 0,
-               is_video_sector ? 1 : 0);
-    }
     return true;
   }
 
@@ -1664,115 +1278,19 @@ bool CdRom::read_sector() {
     if (data_offset + data_size > raw.size()) {
       data_size = raw.size() - data_offset;
     }
-    out_offset = data_offset;
     payload.assign(raw.begin() + static_cast<ptrdiff_t>(data_offset),
                    raw.begin() + static_cast<ptrdiff_t>(data_offset + data_size));
-  };
-  // ReadN (06h) and ReadS (1Bh) differ in retry policy/timing, not in how the
-  // host data FIFO is formatted. Host payload width is selected via Setmode
-  // bit5 (tracked in read_whole_sector_).
-  const bool whole = read_whole_sector_;
-  if (whole) {
-    if (raw.size() >= (12u + 0x924u)) {
-      // Raw 2352-byte sector: skip 12-byte sync, deliver 2340 bytes
-      // (header + subheader + user data + EDC/ECC).
-      payload_data_offset = 12u;
-      payload.assign(raw.begin() + 12, raw.begin() + 12 + 0x924u);
-    } else if (cooked && raw.size() >= 2048u) {
-      // Cooked 2048-byte sector: synthesize the 2340-byte whole-sector
-      // payload the game expects.  Layout:
-      //   [0..3]   sector header: MM SS FF MODE
-      //   [4..7]   subheader:     file, channel, submode, coding_info
-      //   [8..11]  subheader copy
-      //   [12..2059] user data (2048 bytes)
-      //   [2060..2339] EDC/ECC padding (280 zero bytes)
-      payload.resize(0x924u, 0u); // 2340 bytes, zero-filled
-      SectorLocLInfo locl{};
-      if (!build_sector_locl_info(raw, read_lba_ + 150, locl)) {
-        return false;
-      }
-      payload[0] = locl.minute;
-      payload[1] = locl.second;
-      payload[2] = locl.frame;
-      payload[3] = locl.mode;
-      // Subheader (primary + copy)
-      payload[4] = locl.file;
-      payload[5] = locl.channel;
-      payload[6] = locl.submode;
-      payload[7] = locl.coding;
-      payload[8] = locl.file;
-      payload[9] = locl.channel;
-      payload[10] = locl.submode;
-      payload[11] = locl.coding;
-      // Copy user data at offset 12
-      std::copy(raw.begin(),
-                raw.begin() + static_cast<ptrdiff_t>(std::min<size_t>(raw.size(), 2048u)),
-                payload.begin() + 12);
-      payload_data_offset = 12u;
-    } else {
-      payload_data_offset = 0u;
-      payload = raw;
-    }
-  } else {
-    extract_user_payload_2048(payload_data_offset);
   }
 
-  StrChunkHeaderInfo payload_str_header{};
-  const bool payload_has_str_header = find_str_header_with_offsets(
-      payload, kPayloadStrHeaderOffsets, payload_str_header);
-  if (looks_like_str_video && read_whole_sector_) {
-    static u32 str_payload_probe_logs = 0;
-    if (str_payload_probe_logs < 32u) {
-      ++str_payload_probe_logs;
-      const u8 b0 = payload.size() > 0 ? payload[0] : 0;
-      const u8 b1 = payload.size() > 1 ? payload[1] : 0;
-      const u8 b2 = payload.size() > 2 ? payload[2] : 0;
-      const u8 b3 = payload.size() > 3 ? payload[3] : 0;
-      LOG_INFO("CDROM: STR payload probe whole=1 off=%zu size=%zu "
-               "b0..3=%02X %02X %02X %02X header=%d hdr_off=%zu",
-               payload_data_offset, payload.size(), static_cast<unsigned>(b0),
-               static_cast<unsigned>(b1), static_cast<unsigned>(b2),
-               static_cast<unsigned>(b3), payload_has_str_header ? 1 : 0,
-               payload_has_str_header ? payload_str_header.offset : 0u);
-    }
+  if (data_ready_ && data_index_ < static_cast<int>(data_buffer_.size())) {
+    ++read_buffer_stall_count_;
   }
-  if (payload_has_str_header) {
-    if (!raw_has_str_header) {
-      ++str_sector_detect_count_;
-    }
-    ++str_chunk_accept_count_;
-    note_str_chunk_accepted(payload_str_header.frame_no, payload_str_header.chunk_no,
-                            payload_str_header.chunks_per_frame);
-    prune_str_frame_diagnostics();
-  } else if (raw_has_str_header) {
-    ++str_payload_header_miss_count_;
-    if (!str_warned_payload_miss_) {
-      str_warned_payload_miss_ = true;
-      LOG_WARN("CDROM: STR header detected in raw sector but missing from "
-               "delivered payload (lba=%d raw_off=%zu payload_data_off=%zu "
-               "whole=%d raw_size=%zu payload_size=%zu)",
-               read_lba_, raw_str_header.offset, payload_data_offset, whole ? 1 : 0,
-               raw.size(), payload.size());
-    }
+  data_buffer_ = std::move(payload);
+  data_index_ = 0;
+  data_ready_ = !data_buffer_.empty();
+  if (data_ready_) {
+    saw_sector_visible_ = true;
   }
-
-  if (raw_has_str_header && raw.size() == 2048u && payload_has_str_header) {
-    if (payload_str_header.offset == 0u) {
-      ++str_cooked_payload_offset0_count_;
-    } else {
-      ++str_cooked_payload_nonzero_count_;
-      if (!str_warned_cooked_nonzero_) {
-        str_warned_cooked_nonzero_ = true;
-        LOG_WARN("CDROM: cooked 2048 STR payload header appears at offset %zu "
-                 "(expected 0)", payload_str_header.offset);
-      }
-    }
-  }
-  if (raw_has_str_header || payload_has_str_header) {
-    log_str_diagnostics("read_sector", false);
-  }
-
-  queue_host_data_sector(std::move(payload));
   return true;
 }
 
@@ -1790,9 +1308,6 @@ void CdRom::fire_irq(u8 irq_num) {
   } else if (irq_num == 5u) {
     ++irq_int5_count_;
   }
-  if (sys_ != nullptr) {
-    last_interrupt_cycle_ = sys_->cpu().cycle_count();
-  }
   refresh_irq_line();
 }
 
@@ -1801,15 +1316,8 @@ void CdRom::enqueue_irq(u8 irq_num, std::vector<u8> response,
   const bool pending = (interrupt_flag_ & kHintTypeMask) != 0;
   const bool response_pending =
       response_index_ < static_cast<int>(response_fifo_.size());
-  bool too_soon_for_data_ready = false;
-  if (irq_num == 1u && sys_ != nullptr) {
-    const u64 now = sys_->cpu().cycle_count();
-    too_soon_for_data_ready =
-        (now - last_interrupt_cycle_) < kMinDataReadyInterruptDelayCycles;
-  }
 
-  if (pending || response_pending || too_soon_for_data_ready ||
-      (wait_for_command_idle && command_busy_)) {
+  if (pending || response_pending || (wait_for_command_idle && command_busy_)) {
     pending_irqs_.push_back(PendingIrq{
         irq_num,
         wait_for_command_idle,
@@ -1823,9 +1331,6 @@ void CdRom::enqueue_irq(u8 irq_num, std::vector<u8> response,
     response_fifo_.resize(kFifoCapacity);
   }
   response_index_ = 0;
-  if (irq_num == 1u) {
-    promote_host_data_sector_for_int1();
-  }
   fire_irq(irq_num);
 }
 
@@ -1844,12 +1349,6 @@ void CdRom::service_pending_irq() {
   if (front.wait_for_command_idle && command_busy_) {
     return;
   }
-  if (front.irq == 1u && sys_ != nullptr) {
-    const u64 now = sys_->cpu().cycle_count();
-    if ((now - last_interrupt_cycle_) < kMinDataReadyInterruptDelayCycles) {
-      return;
-    }
-  }
 
   response_fifo_ = std::move(front.response);
   if (response_fifo_.size() > kFifoCapacity) {
@@ -1859,9 +1358,6 @@ void CdRom::service_pending_irq() {
   const u8 irq = front.irq;
   pending_irqs_.pop_front();
   ++response_promotion_count_;
-  if (irq == 1u) {
-    promote_host_data_sector_for_int1();
-  }
   fire_irq(irq);
 }
 
@@ -1955,14 +1451,10 @@ void CdRom::cmd_readn() {
 void CdRom::cmd_pause() {
   const u8 first = stat_byte();
   cdda_playing_ = false;
-  read_stream_force_user_2048_ = false;
   pending_read_start_ = false;
   pending_reads_mode_ = false;
   state_ = State::Idle;
-  clear_host_data_sectors();
-  data_request_ = false;
   seek_complete_ = true;
-  log_str_diagnostics("pause", true);
   enqueue_irq(3, {first});
   schedule_second_response(25000, 2, {stat_byte()});
 }
@@ -1972,7 +1464,6 @@ void CdRom::cmd_init() {
   filter_file_ = 0;
   filter_channel_ = 0;
   read_whole_sector_ = true;
-  read_stream_force_user_2048_ = false;
   motor_on_ = true;
   cdda_playing_ = false;
   cdda_cmd_muted_ = false;
@@ -1982,8 +1473,6 @@ void CdRom::cmd_init() {
   pending_read_start_ = false;
   pending_reads_mode_ = false;
   state_ = State::Idle;
-  clear_host_data_sectors();
-  data_request_ = false;
   refresh_read_period();
   enqueue_irq(3, {stat_byte()});
   schedule_second_response(50000, 2, {stat_byte()});
@@ -2133,9 +1622,9 @@ void CdRom::cmd_stop() {
   pending_read_start_ = false;
   pending_reads_mode_ = false;
   motor_on_ = false;
-  clear_host_data_sectors();
-  data_request_ = false;
-  log_str_diagnostics("stop", true);
+  data_ready_ = false;
+  data_buffer_.clear();
+  data_index_ = 0;
   enqueue_irq(3, {first});
   schedule_second_response(33868, 2, {stat_byte()});
 }
@@ -2431,7 +1920,6 @@ u8 CdRom::read8(u32 offset) {
       const u8 value = data_buffer_[static_cast<size_t>(data_index_++)];
       if (data_index_ >= static_cast<int>(data_buffer_.size())) {
         data_ready_ = false;
-        data_request_ = false;
       }
       return value;
     }
@@ -2471,19 +1959,6 @@ void CdRom::write8(u32 offset, u8 value) {
   case 1:
     switch (index_reg_) {
     case 0:
-      if (g_trace_cdrom) {
-        std::string params;
-        for (size_t i = 0; i < param_fifo_.size(); ++i) {
-          char buf[8];
-          std::snprintf(buf, sizeof(buf), "%02X", static_cast<unsigned>(param_fifo_[i]));
-          if (!params.empty()) {
-            params += " ";
-          }
-          params += buf;
-        }
-        LOG_INFO("CDROM: CMD 0x%02X params=[%s]", static_cast<unsigned>(value),
-                 params.c_str());
-      }
       last_command_ = value;
       ++command_counter_;
       ++command_hist_[static_cast<size_t>(value)];
@@ -2511,10 +1986,6 @@ void CdRom::write8(u32 offset, u8 value) {
     case 0:
       if (param_fifo_.size() < kFifoCapacity) {
         param_fifo_.push_back(value);
-        if (g_trace_cdrom) {
-          LOG_INFO("CDROM: PARAM[%zu]=0x%02X", param_fifo_.size() - 1u,
-                   static_cast<unsigned>(value));
-        }
       }
       return;
     case 1:
@@ -2683,7 +2154,6 @@ void CdRom::tick(u32 cycles) {
         seek_error_ = true;
         state_ = State::Idle;
         cdda_playing_ = false;
-        log_str_diagnostics("read_error", true);
         enqueue_irq(5, make_error_response(stat_byte(), 0x04u), false);
         break;
       }
@@ -2695,8 +2165,8 @@ void CdRom::tick(u32 cycles) {
         // and leave data_ready_ false. On real hardware those sectors do NOT
         // generate INT1; firing it with an empty buffer corrupts the game's
         // sector count and causes DMA reads to return zeros.
-        if (last_read_had_host_data_) {
-          enqueue_irq(1, {stat_byte()}, true);
+        if (data_ready_) {
+          enqueue_irq(1, {stat_byte()}, false);
         }
       } else if ((mode_ & 0x04u) != 0) {
         const int abs_lba = read_lba_ + 150;
@@ -2736,7 +2206,6 @@ void CdRom::tick(u32 cycles) {
         } else {
           state_ = State::Idle;
         }
-        log_str_diagnostics("stream_end", true);
         break;
       }
 
@@ -2770,7 +2239,6 @@ u32 CdRom::dma_read() {
 
   if (data_index_ >= static_cast<int>(data_buffer_.size())) {
     data_ready_ = false;
-    data_request_ = false;
   }
   return value;
 }

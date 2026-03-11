@@ -1068,10 +1068,10 @@ void Spu::key_on_voice(int voice) {
     vs.addr = 0;
     vs.repeat_addr = 0;
   } else {
-    vs.addr = (static_cast<u32>(regs_[(base + 0x6u) / 2u]) * 8u) &
-              static_cast<u32>(SPU_RAM_MASK);
-    vs.repeat_addr = (static_cast<u32>(regs_[(base + 0xEu) / 2u]) * 8u) &
-                     static_cast<u32>(SPU_RAM_MASK);
+    vs.addr =
+        (static_cast<u32>(regs_[(base + 0x6u) / 2u]) * 8u) & static_cast<u32>(SPU_RAM_MASK);
+    vs.repeat_addr =
+        (static_cast<u32>(regs_[(base + 0xEu) / 2u]) * 8u) & static_cast<u32>(SPU_RAM_MASK);
     if (vs.repeat_addr == 0u) {
       vs.repeat_addr = vs.addr;
     }

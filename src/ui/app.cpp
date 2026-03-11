@@ -30,30 +30,6 @@ namespace {
     constexpr const char* kAppConfigFileName = "vibestation_config.ini";
     constexpr const char* kCorruptionPresetDirName = "corruption_presets";
     constexpr const char* kMemoryCardDirName = "memcards";
-
-    void clear_stdout_console() {
-#if defined(_WIN32)
-        HANDLE console = GetStdHandle(STD_OUTPUT_HANDLE);
-        if (console != INVALID_HANDLE_VALUE && console != nullptr) {
-            CONSOLE_SCREEN_BUFFER_INFO info{};
-            if (GetConsoleScreenBufferInfo(console, &info)) {
-                const DWORD cell_count =
-                    static_cast<DWORD>(info.dwSize.X) * static_cast<DWORD>(info.dwSize.Y);
-                DWORD written = 0;
-                COORD home = { 0, 0 };
-                FillConsoleOutputCharacterA(console, ' ', cell_count, home, &written);
-                FillConsoleOutputAttribute(console, info.wAttributes, cell_count, home, &written);
-                SetConsoleCursorPosition(console, home);
-                std::fflush(stdout);
-                return;
-            }
-        }
-#endif
-        std::fputs("\x1b[2J\x1b[H", stdout);
-        std::fflush(stdout);
-    }
-
-    
     struct GrimReaperRange {
         const char* label;
         const char* slug;
@@ -309,7 +285,7 @@ namespace {
     }
 
     constexpr double kSpuDiagnosticSpeedMultiplier = 0.83;
-    constexpr double kSpuDiagnosticReverbMixMultiplier = 5.00;
+    constexpr double kSpuDiagnosticReverbMixMultiplier = 4.00;
 
     void append_be32(std::vector<u8>& out, u32 value) {
         out.push_back(static_cast<u8>((value >> 24) & 0xFFu));
@@ -2165,12 +2141,6 @@ void App::panel_settings() {
                     g_log_dedupe_flush = static_cast<u32>(std::max(1, dedupe_flush));
                     logging_config_dirty = true;
                 }
-                if (ImGui::Button("Clear Console Log")) {
-                    g_log_last_line.clear();
-                    g_log_repeat_count = 0;
-                    clear_stdout_console();
-                    status_message_ = "Console log cleared";
-                }
                 ImGui::Separator();
                 ImGui::Text("Categories");
 
@@ -2283,6 +2253,7 @@ void App::panel_settings() {
                     g_trace_irq = false;
                     g_trace_timer = false;
                     g_trace_sio = false;
+                    logging_config_dirty = true;
                 }
 
                 ImGui::Separator();
@@ -2293,6 +2264,16 @@ void App::panel_settings() {
                 ImGui::Checkbox("Disable Luma (Y=0)", &g_mdec_debug_disable_luma);
                 ImGui::Checkbox("Force Solid MDEC Output", &g_mdec_debug_force_solid_output);
                 ImGui::Checkbox("Swap MDEC Input Halfwords", &g_mdec_debug_swap_input_halfwords);
+                if (ImGui::Checkbox("Enable Macroblock Compare (slow)",
+                        &g_mdec_debug_compare_macroblocks) &&
+                    !g_mdec_debug_compare_macroblocks && system_) {
+                    system_->reset_mdec_debug_compare();
+                }
+                if (ImGui::Checkbox("Enable Upload Probe (slow)",
+                        &g_mdec_debug_upload_probe) &&
+                    !g_mdec_debug_upload_probe && system_) {
+                    system_->reset_mdec_upload_probe();
+                }
 
                 bool y1 = (g_mdec_debug_color_block_mask & 0x1u) != 0u;
                 bool y2 = (g_mdec_debug_color_block_mask & 0x2u) != 0u;
@@ -2320,7 +2301,13 @@ void App::panel_settings() {
                     g_mdec_debug_disable_luma = false;
                     g_mdec_debug_force_solid_output = false;
                     g_mdec_debug_swap_input_halfwords = false;
+                    g_mdec_debug_compare_macroblocks = false;
+                    g_mdec_debug_upload_probe = false;
                     g_mdec_debug_color_block_mask = 0x0Fu;
+                    if (system_) {
+                        system_->reset_mdec_debug_compare();
+                        system_->reset_mdec_upload_probe();
+                    }
                 }
                 ImGui::TextDisabled("Use these toggles to localize FMV artifacts by stage.");
 
@@ -3491,7 +3478,8 @@ void App::panel_grim_reaper() {
                         sound_ram_voice_index_, sound_ram_path.string(), &error)) {
                         status_message_ = "Saved sound.ram from SPU voice " +
                             std::to_string(sound_ram_voice_index_);
-                    } else {
+                    }
+                    else {
                         status_message_ = error.empty() ? "Failed to save sound.ram." : error;
                     }
                 });
@@ -3504,7 +3492,8 @@ void App::panel_grim_reaper() {
                         sound_ram_path.string(), &error)) {
                         status_message_ =
                             "Loaded sound.ram. New SPU key-ons will use the replacement sample.";
-                    } else {
+                    }
+                    else {
                         status_message_ = error.empty() ? "Failed to load sound.ram." : error;
                     }
                 });
@@ -5030,6 +5019,14 @@ void App::load_persistent_config() {
             g_mdec_debug_swap_input_halfwords =
                 parse_bool(value, g_mdec_debug_swap_input_halfwords);
         }
+        else if (key == "mdec_debug_compare_macroblocks") {
+            g_mdec_debug_compare_macroblocks =
+                parse_bool(value, g_mdec_debug_compare_macroblocks);
+        }
+        else if (key == "mdec_debug_upload_probe") {
+            g_mdec_debug_upload_probe =
+                parse_bool(value, g_mdec_debug_upload_probe);
+        }
         else if (key == "mdec_debug_color_block_mask") {
             const unsigned long parsed = std::strtoul(value.c_str(), nullptr, 10);
             g_mdec_debug_color_block_mask =
@@ -5256,6 +5253,10 @@ void App::save_persistent_config() const {
         << (g_mdec_debug_force_solid_output ? 1 : 0) << "\n";
     out << "mdec_debug_swap_input_halfwords="
         << (g_mdec_debug_swap_input_halfwords ? 1 : 0) << "\n";
+    out << "mdec_debug_compare_macroblocks="
+        << (g_mdec_debug_compare_macroblocks ? 1 : 0) << "\n";
+    out << "mdec_debug_upload_probe="
+        << (g_mdec_debug_upload_probe ? 1 : 0) << "\n";
     out << "mdec_debug_color_block_mask="
         << static_cast<unsigned>(g_mdec_debug_color_block_mask & 0x0Fu) << "\n";
     for (const auto& entry : kKeyboardBindEntries) {

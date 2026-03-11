@@ -5,7 +5,6 @@
 #include <deque>
 #include <fstream>
 #include <string>
-#include <unordered_map>
 #include <vector>
 
 // ── CD-ROM Controller ──────────────────────────────────────────────
@@ -70,13 +69,6 @@ public:
   u64 response_promotion_count() const { return response_promotion_count_; }
   u64 status_e0_poll_count() const { return status_e0_poll_count_; }
   u64 status_e0_streak_max() const { return status_e0_streak_max_; }
-  u64 str_sector_detect_count() const { return str_sector_detect_count_; }
-  u64 str_chunk_accept_count() const { return str_chunk_accept_count_; }
-  u64 str_frame_complete_count() const { return str_frame_complete_count_; }
-  u64 str_frame_submit_count() const { return str_frame_submit_count_; }
-  u64 str_read_sector_count() const { return str_read_sector_count_; }
-  u64 str_magic_candidate_count() const { return str_magic_candidate_count_; }
-  u64 str_header_reject_count() const { return str_header_reject_count_; }
 
   u8 read8(u32 offset);
   void write8(u32 offset, u8 value);
@@ -120,13 +112,10 @@ private:
   int data_index_ = 0;
   bool data_ready_ = false;
   bool data_request_ = false;
-  bool last_read_had_host_data_ = false;
-  std::deque<std::vector<u8>> pending_data_sectors_;
   bool motor_on_ = false;
   bool shell_open_ = false;
   bool seek_error_ = false;
   bool id_error_ = false;
-  static constexpr size_t kHostSectorQueueCapacity = 8u;
 
   // State
   enum class State {
@@ -185,37 +174,11 @@ private:
   u64 status_e0_poll_count_ = 0;
   u64 status_e0_streak_max_ = 0;
   u64 status_e0_streak_current_ = 0;
-  static constexpr u64 kMinDataReadyInterruptDelayCycles = 1000u;
-  u64 last_interrupt_cycle_ = 0;
-  struct StrFrameDiagState {
-    u16 chunks_per_frame = 0;
-    std::vector<u8> seen_chunks{};
-    u16 seen_count = 0;
-    u64 last_sector_seen = 0;
-  };
-  std::unordered_map<u32, StrFrameDiagState> str_frame_diag_;
-  u64 str_sector_detect_count_ = 0;
-  u64 str_chunk_accept_count_ = 0;
-  u64 str_frame_complete_count_ = 0;
-  u64 str_frame_submit_count_ = 0;
-  u64 str_read_sector_count_ = 0;
-  u64 str_magic_candidate_count_ = 0;
-  u64 str_header_reject_count_ = 0;
-  u64 str_payload_header_miss_count_ = 0;
-  u64 str_cooked_payload_offset0_count_ = 0;
-  u64 str_cooked_payload_nonzero_count_ = 0;
-  u64 str_last_logged_detect_count_ = 0;
-  u64 str_last_logged_complete_count_ = 0;
-  u64 str_last_logged_read_sector_count_ = 0;
-  bool str_warned_payload_miss_ = false;
-  bool str_warned_cooked_nonzero_ = false;
-  bool str_warned_header_reject_ = false;
   u64 bin_size_ = 0;
   int seek_target_lba_ = 0;
   bool seek_target_valid_ = false;
   bool seek_complete_ = false;
   bool read_whole_sector_ = false;
-  bool read_stream_force_user_2048_ = false;
   bool pending_read_start_ = false;
   bool pending_reads_mode_ = false;
   bool cdda_playing_ = false;
@@ -286,11 +249,6 @@ private:
   void refresh_irq_line();
   const CdTrack *track_for_lba(int lba) const;
   bool parse_cue(const std::string &cue_path, const std::string &bin_dir);
-  void reset_str_diagnostics();
-  void note_str_chunk_accepted(u32 frame_no, u16 chunk_no,
-                               u16 chunks_per_frame);
-  void prune_str_frame_diagnostics();
-  void log_str_diagnostics(const char *reason, bool force = false);
 
   // BCD conversion
   static u8 to_bcd(u8 val) { return ((val / 10) << 4) | (val % 10); }

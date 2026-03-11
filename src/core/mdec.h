@@ -1,8 +1,8 @@
 #pragma once
-
 #include "types.h"
-
 #include <array>
+#include <deque>
+#include <vector>
 
 class Mdec {
 public:
@@ -71,9 +71,7 @@ public:
   u32 dma_out_macroblock_seq() const;
 
   void dma_write(u32 value) { write_command(value); }
-  void dma_write(const u32 *words, u32 word_count);
   u32 dma_read() { return read_data(); }
-  void dma_read(u32 *words, u32 word_count);
   bool dma_in_request() const;
   bool dma_out_request() const;
   u32 dma_out_words_available() const {
@@ -84,12 +82,7 @@ public:
   const DebugCompare &debug_compare() const { return debug_compare_; }
   void reset_debug_compare() { debug_compare_ = {}; }
 
-  private:
-    std::array<T, Capacity> data_{};
-    size_t head_ = 0;
-    size_t size_ = 0;
-  };
-
+private:
   static constexpr size_t kBlockSize = 64;
   using Block = std::array<int, kBlockSize>;
   using MacroblockBlocks = std::array<Block, DebugCompare::kBlocksPerMacroblock>;
@@ -133,28 +126,25 @@ public:
   void push_output_word(u32 value);
   void push_output_byte(u8 value);
   static int sign_extend_10(u16 value);
-  static int sign_extend_9(int value);
+  static int clamp_s11(int value);
   u8 encode_component(int value) const;
+  u16 encode_rgb15(int r, int g, int b) const;
 
   u32 control_ = 0;
-  State state_ = State::Idle;
-  u32 remaining_halfwords_ = 0;
-
-  InlineFifo<u16, kDataInFifoHalfwords> in_fifo_{};
-  InlineFifo<u32, kDataOutFifoWords> out_fifo_{};
-
-  std::array<u8, kBlockSize> iq_uv_{};
-  std::array<u8, kBlockSize> iq_y_{};
-  std::array<s16, kBlockSize> scale_table_{};
-  std::array<Block, kNumBlocks> blocks_{};
-  MacroblockPixels block_rgb_{};
-
-  u32 current_block_ = 0;
-  u32 current_coefficient_ = kBlockSize;
-  u16 current_q_scale_ = 0;
-
+  bool command_busy_ = false;
+  bool expect_command_word_ = true;
   u8 command_id_ = 0;
   u32 command_word_ = 0;
+  u32 in_words_remaining_ = 0;
+  bool in_unlimited_ = false;
+  
+  std::deque<u16> in_halfword_fifo_{};
+
+  std::array<u8, kBlockSize> quant_luma_{};
+  std::array<u8, kBlockSize> quant_chroma_{};
+  std::array<s16, kBlockSize> scale_table_{};
+  u8 status_command_bits_ = 0;
+  u8 current_block_ = 4;
   u8 output_depth_ = 2;
   bool output_signed_ = false;
   bool output_set_bit15_ = false;

@@ -11,8 +11,6 @@ namespace {
     constexpr u32 kRamWatchEnd = 0x00047A10u;
     constexpr u32 kRamWatchWord0 = 0x000479D0u;
     constexpr u32 kRamWatchLogLimit = 64u;
-    constexpr u64 kMdecMmioLogLimit = 256u;
-    u64 g_mdec_mmio_log_count = 0;
 
     struct BusWarnLimiter {
         u32 last_addr = 0xFFFFFFFFu;
@@ -255,6 +253,18 @@ void System::sync_spu_to_cpu() {
     spu_.mark_synced_to_cpu(spu_synced_cpu_cycle_);
 }
 
+bool System::save_spu_voice_sample_to_file(int voice, const std::string& path,
+                                           std::string* error) {
+    sync_spu_to_cpu();
+    return spu_.export_voice_sample_to_file(voice, path, error);
+}
+
+bool System::load_spu_replacement_sample_from_file(const std::string& path,
+                                                   std::string* error) {
+    sync_spu_to_cpu();
+    return spu_.load_replacement_sample_from_file(path, error);
+}
+
 void System::init_hardware() {
     if (hw_init_)
         return; // Already initialized
@@ -321,14 +331,6 @@ bool System::boot_disc(bool direct_boot) {
 
     set_running(true);
     return true;
-}
-
-bool should_log_mdec_mmio() {
-    if (g_mdec_mmio_log_count < kMdecMmioLogLimit) {
-        ++g_mdec_mmio_log_count;
-        return true;
-    }
-    return false;
 }
 
 void System::reset() {
@@ -402,6 +404,9 @@ void System::debug_end_dma_bus_access() {
 }
 
 void System::debug_note_main_ram_read(u32 addr, u32 value, u8 size) {
+    if (!g_mdec_debug_upload_probe) {
+        return;
+    }
     if (!probe_contains_addr(mdec_upload_probe_.dma1_base_addr,
                              mdec_upload_probe_.dma1_range_bytes, addr)) {
         return;
@@ -421,6 +426,9 @@ void System::debug_note_main_ram_read(u32 addr, u32 value, u8 size) {
 }
 
 void System::debug_note_main_ram_write(u32 addr, u32 value, u8 size) {
+    if (!g_mdec_debug_upload_probe) {
+        return;
+    }
     RamAccessLogEntry &entry =
         ram_write_history_[ram_write_history_pos_ % static_cast<u32>(kRamWriteHistorySize)];
     entry.addr = addr;
@@ -451,6 +459,9 @@ void System::debug_note_main_ram_write(u32 addr, u32 value, u8 size) {
 }
 
 void System::populate_gpu_src_write_samples_from_history() {
+    if (!g_mdec_debug_upload_probe) {
+        return;
+    }
     if (mdec_upload_probe_.gpu_dma_src_base == 0 ||
         mdec_upload_probe_.gpu_src_write_sample_count != 0 ||
         ram_write_history_count_ == 0) {
@@ -482,6 +493,9 @@ void System::populate_gpu_src_write_samples_from_history() {
 
 void System::debug_note_mdec_dma_out_begin(u32 base_addr, u32 words, u8 depth,
                                            u8 first_block) {
+    if (!g_mdec_debug_upload_probe) {
+        return;
+    }
     mdec_upload_probe_.dma1_seen = true;
     mdec_upload_probe_.dma1_base_addr = base_addr & 0x001FFFFCu;
     mdec_upload_probe_.dma1_words = words;
@@ -505,6 +519,9 @@ void System::debug_note_mdec_dma_out_begin(u32 base_addr, u32 words, u8 depth,
 
 void System::debug_note_mdec_dma_out_word(u32 write_addr, u32 value,
                                           u32 macroblock_seq) {
+    if (!g_mdec_debug_upload_probe) {
+        return;
+    }
     if (!mdec_upload_probe_.dma1_seen) {
         return;
     }
@@ -546,6 +563,9 @@ void System::debug_note_mdec_dma_out_word(u32 write_addr, u32 value,
 }
 
 void System::debug_note_gpu_image_load_begin(u16 x, u16 y, u16 w, u16 h) {
+    if (!g_mdec_debug_upload_probe) {
+        return;
+    }
     mdec_upload_probe_.gpu_upload_seen = true;
     mdec_upload_probe_.gpu_upload_data_seen = false;
     ++mdec_upload_probe_.gpu_upload_count;
@@ -598,6 +618,9 @@ void System::debug_note_gpu_image_load_begin(u16 x, u16 y, u16 w, u16 h) {
 }
 
 void System::debug_note_gpu_image_load_word(u32 value) {
+    if (!g_mdec_debug_upload_probe) {
+        return;
+    }
     if (!mdec_upload_probe_.gpu_upload_seen) {
         return;
     }
@@ -633,6 +656,9 @@ void System::debug_note_gpu_image_load_word(u32 value) {
 }
 
 void System::debug_note_gpu_vblank() {
+    if (!g_mdec_debug_upload_probe) {
+        return;
+    }
     const u32 frame_count = std::min<u32>(
         mdec_upload_probe_.gpu_frame_upload_count,
         static_cast<u32>(MdecUploadProbe::kUploadHistory));
@@ -669,6 +695,9 @@ void System::debug_note_gpu_vblank() {
 
 void System::debug_note_gpu_vram_copy(u16 src_x, u16 src_y, u16 dst_x, u16 dst_y,
                                       u16 w, u16 h) {
+    if (!g_mdec_debug_upload_probe) {
+        return;
+    }
     ++mdec_upload_probe_.gpu_copy_count;
     const u32 index = mdec_upload_probe_.gpu_copy_sample_count;
     if (index >= MdecUploadProbe::kSampleWords) {
@@ -1073,18 +1102,6 @@ void System::disable_sound_reaper() {
     SoundReaperConfig cfg = sound_reaper_config();
     cfg.enabled = false;
     set_sound_reaper_config(cfg);
-}
-
-bool System::save_spu_voice_sample_to_file(int voice, const std::string& path,
-                                           std::string* error) {
-    sync_spu_to_cpu();
-    return spu_.export_voice_sample_to_file(voice, path, error);
-}
-
-bool System::load_spu_replacement_sample_from_file(const std::string& path,
-                                                   std::string* error) {
-    sync_spu_to_cpu();
-    return spu_.load_replacement_sample_from_file(path, error);
 }
 
 void System::apply_ram_reaper_for_frame() {
@@ -1671,34 +1688,6 @@ u32 System::read32(u32 addr) {
     return 0xFFFFFFFFu;
 }
 
-void System::push_mdec_command_byte(u8 value) {
-    const u32 shift = (mdec_command_shadow_mask_ & 0x3u) * 8u;
-    mdec_command_shadow_ |= static_cast<u32>(value) << shift;
-    ++mdec_command_shadow_mask_;
-    if (mdec_command_shadow_mask_ >= 4u) {
-        mdec_.write_command(mdec_command_shadow_);
-        mdec_command_shadow_ = 0;
-        mdec_command_shadow_mask_ = 0;
-    }
-}
-
-void System::push_mdec_command_halfword(u16 value) {
-    push_mdec_command_byte(static_cast<u8>(value & 0xFFu));
-    push_mdec_command_byte(static_cast<u8>((value >> 8) & 0xFFu));
-}
-
-void System::push_mdec_command_word(u32 value) {
-    if (mdec_command_shadow_mask_ == 0u) {
-        mdec_.write_command(value);
-        return;
-    }
-    // Preserve FIFO ordering if the host mixed widths mid-stream.
-    push_mdec_command_byte(static_cast<u8>(value & 0xFFu));
-    push_mdec_command_byte(static_cast<u8>((value >> 8) & 0xFFu));
-    push_mdec_command_byte(static_cast<u8>((value >> 16) & 0xFFu));
-    push_mdec_command_byte(static_cast<u8>((value >> 24) & 0xFFu));
-}
-
 void System::write8(u32 addr, u8 val) {
     u32 phys = psx::mask_address(addr);
     if (g_trace_bus && phys >= 0x1F801000 && phys < 0x1F803000) {
@@ -2018,14 +2007,7 @@ void System::write32(u32 addr, u32 val) {
             return;
         }
         if (io == 0x824) {
-            if (should_log_mdec_mmio()) {
-                LOG_INFO("BUS: MDEC W32 ctl val=0x%08X", val);
-            }
             mdec_control_shadow_ = ((val & 0x80000000u) != 0) ? 0u : val;
-            if ((val & 0x80000000u) != 0) {
-                mdec_command_shadow_ = 0;
-                mdec_command_shadow_mask_ = 0;
-            }
             mdec_.write_control(val);
             return;
         }
