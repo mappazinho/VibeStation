@@ -163,6 +163,88 @@ bool is_audio_track(const CdTrack *track) {
   return track != nullptr && upper_copy(track->type) == "AUDIO";
 }
 
+bool is_mode2_track(const CdTrack *track) {
+  if (track == nullptr) {
+    return false;
+  }
+  const std::string type = upper_copy(track->type);
+  return starts_with_ci(type, "MODE2/") || type == "CDI/2336";
+}
+
+struct SectorLayout {
+  bool mode2 = false;
+  bool has_subheader = false;
+  size_t subheader_offset = 0;
+  size_t user_data_offset = 0;
+  size_t user_data_size = 0;
+};
+
+SectorLayout describe_sector_layout(const std::vector<u8> &raw_sector,
+                                    const CdTrack *track) {
+  SectorLayout layout{};
+  layout.user_data_size = raw_sector.size();
+
+  auto clamp_layout = [&]() {
+    if (layout.user_data_offset > raw_sector.size()) {
+      layout.user_data_offset = raw_sector.size();
+    }
+    if (layout.user_data_offset + layout.user_data_size > raw_sector.size()) {
+      layout.user_data_size = raw_sector.size() - layout.user_data_offset;
+    }
+  };
+
+  const bool mode2_track = is_mode2_track(track);
+  if (raw_sector.size() >= 2352u) {
+    const bool mode2_from_header = raw_sector.size() >= 16u && raw_sector[15] == 0x02u;
+    layout.mode2 = mode2_track || mode2_from_header;
+    if (layout.mode2) {
+      layout.user_data_offset = 24u;
+      layout.user_data_size = 0x800u;
+      layout.has_subheader = raw_sector.size() >= 24u;
+      layout.subheader_offset = 16u;
+    } else {
+      layout.user_data_offset = 16u;
+      layout.user_data_size = 0x800u;
+    }
+    clamp_layout();
+    return layout;
+  }
+
+  if (raw_sector.size() >= 2336u && (mode2_track || raw_sector.size() == 2336u)) {
+    layout.mode2 = true;
+    layout.user_data_offset = 8u;
+    layout.user_data_size = 0x800u;
+    layout.has_subheader = raw_sector.size() >= 8u;
+    layout.subheader_offset = 0u;
+    clamp_layout();
+    return layout;
+  }
+
+  if (raw_sector.size() >= 2048u) {
+    layout.mode2 = mode2_track;
+    layout.user_data_offset = 0u;
+    layout.user_data_size = 0x800u;
+    clamp_layout();
+    return layout;
+  }
+
+  clamp_layout();
+  return layout;
+}
+
+bool read_sector_subheader(const std::vector<u8> &raw_sector,
+                           const SectorLayout &layout, u8 &file, u8 &channel,
+                           u8 &submode, u8 &codinginfo) {
+  if (!layout.has_subheader || layout.subheader_offset + 4u > raw_sector.size()) {
+    return false;
+  }
+  file = raw_sector[layout.subheader_offset + 0u];
+  channel = raw_sector[layout.subheader_offset + 1u];
+  submode = raw_sector[layout.subheader_offset + 2u];
+  codinginfo = raw_sector[layout.subheader_offset + 3u];
+  return true;
+}
+
 u8 clip_u8(int value) {
   return static_cast<u8>(std::clamp(value, 0, 255));
 }
@@ -1307,21 +1389,26 @@ bool CdRom::stream_cdda_sector() {
   return true;
 }
 
-void CdRom::maybe_decode_xa_audio(const std::vector<u8> &raw_sector) {
-  if ((mode_ & 0x40u) == 0 || raw_sector.size() < 24u) {
+void CdRom::maybe_decode_xa_audio(const std::vector<u8> &raw_sector,
+                                  const CdTrack *track) {
+  if ((mode_ & 0x40u) == 0) {
     return;
   }
-  if (raw_sector[15] != 0x02u) {
+  const SectorLayout layout = describe_sector_layout(raw_sector, track);
+  if (!layout.mode2) {
     return;
   }
   if (is_probable_str_video_sector(raw_sector)) {
     return;
   }
 
-  const u8 file = raw_sector[16];
-  const u8 channel = raw_sector[17];
-  const u8 submode = raw_sector[18];
-  const u8 codinginfo = raw_sector[19];
+  u8 file = 0;
+  u8 channel = 0;
+  u8 submode = 0;
+  u8 codinginfo = 0;
+  if (!read_sector_subheader(raw_sector, layout, file, channel, submode, codinginfo)) {
+    return;
+  }
   // Treat sectors tagged as Video as non-audio, even if bit2 is noisy.
   // Some streams carry imperfect submode flags; decoding those as XA can
   // consume video payload and make MDEC appear to stall.
@@ -1361,7 +1448,9 @@ void CdRom::maybe_decode_xa_audio(const std::vector<u8> &raw_sector) {
     return;
   }
 
-  if (!cd_audio_muted() && sys_ != nullptr && raw_sector.size() >= (24u + 18u * 128u)) {
+  const size_t decode_base = layout.user_data_offset;
+  if (!cd_audio_muted() && sys_ != nullptr &&
+      raw_sector.size() >= (decode_base + 18u * 128u)) {
     std::vector<s16> samples;
 
     if (stereo) {
@@ -1374,7 +1463,7 @@ void CdRom::maybe_decode_xa_audio(const std::vector<u8> &raw_sector) {
       s32 older_r = xa_hist2_[1];
 
       for (size_t group = 0; group < 18u; ++group) {
-        const size_t base = 24u + group * 128u;
+        const size_t base = decode_base + group * 128u;
         for (size_t blk = 0; blk < blocks_per_group; ++blk) {
           if (four_bit) {
             const u8 header_l = raw_sector[base + 4u + blk * 2u + 0u];
@@ -1438,7 +1527,7 @@ void CdRom::maybe_decode_xa_audio(const std::vector<u8> &raw_sector) {
       s32 older = xa_hist2_[0];
 
       for (size_t group = 0; group < 18u; ++group) {
-        const size_t base = 24u + group * 128u;
+        const size_t base = decode_base + group * 128u;
         for (size_t blk = 0; blk < blocks_per_group; ++blk) {
           if (four_bit) {
             for (size_t nibble = 0; nibble < 2u; ++nibble) {
@@ -1492,56 +1581,13 @@ bool CdRom::read_sector() {
     return false;
   }
 
-  // Cooked images (2048 bytes) lack the 12-byte sync + 4-byte header that
-  // raw 2352-byte sectors have.  Detect cooked sectors so we can infer
-  // mode2/subheader from the payload content instead of absent CD headers.
-  const bool cooked = raw.size() <= 2048u;
-
-  // For raw sectors, MODE2 is indicated by byte 15 == 0x02.  For cooked
-  // sectors, we defer the decision until after the STR content probe.
-  bool mode2 = !cooked && raw.size() >= 16u && raw[15] == 0x02u;
-  bool has_subheader = mode2 && raw.size() >= 24u;
-  u8 file = has_subheader ? raw[16] : 0;
-  u8 channel = has_subheader ? raw[17] : 0;
-  u8 submode = has_subheader ? raw[18] : 0;
-  size_t raw_magic_offset = 0;
-  bool raw_has_magic = false;
-  for (size_t offset : kRawStrHeaderOffsets) {
-    if (offset + 1u >= raw.size()) {
-      continue;
-    }
-    if (read_le16(raw, offset) == 0x0160u) {
-      raw_has_magic = true;
-      raw_magic_offset = offset;
-      break;
-    }
-  }
-  if (raw_has_magic) {
-    ++str_magic_candidate_count_;
-  }
-  StrChunkHeaderInfo raw_str_header{};
-  const bool raw_has_str_header =
-      find_str_header_with_offsets(raw, kRawStrHeaderOffsets, raw_str_header);
-  if (raw_has_str_header) {
-    ++str_sector_detect_count_;
-  } else if (raw_has_magic) {
-    ++str_header_reject_count_;
-    if (!str_warned_header_reject_) {
-      str_warned_header_reject_ = true;
-      const u16 a_chunk = read_le16(raw, raw_magic_offset + 2u);
-      const u16 a_chunks = read_le16(raw, raw_magic_offset + 4u);
-      const u16 b_chunk = read_le16(raw, raw_magic_offset + 4u);
-      const u16 b_chunks = read_le16(raw, raw_magic_offset + 6u);
-      const u32 c_frame = read_le32(raw, raw_magic_offset + 8u);
-      const u32 c_size = read_le32(raw, raw_magic_offset + 12u);
-      LOG_WARN("CDROM: 0x0160 candidate rejected at raw_off=%zu "
-               "(A chunk=%u/%u, B chunk=%u/%u, C frame=%u size=%u, raw_size=%zu, mode2=%d)",
-               raw_magic_offset, static_cast<unsigned>(a_chunk),
-               static_cast<unsigned>(a_chunks), static_cast<unsigned>(b_chunk),
-               static_cast<unsigned>(b_chunks), static_cast<unsigned>(c_frame),
-               static_cast<unsigned>(c_size), raw.size(), mode2 ? 1 : 0);
-    }
-  }
+  const SectorLayout layout = describe_sector_layout(raw, track);
+  u8 file = 0;
+  u8 channel = 0;
+  u8 submode = 0;
+  u8 ignored_codinginfo = 0;
+  const bool has_subheader =
+      read_sector_subheader(raw, layout, file, channel, submode, ignored_codinginfo);
   const bool looks_like_str_video = is_probable_str_video_sector(raw);
 
   // For cooked sectors, infer MODE2 and subheader from the payload content.
@@ -1571,7 +1617,7 @@ bool CdRom::read_sector() {
 
   bool delivered_to_adpcm = false;
   if ((mode_ & 0x40u) != 0 && is_audio_sector && filter_match) {
-    maybe_decode_xa_audio(raw);
+    maybe_decode_xa_audio(raw, track);
     delivered_to_adpcm = true;
   }
 
@@ -1594,20 +1640,24 @@ bool CdRom::read_sector() {
   }
 
   std::vector<u8> payload;
-  size_t payload_data_offset = 0;
-  auto extract_user_payload_2048 = [&](size_t &out_offset) {
-    size_t data_offset = 0;
-    size_t data_size = 0;
-    if (raw.size() >= 2352u && mode2) {
-      data_offset = 24u;
-      data_size = 0x800u;
-    } else if (raw.size() >= 2352u) {
-      data_offset = 16u;
-      data_size = 0x800u;
-    } else if (raw.size() >= 2048u) {
-      data_offset = 0u;
-      data_size = 0x800u;
+  // ReadN (06h) and ReadS (1Bh) differ in retry policy/timing, not in how the
+  // host data FIFO is formatted.
+  //
+  // Host payload width is selected by Setmode bits:
+  // - bit5=1 -> raw sector payload (0x924 bytes after sync)
+  // - bit5=0 -> user data only (0x800 bytes)
+  //
+  // Setmode bit4 is the CD-ROM "ignore bit", not a host payload-size selector.
+  if (read_whole_sector_) {
+    if (raw.size() >= (12u + 0x924u)) {
+      payload.assign(raw.begin() + 12, raw.begin() + 12 + 0x924u);
     } else {
+      payload = raw;
+    }
+  } else {
+    size_t data_offset = layout.user_data_offset;
+    size_t data_size = layout.user_data_size;
+    if (data_size == 0u && !raw.empty()) {
       data_offset = 0u;
       data_size = raw.size();
     }
@@ -1946,12 +1996,8 @@ void CdRom::cmd_setmode() {
   }
 
   const u8 new_mode = param_fifo_[0];
-  if (g_trace_cdrom) {
-    LOG_INFO("CDROM: Setmode new=0x%02X (whole=%d xa=%d filter=%d)",
-             static_cast<unsigned>(new_mode), (new_mode & 0x20u) ? 1 : 0,
-             (new_mode & 0x40u) ? 1 : 0, (new_mode & 0x08u) ? 1 : 0);
-  }
-  // Setmode bit5 selects host data width unconditionally.
+  // Setmode bit5 selects raw sector reads (0x924 bytes after sync).
+  // Bit4 is the CD-ROM "ignore bit" and does not change host FIFO width.
   read_whole_sector_ = (new_mode & 0x20u) != 0;
   mode_ = new_mode;
   // id_error_ = (mode_ & 0x10u) != 0;
@@ -2158,19 +2204,32 @@ void CdRom::cmd_getloc_l() {
   const int probe_lba = std::max(0, read_lba_ - 1);
   std::vector<u8> raw;
   const CdTrack *track = nullptr;
-  if (!read_raw_sector_for_lba(probe_lba, raw, &track) || is_audio_track(track)) {
+  if (!read_raw_sector_for_lba(probe_lba, raw, &track) || raw.empty() ||
+      is_audio_track(track)) {
     enqueue_irq(5, make_error_response(stat_byte(), 0x80u));
     return;
   }
 
-  SectorLocLInfo locl{};
-  if (!build_sector_locl_info(raw, probe_lba + 150, locl)) {
-    enqueue_irq(5, make_error_response(stat_byte(), 0x80u));
+  if (raw.size() >= 2352u && raw.size() >= 20u) {
+    enqueue_irq(3, {raw[12], raw[13], raw[14], raw[15], raw[16], raw[17], raw[18],
+                    raw[19]});
     return;
   }
 
-  enqueue_irq(3, {locl.minute, locl.second, locl.frame, locl.mode, locl.file,
-                  locl.channel, locl.submode, locl.coding});
+  const SectorLayout layout = describe_sector_layout(raw, track);
+  u8 file = 0;
+  u8 channel = 0;
+  u8 submode = 0;
+  u8 codinginfo = 0;
+  (void)read_sector_subheader(raw, layout, file, channel, submode, codinginfo);
+
+  const int abs_lba = std::max(0, probe_lba + 150);
+  u8 mm = 0;
+  u8 ss = 0;
+  u8 ff = 0;
+  lba_to_msf_bcd(abs_lba, mm, ss, ff);
+  enqueue_irq(3, {mm, ss, ff, static_cast<u8>(layout.mode2 ? 0x02u : 0x01u), file,
+                  channel, submode, codinginfo});
 }
 
 void CdRom::cmd_getloc_p() {

@@ -262,6 +262,7 @@ void Gpu::reset() {
     interlace_field_ = false;
     gpuread_latch_ = 0;
     frame_complete_ = false;
+    command_debug_ = {};
     polyline_active_ = false;
     polyline_gouraud_ = false;
     polyline_waiting_vertex_ = false;
@@ -455,6 +456,9 @@ void Gpu::gp0(u32 command) {
 
     // Handle VRAM write mode
     if (gp0_mode_ == Gp0Mode::VramWrite) {
+        if (sys_) {
+            sys_->debug_note_gpu_image_load_word(command);
+        }
         // Write two 16-bit pixels per 32-bit word
         u16 pixel0 = command & 0xFFFF;
         u16 pixel1 = command >> 16;
@@ -723,6 +727,7 @@ void Gpu::gp0_mono_quad() {
 }
 
 void Gpu::gp0_textured_tri() {
+    ++command_debug_.gp0_textured_tri_count;
     Color c(gp0_buffer_[0]);
     clut_ = static_cast<u16>(gp0_buffer_[2] >> 16);
     texpage_ = static_cast<u16>(gp0_buffer_[4] >> 16);
@@ -743,6 +748,7 @@ void Gpu::gp0_textured_tri() {
 }
 
 void Gpu::gp0_textured_quad() {
+    ++command_debug_.gp0_textured_quad_count;
     Color c(gp0_buffer_[0]);
     clut_ = static_cast<u16>(gp0_buffer_[2] >> 16);
     texpage_ = static_cast<u16>(gp0_buffer_[4] >> 16);
@@ -946,6 +952,7 @@ void Gpu::gp0_mono_rect() {
 }
 
 void Gpu::gp0_textured_rect() {
+    ++command_debug_.gp0_textured_rect_count;
     Color c(gp0_buffer_[0]);
     const Vertex origin = decode_vertex_word(gp0_buffer_[1]);
     s16 x = origin.x;
@@ -973,6 +980,26 @@ void Gpu::gp0_textured_rect() {
     }
 
     const bool raw_texture = (gp0_command_ & 0x1u) != 0;
+    {
+        const u32 rect_index =
+            (command_debug_.gp0_textured_rect_count - 1u) %
+            static_cast<u32>(GpuCommandDebugInfo::kRecentRects);
+        command_debug_.rect_x[rect_index] = x;
+        command_debug_.rect_y[rect_index] = y;
+        command_debug_.rect_w[rect_index] = w;
+        command_debug_.rect_h[rect_index] = h;
+        command_debug_.rect_u[rect_index] = u;
+        command_debug_.rect_v[rect_index] = v;
+        command_debug_.rect_clut[rect_index] = clut_;
+        command_debug_.rect_texpage[rect_index] = texpage_;
+        command_debug_.rect_raw[rect_index] = raw_texture ? 1u : 0u;
+        command_debug_.rect_r[rect_index] = c.r;
+        command_debug_.rect_g[rect_index] = c.g;
+        command_debug_.rect_b[rect_index] = c.b;
+        command_debug_.rect_depth[rect_index] =
+            static_cast<u8>((texpage_ >> 7) & 0x3u);
+    }
+
     // Textured rectangle draw path (supports 4/8/15-bit tex fetch via
     // read_texel).
     for (u16 dy = 0; dy < h; ++dy) {
@@ -1096,6 +1123,10 @@ void Gpu::gp0_image_load() {
     vram_tx_pos_ = 0;
     vram_tx_total_ = static_cast<u32>(vram_tx_w_) * vram_tx_h_;
 
+    if (sys_) {
+        sys_->debug_note_gpu_image_load_begin(vram_tx_x_, vram_tx_y_,
+                                              vram_tx_w_, vram_tx_h_);
+    }
     gp0_mode_ = Gp0Mode::VramWrite;
 }
 
@@ -1129,6 +1160,10 @@ void Gpu::gp0_vram_copy() {
         w = 1024;
     if (h == 0)
         h = 512;
+
+    if (sys_) {
+        sys_->debug_note_gpu_vram_copy(src_x, src_y, dst_x, dst_y, w, h);
+    }
 
     // Copy through a temp line buffer to handle overlaps safely.
     const size_t copy_pixels = static_cast<size_t>(w) * static_cast<size_t>(h);
@@ -1250,16 +1285,28 @@ void Gpu::gp1_display_area(u32 val) {
     const u32 value = val & 0x00FFFFFFu;
     display_.x_start = value & 0x3FE; // 10 bits, aligned to 2
     display_.y_start = (value >> 10) & 0x1FF;
+    ++command_debug_.gp1_display_area_count;
+    command_debug_.gp1_display_area_raw = value;
+    command_debug_.gp1_display_area_x = display_.x_start;
+    command_debug_.gp1_display_area_y = display_.y_start;
 }
 
 void Gpu::gp1_horizontal_range(u32 val) {
     display_.x1 = val & 0xFFF;
     display_.x2 = (val >> 12) & 0xFFF;
+    ++command_debug_.gp1_horizontal_range_count;
+    command_debug_.gp1_horizontal_range_raw = val & 0x00FFFFFFu;
+    command_debug_.gp1_horizontal_range_x1 = display_.x1;
+    command_debug_.gp1_horizontal_range_x2 = display_.x2;
 }
 
 void Gpu::gp1_vertical_range(u32 val) {
     display_.y1 = val & 0x3FF;
     display_.y2 = (val >> 10) & 0x3FF;
+    ++command_debug_.gp1_vertical_range_count;
+    command_debug_.gp1_vertical_range_raw = val & 0x001FFFFFu;
+    command_debug_.gp1_vertical_range_y1 = display_.y1;
+    command_debug_.gp1_vertical_range_y2 = display_.y2;
 }
 
 void Gpu::gp1_display_mode(u32 val) {
@@ -1270,6 +1317,8 @@ void Gpu::gp1_display_mode(u32 val) {
     display_.is_pal = (val >> 3) & 1;
     display_.is_24bit = (val >> 4) & 1;
     display_.interlaced = (val >> 5) & 1;
+    ++command_debug_.gp1_display_mode_count;
+    command_debug_.gp1_display_mode_raw = val & 0x7Fu;
 }
 
 void Gpu::gp1_get_info(u32 val) {
@@ -1423,6 +1472,7 @@ DisplaySampleInfo Gpu::build_display_rgba(std::vector<u32>* rgba,
 
     const int mode_w = display_.width();
     const int mode_h = display_.height();
+    const int divisor = std::max(1, horizontal_divisor(display_.hres));
 
     // Safe baseline: mode-derived size is authoritative unless range values are
     // close enough to be trustworthy for the active mode.
@@ -1450,23 +1500,54 @@ DisplaySampleInfo Gpu::build_display_rgba(std::vector<u32>* rgba,
         }
     }
 
-    const int src_width = width;
-    const int src_height = height;
-    switch (g_output_resolution_mode) {
-    case OutputResolutionMode::R1024x768:
-        info.width = 1024;
-        info.height = 768;
-        break;
-    case OutputResolutionMode::R640x480:
-        info.width = 640;
-        info.height = 480;
-        break;
-    case OutputResolutionMode::R320x240:
-    default:
-        info.width = 320;
-        info.height = 240;
-        break;
+    // DuckStation-style distinction between display resolution and the VRAM
+    // rectangle feeding scanout. 24-bit scanout in particular depends on the
+    // VRAM width being rounded to a 4-pixel multiple before reinterpretation.
+    int display_vram_width = width;
+    int display_vram_height = height;
+    int display_vram_left = info.x_start;
+    int display_vram_top = info.y_start;
+    int display_skip_x = 0;
+
+    if (display_.x2 > display_.x1) {
+        const int horizontal_ticks =
+            std::max(0, static_cast<int>(display_.x2 - display_.x1));
+        const int horizontal_pixels = horizontal_ticks / divisor;
+        if (horizontal_pixels == 1) {
+            display_vram_width = 4;
+        } else if (horizontal_pixels > 1) {
+            display_vram_width =
+                clamp_display_dimension((horizontal_pixels + 2) & ~3, width,
+                                        psx::VRAM_WIDTH);
+        }
     }
+
+    // If the configured display range starts before the active area, crop after
+    // 24-bit reinterpretation rather than by shifting the source byte address.
+    if (display_.x2 > display_.x1) {
+        const int horizontal_start =
+            (static_cast<int>(display_.x1) / divisor) * divisor;
+        const int horizontal_end =
+            (static_cast<int>(display_.x2) / divisor) * divisor;
+        const int display_pixels =
+            std::max(0, (horizontal_end - horizontal_start) / divisor);
+        if (display_pixels > 0) {
+            display_skip_x = std::max(0, display_pixels - width);
+            display_vram_width =
+                std::min<int>(display_vram_width + display_skip_x,
+                              static_cast<int>(psx::VRAM_WIDTH));
+            display_vram_left =
+                (info.x_start + display_skip_x) % static_cast<int>(psx::VRAM_WIDTH);
+        }
+    }
+
+    const int src_width = std::max(1, display_.is_24bit ? display_vram_width : width);
+    const int src_height = std::max(1, height);
+    // Present the actual CRTC-sized frame. The UI layer already scales this
+    // texture for display, so forcing a fixed software output resolution here
+    // only adds an extra resample and can hide the true GPU output.
+    info.width = std::max(1, width);
+    info.height = std::max(1, height);
 
     if (rgba != nullptr) {
         rgba->assign(static_cast<size_t>(info.width) * static_cast<size_t>(info.height),
@@ -1476,7 +1557,6 @@ DisplaySampleInfo Gpu::build_display_rgba(std::vector<u32>* rgba,
         return info;
     }
 
-    const int row_bytes = static_cast<int>(psx::VRAM_WIDTH * sizeof(u16));
     u32 hash = 2166136261u;
     u64 non_black = 0;
     const bool interlaced_field_output =
@@ -1488,21 +1568,21 @@ DisplaySampleInfo Gpu::build_display_rgba(std::vector<u32>* rgba,
         interlaced_field_output ? g_deinterlace_mode : DeinterlaceMode::Weave;
 
     if (rgba != nullptr && !include_stats && !display_.is_24bit &&
-        !interlaced_field_output && info.x_start >= 0 && info.y_start >= 0 &&
-        info.x_start + src_width <= static_cast<int>(psx::VRAM_WIDTH) &&
-        info.y_start + src_height <= static_cast<int>(psx::VRAM_HEIGHT)) {
+        !interlaced_field_output && display_vram_left >= 0 && display_vram_top >= 0 &&
+        display_vram_left + src_width <= static_cast<int>(psx::VRAM_WIDTH) &&
+        display_vram_top + src_height <= static_cast<int>(psx::VRAM_HEIGHT)) {
         std::vector<u32>& out = *rgba;
         for (int y = 0; y < info.height; ++y) {
             const int src_y =
                 (src_height > 0) ? ((y * src_height) / info.height) : 0;
             const size_t src_row =
-                static_cast<size_t>(info.y_start + src_y) * psx::VRAM_WIDTH;
+                static_cast<size_t>(display_vram_top + src_y) * psx::VRAM_WIDTH;
             const size_t dst_row = static_cast<size_t>(y) * static_cast<size_t>(info.width);
             for (int x = 0; x < info.width; ++x) {
                 const int src_x =
                     (src_width > 0) ? ((x * src_width) / info.width) : 0;
                 const u16 pixel =
-                    vram_[src_row + static_cast<size_t>(info.x_start + src_x)];
+                    vram_[src_row + static_cast<size_t>(display_vram_left + src_x)];
                 const u8 r5 = static_cast<u8>(pixel & 0x1F);
                 const u8 g5 = static_cast<u8>((pixel >> 5) & 0x1F);
                 const u8 b5 = static_cast<u8>((pixel >> 10) & 0x1F);
@@ -1515,28 +1595,16 @@ DisplaySampleInfo Gpu::build_display_rgba(std::vector<u32>* rgba,
         return info;
     }
 
-    auto sample_byte = [&](int vram_y, int byte_index) -> u8 {
-        if (vram_y < 0 || vram_y >= static_cast<int>(psx::VRAM_HEIGHT) ||
-            byte_index < 0 || byte_index >= row_bytes) {
-            return 0;
-        }
-        const int word_index = byte_index >> 1;
-        const u16 word =
-            vram_[static_cast<size_t>(vram_y) * psx::VRAM_WIDTH + word_index];
-        return (byte_index & 1) ? static_cast<u8>(word >> 8)
-            : static_cast<u8>(word & 0xFF);
-        };
-
     auto read_rgb = [&](int vram_y, int x, u8& r, u8& g, u8& b) -> bool {
         if (vram_y < 0 || vram_y >= static_cast<int>(psx::VRAM_HEIGHT)) {
             return false;
         }
-        const int vram_x = info.x_start + x;
-        if (vram_x < 0 || vram_x >= static_cast<int>(psx::VRAM_WIDTH)) {
-            return false;
-        }
 
         if (!display_.is_24bit) {
+            const int vram_x = display_vram_left + x;
+            if (vram_x < 0 || vram_x >= static_cast<int>(psx::VRAM_WIDTH)) {
+                return false;
+            }
             const u16 pixel = vram_[static_cast<size_t>(vram_y) * psx::VRAM_WIDTH +
                 static_cast<size_t>(vram_x)];
             const u8 r5 = static_cast<u8>(pixel & 0x1F);
@@ -1548,34 +1616,45 @@ DisplaySampleInfo Gpu::build_display_rgba(std::vector<u32>* rgba,
             return true;
         }
 
-        const int row_start_byte = info.x_start * 2;
-        const int byte_index = row_start_byte + x * 3;
-        r = sample_byte(vram_y, byte_index + 0);
-        g = sample_byte(vram_y, byte_index + 1);
-        b = sample_byte(vram_y, byte_index + 2);
+        const u32 sample_x = static_cast<u32>(display_skip_x + x);
+        const u32 vram_word_x =
+            static_cast<u32>(info.x_start) + ((sample_x * 3u) / 2u);
+        if (vram_word_x >= psx::VRAM_WIDTH) {
+            return false;
+        }
+
+        const size_t row_base = static_cast<size_t>(vram_y) * psx::VRAM_WIDTH;
+        const u16 s0 = vram_[row_base + (vram_word_x % psx::VRAM_WIDTH)];
+        const u16 s1 = vram_[row_base + ((vram_word_x + 1u) % psx::VRAM_WIDTH)];
+        const u32 packed =
+            ((static_cast<u32>(s1) << 16) | static_cast<u32>(s0)) >>
+            ((sample_x & 1u) * 8u);
+        r = static_cast<u8>(packed & 0xFFu);
+        g = static_cast<u8>((packed >> 8) & 0xFFu);
+        b = static_cast<u8>((packed >> 16) & 0xFFu);
         return true;
         };
 
     for (int y = 0; y < info.height; ++y) {
         const int src_y = (src_height > 0) ? ((y * src_height) / info.height) : 0;
-        int vram_y0 = info.y_start + src_y;
+        int vram_y0 = display_vram_top + src_y;
         int vram_y1 = vram_y0;
         bool blend_fields = false;
 
         if (interlaced_field_output) {
             switch (deinterlace_mode) {
             case DeinterlaceMode::Bob:
-                vram_y0 = info.y_start + ((src_y >> 1) * 2) + field_parity;
+                vram_y0 = display_vram_top + ((src_y >> 1) * 2) + field_parity;
                 break;
             case DeinterlaceMode::Blend:
-                vram_y0 = info.y_start + ((src_y >> 1) * 2) + field_parity;
+                vram_y0 = display_vram_top + ((src_y >> 1) * 2) + field_parity;
                 vram_y1 = vram_y0 + (field_parity ? -1 : 1);
                 blend_fields = true;
                 break;
             case DeinterlaceMode::Weave:
             default:
                 // Stable placement: map output lines directly to source scanlines.
-                vram_y0 = info.y_start + src_y;
+                vram_y0 = display_vram_top + src_y;
                 break;
             }
         }
@@ -1634,9 +1713,86 @@ DisplaySampleInfo Gpu::build_display_rgba(std::vector<u32>* rgba,
     return info;
 }
 
+DisplayDebugInfo Gpu::debug_display_info() const {
+    DisplayDebugInfo info{};
+    info.mode_width = display_.width();
+    info.mode_height = display_.height();
+    info.x_start = static_cast<int>(display_.x_start);
+    info.y_start = static_cast<int>(display_.y_start);
+    info.x1 = static_cast<int>(display_.x1);
+    info.x2 = static_cast<int>(display_.x2);
+    info.y1 = static_cast<int>(display_.y1);
+    info.y2 = static_cast<int>(display_.y2);
+    info.is_24bit = display_.is_24bit;
+    info.interlaced = display_.interlaced;
+    info.divisor = std::max(1, horizontal_divisor(display_.hres));
+
+    info.width = clamp_display_dimension(info.mode_width, 320, psx::VRAM_WIDTH);
+    info.height = clamp_display_dimension(info.mode_height, 240, psx::VRAM_HEIGHT);
+
+    if (display_.x2 > display_.x1) {
+        const int dots = static_cast<int>(display_.x2 - display_.x1);
+        const int candidate = dots / info.divisor;
+        const int min_ok = std::max(1, (info.mode_width * 3) / 4);
+        const int max_ok = std::max(min_ok, (info.mode_width * 5) / 4);
+        if (candidate >= min_ok && candidate <= max_ok) {
+            info.width = clamp_display_dimension(candidate, info.width, psx::VRAM_WIDTH);
+        }
+    }
+    if (display_.y2 > display_.y1) {
+        const int candidate = static_cast<int>(display_.y2 - display_.y1);
+        const int min_ok = std::max(1, (info.mode_height * 3) / 4);
+        const int max_ok = std::max(min_ok, (info.mode_height * 5) / 4);
+        if (candidate >= min_ok && candidate <= max_ok) {
+            info.height = clamp_display_dimension(candidate, info.height, psx::VRAM_HEIGHT);
+        }
+    }
+
+    info.display_vram_width = info.width;
+    info.display_vram_height = info.height;
+    info.display_vram_left = info.x_start;
+    info.display_vram_top = info.y_start;
+    info.display_skip_x = 0;
+
+    if (display_.x2 > display_.x1) {
+        const int horizontal_ticks =
+            std::max(0, static_cast<int>(display_.x2 - display_.x1));
+        const int horizontal_pixels = horizontal_ticks / info.divisor;
+        if (horizontal_pixels == 1) {
+            info.display_vram_width = 4;
+        } else if (horizontal_pixels > 1) {
+            info.display_vram_width =
+                clamp_display_dimension((horizontal_pixels + 2) & ~3, info.width,
+                                        psx::VRAM_WIDTH);
+        }
+
+        const int horizontal_start =
+            (static_cast<int>(display_.x1) / info.divisor) * info.divisor;
+        const int horizontal_end =
+            (static_cast<int>(display_.x2) / info.divisor) * info.divisor;
+        const int display_pixels =
+            std::max(0, (horizontal_end - horizontal_start) / info.divisor);
+        if (display_pixels > 0) {
+            info.display_skip_x = std::max(0, display_pixels - info.width);
+            info.display_vram_width =
+                std::min<int>(info.display_vram_width + info.display_skip_x,
+                              static_cast<int>(psx::VRAM_WIDTH));
+            info.display_vram_left =
+                (info.x_start + info.display_skip_x) % static_cast<int>(psx::VRAM_WIDTH);
+        }
+    }
+
+    info.src_width = std::max(1, display_.is_24bit ? info.display_vram_width : info.width);
+    info.src_height = std::max(1, info.height);
+    return info;
+}
+
 void Gpu::vblank() {
     static u64 vblank_count = 0;
     frame_complete_ = true;
+    if (sys_) {
+        sys_->debug_note_gpu_vblank();
+    }
     interlace_field_ = !interlace_field_;
     if (g_trace_gpu &&
         trace_should_log(vblank_count, g_trace_burst_gpu, g_trace_stride_gpu)) {

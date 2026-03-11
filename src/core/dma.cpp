@@ -33,6 +33,77 @@ void DmaController::reset() {
   }
   dpcr_ = 0x07654321;
   dicr_ = 0;
+  reset_mdec_out_reorder_state();
+}
+
+void DmaController::reset_mdec_out_reorder_state() {
+  mdec_out_reorder_active_ = false;
+  mdec_out_mb_base_addr_ = 0;
+  mdec_out_block_id_ = 0xFF;
+  mdec_out_word_index_in_block_ = 0;
+  mdec_out_last_linear_addr_ = 0;
+  mdec_out_last_step_ = 0;
+}
+
+u32 DmaController::map_mdec_out_word_addr(u32 linear_addr, s32 step, u8 block_id,
+                                          u8 depth) {
+  const u32 addr = linear_addr & 0x001FFFFCu;
+  if (g_mdec_debug_disable_dma1_reorder) {
+    reset_mdec_out_reorder_state();
+    return addr;
+  }
+  // Color MDEC output arrives as four 8x8 blocks per macroblock.
+  // DMA1 must reorder those blocks into a 16x16 raster in RAM.
+  if (step != 4 || block_id >= 4u || (depth != 2u && depth != 3u)) {
+    reset_mdec_out_reorder_state();
+    return addr;
+  }
+
+  if (mdec_out_reorder_active_) {
+    const u32 expected =
+        static_cast<u32>(static_cast<s32>(mdec_out_last_linear_addr_) +
+                         mdec_out_last_step_) &
+        0x001FFFFCu;
+    const bool discontinuity =
+        (step != mdec_out_last_step_) || (addr != expected);
+    if (discontinuity) {
+      reset_mdec_out_reorder_state();
+    }
+  }
+
+  const u32 words_per_row_in_block = (depth == 2u) ? 6u : 4u;
+  const u32 words_per_block = words_per_row_in_block * 8u;
+  const u32 macroblock_row_words = words_per_row_in_block * 2u;
+
+  if (!mdec_out_reorder_active_) {
+    mdec_out_reorder_active_ = true;
+    mdec_out_mb_base_addr_ = addr;
+    mdec_out_block_id_ = block_id;
+    mdec_out_word_index_in_block_ = 0;
+  } else if (block_id != mdec_out_block_id_) {
+    mdec_out_block_id_ = block_id;
+    mdec_out_word_index_in_block_ = 0;
+    if (block_id == 0u) {
+      mdec_out_mb_base_addr_ = addr;
+    }
+  } else if (block_id == 0u && mdec_out_word_index_in_block_ == 0u) {
+    mdec_out_mb_base_addr_ = addr;
+  }
+
+  const u32 word_index = mdec_out_word_index_in_block_++;
+  if (mdec_out_word_index_in_block_ >= words_per_block) {
+    mdec_out_word_index_in_block_ = 0;
+  }
+
+  const u32 row = word_index / words_per_row_in_block;
+  const u32 col = word_index % words_per_row_in_block;
+  const u32 block_x_words = (block_id & 0x1u) ? words_per_row_in_block : 0u;
+  const u32 block_y_rows = (block_id >= 2u) ? 8u : 0u;
+  const u32 offset_words =
+      (block_y_rows + row) * macroblock_row_words + block_x_words + col;
+  mdec_out_last_linear_addr_ = addr;
+  mdec_out_last_step_ = step;
+  return (mdec_out_mb_base_addr_ + offset_words * 4u) & 0x001FFFFCu;
 }
 
 u32 DmaController::read(u32 offset) const {
@@ -191,12 +262,10 @@ void DmaController::dma_block(int channel) {
     }
   }
 
-  // Only truncate MDEC in if it is block mode.
-  if (from_ram && channel == 0 && ch.sync_mode() == DmaChannel::SyncMode::Block) {
-    transfer_words = std::min(transfer_words, sys_->mdec_dma_in_words_capacity());
-    if (transfer_words == 0) {
-      return;
-    }
+  if (!from_ram && channel == 1) {
+    sys_->debug_note_mdec_dma_out_begin(addr & 0x001FFFFCu, transfer_words,
+                                        sys_->mdec_dma_out_depth(),
+                                        sys_->mdec_dma_out_block());
   }
 
   if (channel == 6) {
@@ -228,57 +297,58 @@ void DmaController::dma_block(int channel) {
     return;
   }
 
-  if (from_ram && channel == 0 && transfer_words != 0u) {
-    std::vector<u32> words(transfer_words);
-    u32 current = ch.base_addr;
-    for (u32 i = 0; i < transfer_words; ++i) {
-      words[i] = sys_->read32(current & 0x001FFFFCu);
-      current = static_cast<u32>(static_cast<s32>(current) + step);
-    }
-    sys_->mdec_dma_write(words.data(), transfer_words);
-    addr = current;
-  } else if (!from_ram && channel == 1 && transfer_words != 0u) {
-    std::vector<u32> words(transfer_words);
-    sys_->mdec_dma_read(words.data(), transfer_words);
-    u32 current = ch.base_addr;
-    for (u32 i = 0; i < transfer_words; ++i) {
-      sys_->write32(current & 0x001FFFFCu, words[i]);
-      current = static_cast<u32>(static_cast<s32>(current) + step);
-    }
-    addr = current;
-  } else {
-    for (u32 i = 0; i < transfer_words; ++i) {
-      const u32 current_addr = addr & 0x001FFFFCu;
-      if (from_ram) {
-        const u32 data = sys_->read32(current_addr);
-        switch (channel) {
-        case 2:
-          sys_->gpu_gp0(data);
-          break;
-        case 4:
-          sys_->spu_dma_write(data);
-          break;
-        default:
-          break;
-        }
-      } else {
-        u32 data = 0;
-        switch (channel) {
-        case 2:
-          data = sys_->gpu_read();
-          break;
-        case 3:
-          data = sys_->cdrom_dma_read();
-          break;
-        case 4:
-          data = sys_->spu_dma_read();
-          break;
-        default:
-          break;
-        }
-        sys_->write32(current_addr, data);
+  for (u32 i = 0; i < transfer_words; i++) {
+    u32 current_addr = addr & 0x001FFFFC;
+
+    if (from_ram) {
+      sys_->debug_begin_dma_bus_access(static_cast<u8>(channel));
+      u32 data = sys_->read32(current_addr);
+      sys_->debug_end_dma_bus_access();
+      // Send to device
+      switch (channel) {
+      case 0: // MDEC in
+        sys_->mdec_dma_write(data);
+        break;
+      case 2: // GPU
+        sys_->gpu_gp0_dma(data, current_addr);
+        break;
+      case 4: // SPU
+        sys_->spu_dma_write(data);
+        break;
+      default:
+        LOG_WARN("DMA: Unhandled from-RAM channel %d", channel);
+        break;
       }
-      addr = static_cast<u32>(static_cast<s32>(addr) + step);
+    } else {
+      u32 data = 0;
+      u32 write_addr = current_addr;
+      // Read from device
+      switch (channel) {
+      case 1: { // MDEC out
+        const u32 macroblock_seq = sys_->mdec_dma_out_macroblock_seq();
+        write_addr = map_mdec_out_word_addr(current_addr, step,
+                                            sys_->mdec_dma_out_block(),
+                                            sys_->mdec_dma_out_depth());
+        data = sys_->mdec_dma_read();
+        sys_->debug_note_mdec_dma_out_word(write_addr, data, macroblock_seq);
+        break;
+      }
+      case 2: // GPU (GPUREAD)
+        data = sys_->gpu_read();
+        break;
+      case 3: // CDROM
+        data = sys_->cdrom_dma_read();
+        break;
+      case 4: // SPU
+        data = sys_->spu_dma_read();
+        break;
+      default:
+        LOG_WARN("DMA: Unhandled to-RAM channel %d", channel);
+        break;
+      }
+      sys_->debug_begin_dma_bus_access(static_cast<u8>(channel));
+      sys_->write32(write_addr, data);
+      sys_->debug_end_dma_bus_access();
     }
   }
 
@@ -303,11 +373,16 @@ void DmaController::dma_linked_list(int channel) {
   u32 addr = channels_[channel].base_addr & 0x001FFFFC;
   u32 safety = 0;
   while (safety < 0x100000) {
+    sys_->debug_begin_dma_bus_access(static_cast<u8>(channel));
     u32 header = sys_->read32(addr);
+    sys_->debug_end_dma_bus_access();
     u32 word_count = header >> 24;
     for (u32 i = 0; i < word_count; i++) {
       addr = (addr + 4) & 0x001FFFFC;
-      sys_->gpu_gp0(sys_->read32(addr));
+      sys_->debug_begin_dma_bus_access(static_cast<u8>(channel));
+      u32 command = sys_->read32(addr);
+      sys_->debug_end_dma_bus_access();
+      sys_->gpu_gp0_dma(command, addr);
     }
     if (header & 0x00800000) break;
     addr = header & 0x001FFFFC;

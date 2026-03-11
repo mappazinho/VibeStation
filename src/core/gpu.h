@@ -59,6 +59,63 @@ struct DisplaySampleInfo {
   u32 hash = 2166136261u;
 };
 
+struct DisplayDebugInfo {
+  int mode_width = 0;
+  int mode_height = 0;
+  int width = 0;
+  int height = 0;
+  int x_start = 0;
+  int y_start = 0;
+  int x1 = 0;
+  int x2 = 0;
+  int y1 = 0;
+  int y2 = 0;
+  int divisor = 1;
+  int display_vram_width = 0;
+  int display_vram_height = 0;
+  int display_vram_left = 0;
+  int display_vram_top = 0;
+  int display_skip_x = 0;
+  int src_width = 0;
+  int src_height = 0;
+  bool is_24bit = false;
+  bool interlaced = false;
+};
+
+struct GpuCommandDebugInfo {
+  static constexpr size_t kRecentRects = 8;
+  u32 gp1_display_area_count = 0;
+  u32 gp1_horizontal_range_count = 0;
+  u32 gp1_vertical_range_count = 0;
+  u32 gp1_display_mode_count = 0;
+  u32 gp1_display_area_raw = 0;
+  u32 gp1_horizontal_range_raw = 0;
+  u32 gp1_vertical_range_raw = 0;
+  u32 gp1_display_mode_raw = 0;
+  int gp1_display_area_x = 0;
+  int gp1_display_area_y = 0;
+  int gp1_horizontal_range_x1 = 0;
+  int gp1_horizontal_range_x2 = 0;
+  int gp1_vertical_range_y1 = 0;
+  int gp1_vertical_range_y2 = 0;
+  u32 gp0_textured_tri_count = 0;
+  u32 gp0_textured_quad_count = 0;
+  u32 gp0_textured_rect_count = 0;
+  std::array<s16, kRecentRects> rect_x{};
+  std::array<s16, kRecentRects> rect_y{};
+  std::array<u16, kRecentRects> rect_w{};
+  std::array<u16, kRecentRects> rect_h{};
+  std::array<u8, kRecentRects> rect_u{};
+  std::array<u8, kRecentRects> rect_v{};
+  std::array<u16, kRecentRects> rect_clut{};
+  std::array<u16, kRecentRects> rect_texpage{};
+  std::array<u8, kRecentRects> rect_raw{};
+  std::array<u8, kRecentRects> rect_r{};
+  std::array<u8, kRecentRects> rect_g{};
+  std::array<u8, kRecentRects> rect_b{};
+  std::array<u8, kRecentRects> rect_depth{};
+};
+
 class Gpu {
 public:
   void init(System *sys) { sys_ = sys; }
@@ -85,6 +142,8 @@ public:
                                        bool include_stats = true) const {
     return build_display_rgba(&rgba, include_stats);
   }
+  DisplayDebugInfo debug_display_info() const;
+  GpuCommandDebugInfo debug_command_info() const { return command_debug_; }
 
   // Frame tracking
   bool frame_complete() const { return frame_complete_; }
@@ -143,6 +202,7 @@ private:
   u32 gpuread_latch_ = 0;
 
   bool frame_complete_ = false;
+  GpuCommandDebugInfo command_debug_{};
 
   // ── GP0 Command Handlers ───────────────────────────────────────
   void gp0_nop();
