@@ -240,7 +240,8 @@ private:
   bool cd_audio_muted() const;
   void apply_host_audio_matrix(std::vector<s16> &samples) const;
   bool read_sector();
-  void maybe_decode_xa_audio(const std::vector<u8> &raw_sector);
+  void maybe_decode_xa_audio(const std::vector<u8> &raw_sector,
+                             const CdTrack *track);
   void fire_irq(u8 irq_num);
   void enqueue_irq(u8 irq_num, std::vector<u8> response,
                    bool wait_for_command_idle = true);

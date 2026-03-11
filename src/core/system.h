@@ -435,6 +435,8 @@ public:
   u32 mdec_dma_out_words_available() const {
     return mdec_.dma_out_words_available();
   }
+  const Mdec::DebugStats &mdec_debug_stats() const { return mdec_.debug_stats(); }
+  void reset_mdec_debug_stats() { mdec_.reset_debug_stats(); }
   void spu_dma_write(u32 val);
   u32 spu_dma_read();
   bool spu_dma_request() const { return spu_.dma_request(); }

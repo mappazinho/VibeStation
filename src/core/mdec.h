@@ -6,6 +6,24 @@
 
 class Mdec {
 public:
+  struct DebugStats {
+    u64 decode_commands = 0;
+    u64 set_quant_commands = 0;
+    u64 set_scale_commands = 0;
+    u64 blocks_decoded = 0;
+    u64 dc_only_blocks = 0;
+    u64 qscale_zero_blocks = 0;
+    u64 qscale_sum = 0;
+    u32 qscale_max = 0;
+    u64 nonzero_coeff_count = 0;
+    u64 eob_markers = 0;
+    u64 overflow_breaks = 0;
+    u32 quant_luma0 = 0;
+    u32 quant_chroma0 = 0;
+    u32 quant_luma_avg = 0;
+    u32 quant_chroma_avg = 0;
+  };
+
   void reset();
 
   void write_command(u32 value);
@@ -22,6 +40,8 @@ public:
   u32 dma_out_words_available() const {
     return static_cast<u32>(out_fifo_.size());
   }
+  const DebugStats &debug_stats() const { return debug_stats_; }
+  void reset_debug_stats() { debug_stats_ = {}; }
 
 private:
   static constexpr size_t kBlockSize = 64;
@@ -33,7 +53,7 @@ private:
   void execute_set_quant_table();
   void execute_set_scale_table();
   bool decode_block(Block &block, const std::array<u8, kBlockSize> &quant_table,
-                    size_t &cursor) const;
+                    size_t &cursor);
   void idct(const Block &coeffs, Block &pixels) const;
   void emit_colored_macroblock(const Block &cr, const Block &cb,
                                const Block &y1, const Block &y2,
@@ -69,4 +89,5 @@ private:
   u8 out_depth_latched_ = 2;
   std::deque<u32> out_fifo_{};
   std::deque<u8> out_block_fifo_{};
+  DebugStats debug_stats_{};
 };

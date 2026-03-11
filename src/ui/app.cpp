@@ -2187,6 +2187,88 @@ void App::panel_settings() {
                 }
 
                 ImGui::Separator();
+                ImGui::Text("MDEC Debug Isolation");
+                ImGui::Checkbox("Disable DMA1 Reorder (MDEC out)",
+                    &g_mdec_debug_disable_dma1_reorder);
+                ImGui::Checkbox("Disable Chroma (Cb/Cr=0)", &g_mdec_debug_disable_chroma);
+                ImGui::Checkbox("Disable Luma (Y=0)", &g_mdec_debug_disable_luma);
+                ImGui::Checkbox("Force Solid MDEC Output", &g_mdec_debug_force_solid_output);
+                ImGui::Checkbox("Swap MDEC Input Halfwords", &g_mdec_debug_swap_input_halfwords);
+
+                bool y1 = (g_mdec_debug_color_block_mask & 0x1u) != 0u;
+                bool y2 = (g_mdec_debug_color_block_mask & 0x2u) != 0u;
+                bool y3 = (g_mdec_debug_color_block_mask & 0x4u) != 0u;
+                bool y4 = (g_mdec_debug_color_block_mask & 0x8u) != 0u;
+                if (ImGui::Checkbox("Y1 (top-left 8x8)", &y1)) {
+                    g_mdec_debug_color_block_mask =
+                        static_cast<u8>((g_mdec_debug_color_block_mask & ~0x1u) | (y1 ? 0x1u : 0x0u));
+                }
+                if (ImGui::Checkbox("Y2 (top-right 8x8)", &y2)) {
+                    g_mdec_debug_color_block_mask =
+                        static_cast<u8>((g_mdec_debug_color_block_mask & ~0x2u) | (y2 ? 0x2u : 0x0u));
+                }
+                if (ImGui::Checkbox("Y3 (bottom-left 8x8)", &y3)) {
+                    g_mdec_debug_color_block_mask =
+                        static_cast<u8>((g_mdec_debug_color_block_mask & ~0x4u) | (y3 ? 0x4u : 0x0u));
+                }
+                if (ImGui::Checkbox("Y4 (bottom-right 8x8)", &y4)) {
+                    g_mdec_debug_color_block_mask =
+                        static_cast<u8>((g_mdec_debug_color_block_mask & ~0x8u) | (y4 ? 0x8u : 0x0u));
+                }
+                if (ImGui::Button("Reset MDEC Isolation")) {
+                    g_mdec_debug_disable_dma1_reorder = false;
+                    g_mdec_debug_disable_chroma = false;
+                    g_mdec_debug_disable_luma = false;
+                    g_mdec_debug_force_solid_output = false;
+                    g_mdec_debug_swap_input_halfwords = false;
+                    g_mdec_debug_color_block_mask = 0x0Fu;
+                }
+                ImGui::TextDisabled("Use these toggles to localize FMV artifacts by stage.");
+
+                if (system_) {
+                    const auto &mstats = system_->mdec_debug_stats();
+                    const double blocks = static_cast<double>(mstats.blocks_decoded);
+                    const double dc_only_pct =
+                        (blocks > 0.0)
+                            ? (100.0 * static_cast<double>(mstats.dc_only_blocks) / blocks)
+                            : 0.0;
+                    const double q0_pct =
+                        (blocks > 0.0)
+                            ? (100.0 * static_cast<double>(mstats.qscale_zero_blocks) / blocks)
+                            : 0.0;
+                    const double avg_q =
+                        (blocks > 0.0)
+                            ? (static_cast<double>(mstats.qscale_sum) / blocks)
+                            : 0.0;
+                    const double avg_nonzero_coeff =
+                        (blocks > 0.0)
+                            ? (static_cast<double>(mstats.nonzero_coeff_count) / blocks)
+                            : 0.0;
+
+                    ImGui::Text("MDEC Decode Stats");
+                    ImGui::Text("Cmd: decode=%llu quant=%llu scale=%llu",
+                        static_cast<unsigned long long>(mstats.decode_commands),
+                        static_cast<unsigned long long>(mstats.set_quant_commands),
+                        static_cast<unsigned long long>(mstats.set_scale_commands));
+                    ImGui::Text("Quant: L0=%u C0=%u Lavg=%u Cavg=%u",
+                        mstats.quant_luma0, mstats.quant_chroma0,
+                        mstats.quant_luma_avg, mstats.quant_chroma_avg);
+                    ImGui::Text("Blocks=%llu  DC-only=%llu (%.1f%%)",
+                        static_cast<unsigned long long>(mstats.blocks_decoded),
+                        static_cast<unsigned long long>(mstats.dc_only_blocks), dc_only_pct);
+                    ImGui::Text("q=0=%llu (%.1f%%)  q_avg=%.2f q_max=%u",
+                        static_cast<unsigned long long>(mstats.qscale_zero_blocks), q0_pct,
+                        avg_q, mstats.qscale_max);
+                    ImGui::Text("Nonzero coeff/block=%.2f  EOB=%llu  Overflow=%llu",
+                        avg_nonzero_coeff,
+                        static_cast<unsigned long long>(mstats.eob_markers),
+                        static_cast<unsigned long long>(mstats.overflow_breaks));
+                    if (ImGui::Button("Reset MDEC Decode Stats")) {
+                        system_->reset_mdec_debug_stats();
+                    }
+                }
+
+                ImGui::Separator();
                 ImGui::Text("Trace Sampling (burst/stride)");
                 auto sample_pair = [](const char* label, u32& burst, u32& stride) {
                     int b = static_cast<int>(burst);
@@ -4328,6 +4410,31 @@ void App::load_persistent_config() {
         else if (key == "gpu_fast_mode") {
             g_gpu_fast_mode = parse_bool(value, g_gpu_fast_mode);
         }
+        else if (key == "mdec_debug_disable_dma1_reorder") {
+            g_mdec_debug_disable_dma1_reorder =
+                parse_bool(value, g_mdec_debug_disable_dma1_reorder);
+        }
+        else if (key == "mdec_debug_disable_chroma") {
+            g_mdec_debug_disable_chroma =
+                parse_bool(value, g_mdec_debug_disable_chroma);
+        }
+        else if (key == "mdec_debug_disable_luma") {
+            g_mdec_debug_disable_luma =
+                parse_bool(value, g_mdec_debug_disable_luma);
+        }
+        else if (key == "mdec_debug_force_solid_output") {
+            g_mdec_debug_force_solid_output =
+                parse_bool(value, g_mdec_debug_force_solid_output);
+        }
+        else if (key == "mdec_debug_swap_input_halfwords") {
+            g_mdec_debug_swap_input_halfwords =
+                parse_bool(value, g_mdec_debug_swap_input_halfwords);
+        }
+        else if (key == "mdec_debug_color_block_mask") {
+            const unsigned long parsed = std::strtoul(value.c_str(), nullptr, 10);
+            g_mdec_debug_color_block_mask =
+                static_cast<u8>(std::max(0ul, std::min(15ul, parsed)));
+        }
         else if (key.rfind("bind_", 0) == 0) {
             const unsigned long parsed = std::strtoul(value.c_str(), nullptr, 10);
             const SDL_Scancode scancode = static_cast<SDL_Scancode>(parsed);
@@ -4431,6 +4538,16 @@ void App::save_persistent_config() const {
     out << "slowdown_speed_percent=" << config_slowdown_speed_percent_ << "\n";
     out << "spu_diagnostic_mode=" << (config_spu_diagnostic_mode_ ? 1 : 0) << "\n";
     out << "gpu_fast_mode=" << (g_gpu_fast_mode ? 1 : 0) << "\n";
+    out << "mdec_debug_disable_dma1_reorder="
+        << (g_mdec_debug_disable_dma1_reorder ? 1 : 0) << "\n";
+    out << "mdec_debug_disable_chroma=" << (g_mdec_debug_disable_chroma ? 1 : 0) << "\n";
+    out << "mdec_debug_disable_luma=" << (g_mdec_debug_disable_luma ? 1 : 0) << "\n";
+    out << "mdec_debug_force_solid_output="
+        << (g_mdec_debug_force_solid_output ? 1 : 0) << "\n";
+    out << "mdec_debug_swap_input_halfwords="
+        << (g_mdec_debug_swap_input_halfwords ? 1 : 0) << "\n";
+    out << "mdec_debug_color_block_mask="
+        << static_cast<unsigned>(g_mdec_debug_color_block_mask & 0x0Fu) << "\n";
     for (const auto& entry : kKeyboardBindEntries) {
         out << entry.config_key << "="
             << static_cast<int>(input_->key_for_button(entry.button)) << "\n";

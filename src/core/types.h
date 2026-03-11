@@ -108,6 +108,15 @@ inline bool g_spu_enable_audio_queue = true;
 inline bool g_spu_force_audio_queue = false;
 inline float g_spu_output_buffer_seconds = 5.0f;
 inline float g_spu_xa_buffer_seconds = 0.12f;
+// Runtime MDEC isolation toggles for FMV debugging.
+inline bool g_mdec_debug_disable_dma1_reorder = false;
+inline bool g_mdec_debug_disable_chroma = false;
+inline bool g_mdec_debug_disable_luma = false;
+inline bool g_mdec_debug_force_solid_output = false;
+inline bool g_mdec_debug_swap_input_halfwords = false;
+// Bitmask for colored 8x8 luma blocks inside a 16x16 macroblock:
+// bit0=Y1 (top-left), bit1=Y2 (top-right), bit2=Y3 (bottom-left), bit3=Y4 (bottom-right).
+inline u8 g_mdec_debug_color_block_mask = 0x0Fu;
 // Keep detailed timing opt-in; enabling it in debug builds can dominate frame
 // time due to high-frequency clock sampling in hot loops.
 inline bool g_profile_detailed_timing = false;

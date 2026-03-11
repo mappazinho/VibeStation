@@ -47,6 +47,10 @@ void DmaController::reset_mdec_out_reorder_state() {
 u32 DmaController::map_mdec_out_word_addr(u32 linear_addr, s32 step, u8 block_id,
                                           u8 depth) {
   const u32 addr = linear_addr & 0x001FFFFCu;
+  if (g_mdec_debug_disable_dma1_reorder) {
+    reset_mdec_out_reorder_state();
+    return addr;
+  }
   // DMA1 block re-ordering is needed for colored macroblocks in both:
   // depth=2 (24bpp, 8x8 block = 48 words) and depth=3 (15bpp, 32 words).
   if (step != 4 || block_id >= 4u || (depth != 2u && depth != 3u)) {
