@@ -51,8 +51,8 @@ u32 DmaController::map_mdec_out_word_addr(u32 linear_addr, s32 step, u8 block_id
     reset_mdec_out_reorder_state();
     return addr;
   }
-  // DMA1 block re-ordering is needed for colored macroblocks in both:
-  // depth=2 (24bpp, 8x8 block = 48 words) and depth=3 (15bpp, 32 words).
+  // Color MDEC output arrives as four 8x8 blocks per macroblock.
+  // DMA1 must reorder those blocks into a 16x16 raster in RAM.
   if (step != 4 || block_id >= 4u || (depth != 2u && depth != 3u)) {
     reset_mdec_out_reorder_state();
     return addr;
@@ -66,8 +66,6 @@ u32 DmaController::map_mdec_out_word_addr(u32 linear_addr, s32 step, u8 block_id
     const bool discontinuity =
         (step != mdec_out_last_step_) || (addr != expected);
     if (discontinuity) {
-      // DMA1 can be reprogrammed between MDEC bursts; stale reorder state
-      // causes macroblock data to be mapped onto old destinations.
       reset_mdec_out_reorder_state();
     }
   }
@@ -85,12 +83,9 @@ u32 DmaController::map_mdec_out_word_addr(u32 linear_addr, s32 step, u8 block_id
     mdec_out_block_id_ = block_id;
     mdec_out_word_index_in_block_ = 0;
     if (block_id == 0u) {
-      // Y1 marks the start of a new 16x16 macroblock in destination RAM.
       mdec_out_mb_base_addr_ = addr;
     }
   } else if (block_id == 0u && mdec_out_word_index_in_block_ == 0u) {
-    // Some streams can begin a fresh DMA burst right at a Y1 block boundary.
-    // Refresh macroblock base even if block id didn't toggle.
     mdec_out_mb_base_addr_ = addr;
   }
 
@@ -318,6 +313,12 @@ void DmaController::dma_block(int channel) {
     }
   }
 
+  if (!from_ram && channel == 1) {
+    sys_->debug_note_mdec_dma_out_begin(addr & 0x001FFFFCu, transfer_words,
+                                        sys_->mdec_dma_out_depth(),
+                                        sys_->mdec_dma_out_block());
+  }
+
   if (channel == 6) {
     // OTC (Ordering Table Clear): always writes to RAM, backwards.
     u32 current = addr;
@@ -352,14 +353,16 @@ void DmaController::dma_block(int channel) {
     u32 current_addr = addr & 0x001FFFFC;
 
     if (from_ram) {
+      sys_->debug_begin_dma_bus_access(static_cast<u8>(channel));
       u32 data = sys_->read32(current_addr);
+      sys_->debug_end_dma_bus_access();
       // Send to device
       switch (channel) {
       case 0: // MDEC in
         sys_->mdec_dma_write(data);
         break;
       case 2: // GPU
-        sys_->gpu_gp0(data);
+        sys_->gpu_gp0_dma(data, current_addr);
         break;
       case 4: // SPU
         sys_->spu_dma_write(data);
@@ -373,12 +376,15 @@ void DmaController::dma_block(int channel) {
       u32 write_addr = current_addr;
       // Read from device
       switch (channel) {
-      case 1: // MDEC out
+      case 1: { // MDEC out
+        const u32 macroblock_seq = sys_->mdec_dma_out_macroblock_seq();
         write_addr = map_mdec_out_word_addr(current_addr, step,
                                             sys_->mdec_dma_out_block(),
                                             sys_->mdec_dma_out_depth());
         data = sys_->mdec_dma_read();
+        sys_->debug_note_mdec_dma_out_word(write_addr, data, macroblock_seq);
         break;
+      }
       case 2: // GPU (GPUREAD)
         data = sys_->gpu_read();
         break;
@@ -392,7 +398,9 @@ void DmaController::dma_block(int channel) {
         LOG_WARN("DMA: Unhandled to-RAM channel %d", channel);
         break;
       }
+      sys_->debug_begin_dma_bus_access(static_cast<u8>(channel));
       sys_->write32(write_addr, data);
+      sys_->debug_end_dma_bus_access();
     }
 
     addr = static_cast<u32>(static_cast<s32>(addr) + step);
@@ -425,14 +433,18 @@ void DmaController::dma_linked_list(int channel) {
   u32 safety = 0;
 
   while (safety < 0x100000) {
+    sys_->debug_begin_dma_bus_access(static_cast<u8>(channel));
     u32 header = sys_->read32(addr);
+    sys_->debug_end_dma_bus_access();
     u32 word_count = header >> 24;
 
     // Send words to GP0
     for (u32 i = 0; i < word_count; i++) {
       addr = (addr + 4) & 0x001FFFFC;
+      sys_->debug_begin_dma_bus_access(static_cast<u8>(channel));
       u32 command = sys_->read32(addr);
-      sys_->gpu_gp0(command);
+      sys_->debug_end_dma_bus_access();
+      sys_->gpu_gp0_dma(command, addr);
     }
 
     // Follow link to next node

@@ -1258,31 +1258,11 @@ bool CdRom::read_sector() {
   // host data FIFO is formatted.
   //
   // Host payload width is selected by Setmode bits:
-  // - bit4=1            -> 0x918 bytes
-  // - bit4=0, bit5=1    -> 0x924 bytes (whole sector, starting at +12)
-  // - bit4=0, bit5=0    -> 0x800 bytes (user data)
+  // - bit5=1 -> raw sector payload (0x924 bytes after sync)
+  // - bit5=0 -> user data only (0x800 bytes)
   //
-  // 0x918 mode is commonly used with XA/MDEC video streams and starts at the
-  // user-data boundary for MODE2 sectors (+24 for 2352 dumps, +8 for 2336).
-  const bool size_918 = (mode_ & 0x10u) != 0;
-  if (size_918) {
-    size_t data_offset = 0u;
-    if (layout.mode2) {
-      data_offset = layout.user_data_offset;
-    } else if (raw.size() >= (16u + 0x918u)) {
-      // MODE1 fallback for unusual Setmode bit4 usage.
-      data_offset = 16u;
-    }
-    size_t data_size = 0x918u;
-    if (data_offset > raw.size()) {
-      data_offset = raw.size();
-    }
-    if (data_offset + data_size > raw.size()) {
-      data_size = raw.size() - data_offset;
-    }
-    payload.assign(raw.begin() + static_cast<ptrdiff_t>(data_offset),
-                   raw.begin() + static_cast<ptrdiff_t>(data_offset + data_size));
-  } else if (read_whole_sector_) {
+  // Setmode bit4 is the CD-ROM "ignore bit", not a host payload-size selector.
+  if (read_whole_sector_) {
     if (raw.size() >= (12u + 0x924u)) {
       payload.assign(raw.begin() + 12, raw.begin() + 12 + 0x924u);
     } else {
@@ -1505,8 +1485,8 @@ void CdRom::cmd_setmode() {
   }
 
   const u8 new_mode = param_fifo_[0];
-  // Setmode bit5 selects 0x924 ("whole") width when bit4=0.
-  // bit4 is handled in read_sector() for 0x918 mode.
+  // Setmode bit5 selects raw sector reads (0x924 bytes after sync).
+  // Bit4 is the CD-ROM "ignore bit" and does not change host FIFO width.
   read_whole_sector_ = (new_mode & 0x20u) != 0;
   mode_ = new_mode;
   // id_error_ = (mode_ & 0x10u) != 0;

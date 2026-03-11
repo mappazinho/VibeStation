@@ -122,6 +122,88 @@ public:
     double total_ms = 0.0;
   };
 
+  struct MdecUploadProbe {
+    static constexpr size_t kSampleWords = 8;
+    static constexpr size_t kUploadHistory = 8;
+    static constexpr size_t kMacroblockHistory = 32;
+
+    bool dma1_seen = false;
+    u32 dma1_base_addr = 0;
+    u32 dma1_words = 0;
+    u8 dma1_depth = 0;
+    u8 dma1_first_block = 0;
+    u32 dma1_sample_count = 0;
+    std::array<u32, kSampleWords> dma1_addrs{};
+    std::array<u32, kSampleWords> dma1_words_sample{};
+    u32 dma1_mb_sample_count = 0;
+    std::array<u32, kSampleWords> dma1_mb_seq{};
+    std::array<u32, kSampleWords> dma1_mb_addrs{};
+    std::array<u32, kSampleWords> dma1_mb_words_sample{};
+    u32 dma1_mb_hist_count = 0;
+    std::array<u32, kMacroblockHistory> dma1_mb_hist_seq{};
+    std::array<u32, kMacroblockHistory> dma1_mb_hist_addrs{};
+    std::array<u32, kMacroblockHistory> dma1_mb_hist_words_sample{};
+    u32 dma1_range_bytes = 0;
+
+    bool gpu_upload_seen = false;
+    bool gpu_upload_data_seen = false;
+    u32 gpu_upload_count = 0;
+    u16 gpu_x = 0;
+    u16 gpu_y = 0;
+    u16 gpu_w = 0;
+    u16 gpu_h = 0;
+    u32 gpu_total_words = 0;
+    u32 gpu_words_seen = 0;
+    u32 gpu_sample_count = 0;
+    std::array<u32, kSampleWords> gpu_words_sample{};
+    std::array<u32, kSampleWords> gpu_dma_src_addrs{};
+    std::array<u8, kSampleWords> gpu_word_from_dma{};
+    u32 gpu_dma_src_base = 0;
+    u32 gpu_dma_src_range_bytes = 0;
+    std::array<u16, kUploadHistory> gpu_hist_x{};
+    std::array<u16, kUploadHistory> gpu_hist_y{};
+    std::array<u16, kUploadHistory> gpu_hist_w{};
+    std::array<u16, kUploadHistory> gpu_hist_h{};
+    std::array<u8, kUploadHistory> gpu_hist_from_dma{};
+    u32 gpu_hist_count = 0;
+    u32 gpu_frame_upload_count = 0;
+    std::array<u16, kUploadHistory> gpu_frame_hist_x{};
+    std::array<u16, kUploadHistory> gpu_frame_hist_y{};
+    std::array<u16, kUploadHistory> gpu_frame_hist_w{};
+    std::array<u16, kUploadHistory> gpu_frame_hist_h{};
+    std::array<u8, kUploadHistory> gpu_frame_hist_from_dma{};
+    bool gpu_last_frame_valid = false;
+    u32 gpu_last_frame_upload_count = 0;
+    std::array<u16, kUploadHistory> gpu_last_frame_hist_x{};
+    std::array<u16, kUploadHistory> gpu_last_frame_hist_y{};
+    std::array<u16, kUploadHistory> gpu_last_frame_hist_w{};
+    std::array<u16, kUploadHistory> gpu_last_frame_hist_h{};
+    std::array<u8, kUploadHistory> gpu_last_frame_hist_from_dma{};
+
+    u32 mdec_read_sample_count = 0;
+    std::array<u32, kSampleWords> mdec_read_addrs{};
+    std::array<u32, kSampleWords> mdec_read_values{};
+    std::array<u32, kSampleWords> mdec_read_pcs{};
+    std::array<u8, kSampleWords> mdec_read_origin{};
+    std::array<u8, kSampleWords> mdec_read_sizes{};
+
+    u32 gpu_src_write_sample_count = 0;
+    std::array<u32, kSampleWords> gpu_src_write_addrs{};
+    std::array<u32, kSampleWords> gpu_src_write_values{};
+    std::array<u32, kSampleWords> gpu_src_write_pcs{};
+    std::array<u8, kSampleWords> gpu_src_write_origin{};
+    std::array<u8, kSampleWords> gpu_src_write_sizes{};
+
+    u32 gpu_copy_count = 0;
+    u32 gpu_copy_sample_count = 0;
+    std::array<u16, kSampleWords> gpu_copy_src_x{};
+    std::array<u16, kSampleWords> gpu_copy_src_y{};
+    std::array<u16, kSampleWords> gpu_copy_dst_x{};
+    std::array<u16, kSampleWords> gpu_copy_dst_y{};
+    std::array<u16, kSampleWords> gpu_copy_w{};
+    std::array<u16, kSampleWords> gpu_copy_h{};
+  };
+
   System() = default;
 
   // Initialization (called when user loads BIOS)
@@ -420,7 +502,8 @@ public:
 
   // Component access (for DMA)
   bool irq_pending() { return irq_.pending(); }
-  void gpu_gp0(u32 val) { gpu_.gp0(val); }
+  void gpu_gp0(u32 val);
+  void gpu_gp0_dma(u32 val, u32 src_addr);
   u32 gpu_read() { return gpu_.read_data(); }
   bool gpu_dma_request() const { return gpu_.dma_request(); }
   u32 cdrom_dma_read() { return cdrom_.dma_read(); }
@@ -430,6 +513,7 @@ public:
   u32 mdec_dma_read() { return mdec_.dma_read(); }
   u8 mdec_dma_out_block() const { return mdec_.dma_out_block(); }
   u8 mdec_dma_out_depth() const { return mdec_.dma_out_depth(); }
+  u32 mdec_dma_out_macroblock_seq() const { return mdec_.dma_out_macroblock_seq(); }
   bool mdec_dma_in_request() const { return mdec_.dma_in_request(); }
   bool mdec_dma_out_request() const { return mdec_.dma_out_request(); }
   u32 mdec_dma_out_words_available() const {
@@ -437,6 +521,29 @@ public:
   }
   const Mdec::DebugStats &mdec_debug_stats() const { return mdec_.debug_stats(); }
   void reset_mdec_debug_stats() { mdec_.reset_debug_stats(); }
+  const Mdec::DebugCompare &mdec_debug_compare() const {
+    return mdec_.debug_compare();
+  }
+  void reset_mdec_debug_compare() { mdec_.reset_debug_compare(); }
+  DisplayDebugInfo gpu_display_debug_info() const {
+    return gpu_.debug_display_info();
+  }
+  GpuCommandDebugInfo gpu_command_debug_info() const {
+    return gpu_.debug_command_info();
+  }
+  const MdecUploadProbe &mdec_upload_probe() const { return mdec_upload_probe_; }
+  void reset_mdec_upload_probe() { mdec_upload_probe_ = {}; }
+  void debug_begin_dma_bus_access(u8 channel);
+  void debug_end_dma_bus_access();
+  void debug_note_mdec_dma_out_begin(u32 base_addr, u32 words, u8 depth,
+                                     u8 first_block);
+  void debug_note_mdec_dma_out_word(u32 write_addr, u32 value,
+                                    u32 macroblock_seq);
+  void debug_note_gpu_image_load_begin(u16 x, u16 y, u16 w, u16 h);
+  void debug_note_gpu_vblank();
+  void debug_note_gpu_image_load_word(u32 value);
+  void debug_note_gpu_vram_copy(u16 src_x, u16 src_y, u16 dst_x, u16 dst_y,
+                                u16 w, u16 h);
   void spu_dma_write(u32 val);
   u32 spu_dma_read();
   bool spu_dma_request() const { return spu_.dma_request(); }
@@ -454,6 +561,19 @@ public:
   InterruptController &irq() { return irq_; }
 
 private:
+  struct RamAccessLogEntry {
+    u32 addr = 0;
+    u32 value = 0;
+    u32 pc = 0;
+    u8 size = 0;
+    u8 origin = 0;
+  };
+  static constexpr size_t kRamWriteHistorySize = 128u;
+
+  void debug_note_main_ram_read(u32 addr, u32 value, u8 size);
+  void debug_note_main_ram_write(u32 addr, u32 value, u8 size);
+  void populate_gpu_src_write_samples_from_history();
+
   // Hardware components
   Bios bios_;
   Ram ram_;
@@ -481,7 +601,20 @@ private:
   u32 mdec_command_shadow_ = 0;
   u32 mdec_command_shadow_mask_ = 0;
   u32 mdec_control_shadow_ = 0;
+  u32 gpu_gp0_shadow_ = 0;
+  u32 gpu_gp0_shadow_mask_ = 0;
+  u32 gpu_gp1_shadow_ = 0;
+  u32 gpu_gp1_shadow_mask_ = 0;
   u8 post_reg_ = 0;
+  MdecUploadProbe mdec_upload_probe_ = {};
+  bool gpu_gp0_source_valid_ = false;
+  bool gpu_gp0_source_from_dma_ = false;
+  u32 gpu_gp0_source_addr_ = 0;
+  bool bus_access_from_dma_ = false;
+  u8 bus_access_dma_channel_ = 0xFFu;
+  std::array<RamAccessLogEntry, kRamWriteHistorySize> ram_write_history_{};
+  u32 ram_write_history_pos_ = 0;
+  u32 ram_write_history_count_ = 0;
   BootDiagnostics boot_diag_ = {};
   ProfilingStats profiling_stats_ = {};
   bool saw_non_bios_exec_ = false;

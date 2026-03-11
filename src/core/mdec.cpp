@@ -3,16 +3,16 @@
 #include <array>
 
 namespace {
-// Run-length stream index -> 8x8 matrix index (PSX MDEC zagzig order).
-constexpr std::array<int, 64> kZagZig = {
-  0 ,1 ,8 ,16,9 ,2 ,3 ,10,
-  17,24,32,25,18,11,4 ,5 ,
-  12,19,26,33,40,48,41,34,
-  27,20,13,6 ,7 ,14,21,28,
-  35,42,49,56,57,50,43,36,
-  29,22,15,23,30,37,44,51,
-  58,59,52,45,38,31,39,46,
-  53,60,61,54,47,55,62,63,
+// Run-length stream index -> row-major 8x8 matrix index.
+constexpr std::array<int, 64> kZigZag = {
+  0 ,8 ,1 ,2 ,9 ,16,24,17,
+  10,3 ,4 ,11,18,25,32,40,
+  33,26,19,12,5 ,6 ,13,20,
+  27,34,41,48,56,49,42,35,
+  28,21,14,7 ,15,22,29,36,
+  43,50,57,58,51,44,37,30,
+  23,31,38,45,52,59,60,53,
+  46,39,47,54,61,62,55,63,
 };
 
 constexpr std::array<s16, 64> kDefaultScaleTable = {
@@ -52,7 +52,44 @@ constexpr std::array<s16, 64> kDefaultScaleTable = {
 
 } // namespace
 
-void Mdec::reset() {
+void Mdec::refresh_debug_quant_stats() {
+  u32 luma_sum = 0;
+  u32 chroma_sum = 0;
+  for (size_t i = 0; i < 64u; ++i) {
+    luma_sum += quant_luma_[i];
+    chroma_sum += quant_chroma_[i];
+  }
+  debug_stats_.quant_luma0 = quant_luma_[0];
+  debug_stats_.quant_chroma0 = quant_chroma_[0];
+  debug_stats_.quant_luma_avg = luma_sum / 64u;
+  debug_stats_.quant_chroma_avg = chroma_sum / 64u;
+}
+
+void Mdec::reset_debug_stats() {
+  debug_stats_.decode_commands = 0;
+  debug_stats_.set_quant_commands = 0;
+  debug_stats_.set_scale_commands = 0;
+  debug_stats_.blocks_decoded = 0;
+  debug_stats_.dc_only_blocks = 0;
+  debug_stats_.qscale_zero_blocks = 0;
+  debug_stats_.qscale_sum = 0;
+  debug_stats_.qscale_max = 0;
+  debug_stats_.nonzero_coeff_count = 0;
+  debug_stats_.eob_markers = 0;
+  debug_stats_.overflow_breaks = 0;
+  debug_stats_.command_history_count = 0;
+  debug_stats_.command_history_words.fill(0);
+  debug_stats_.command_history_ids.fill(0);
+  debug_stats_.write_history_count = 0;
+  debug_stats_.write_history_words.fill(0);
+  debug_stats_.write_history_expect_command.fill(0);
+  debug_stats_.write_history_active_command.fill(0);
+  debug_stats_.control_history_count = 0;
+  debug_stats_.control_history_words.fill(0);
+  refresh_debug_quant_stats();
+}
+
+void Mdec::soft_reset_state() {
   control_ = 0;
   command_busy_ = false;
   expect_command_word_ = true;
@@ -61,14 +98,6 @@ void Mdec::reset() {
   in_words_remaining_ = 0;
   in_unlimited_ = false;
   in_halfword_fifo_.clear();
-  quant_luma_.fill(1);
-  quant_chroma_.fill(1);
-  // Scale table is consumed transposed by the IDCT path.
-  for (size_t y = 0; y < 8u; ++y) {
-    for (size_t x = 0; x < 8u; ++x) {
-      scale_table_[y * 8u + x] = kDefaultScaleTable[x * 8u + y];
-    }
-  }
   status_command_bits_ = 0;
   current_block_ = 4;
   output_depth_ = 2;
@@ -77,15 +106,36 @@ void Mdec::reset() {
   output_pack_word_ = 0;
   output_pack_bytes_ = 0;
   output_word_block_id_ = 4;
+  output_macroblock_seq_ = 0;
+  current_output_macroblock_seq_ = 0;
   out_depth_latched_ = 2;
   out_fifo_.clear();
   out_block_fifo_.clear();
+  out_macroblock_fifo_.clear();
+}
+
+void Mdec::reset() {
+  soft_reset_state();
+  quant_luma_.fill(1);
+  quant_chroma_.fill(1);
+  // Scale table is consumed transposed by the IDCT path.
+  for (size_t y = 0; y < 8u; ++y) {
+    for (size_t x = 0; x < 8u; ++x) {
+      scale_table_[y * 8u + x] = kDefaultScaleTable[x * 8u + y];
+    }
+  }
   debug_stats_ = {};
+  refresh_debug_quant_stats();
 }
 
 void Mdec::begin_command(u32 value) {
   command_word_ = value;
   command_id_ = static_cast<u8>((value >> 29) & 0x7u);
+  const u32 hist_index =
+      debug_stats_.command_history_count % static_cast<u32>(DebugStats::kCommandHistory);
+  debug_stats_.command_history_words[hist_index] = value;
+  debug_stats_.command_history_ids[hist_index] = command_id_;
+  ++debug_stats_.command_history_count;
   status_command_bits_ = static_cast<u8>((value >> 25) & 0x0Fu);
   output_depth_ = static_cast<u8>((value >> 27) & 0x3u);
   output_signed_ = (value & (1u << 26)) != 0;
@@ -94,6 +144,7 @@ void Mdec::begin_command(u32 value) {
   // A fresh command resets pending output words from the previous command.
   out_fifo_.clear();
   out_block_fifo_.clear();
+  out_macroblock_fifo_.clear();
   output_pack_word_ = 0;
   output_pack_bytes_ = 0;
 
@@ -144,6 +195,14 @@ void Mdec::begin_command(u32 value) {
 }
 
 void Mdec::write_command(u32 value) {
+  const u32 write_hist_index =
+      debug_stats_.write_history_count % static_cast<u32>(DebugStats::kWriteHistory);
+  debug_stats_.write_history_words[write_hist_index] = value;
+  debug_stats_.write_history_expect_command[write_hist_index] =
+      expect_command_word_ ? 1u : 0u;
+  debug_stats_.write_history_active_command[write_hist_index] = command_id_;
+  ++debug_stats_.write_history_count;
+
   if (expect_command_word_) {
     begin_command(value);
     return;
@@ -177,8 +236,14 @@ void Mdec::write_command(u32 value) {
 }
 
 void Mdec::write_control(u32 value) {
+  const u32 control_hist_index =
+      debug_stats_.control_history_count % static_cast<u32>(DebugStats::kCommandHistory);
+  debug_stats_.control_history_words[control_hist_index] = value;
+  ++debug_stats_.control_history_count;
   if (value & 0x80000000u) {
-    reset();
+    soft_reset_state();
+    // Reset is edge-triggered, but the same write still carries the DMA enable bits.
+    control_ = value & 0x7FFFFFFFu;
     return;
   }
   control_ = value;
@@ -193,7 +258,17 @@ u32 Mdec::read_data() {
   if (!out_block_fifo_.empty()) {
     out_block_fifo_.pop_front();
   }
+  if (!out_macroblock_fifo_.empty()) {
+    out_macroblock_fifo_.pop_front();
+  }
   return value;
+}
+
+u32 Mdec::dma_out_macroblock_seq() const {
+  if (!out_macroblock_fifo_.empty()) {
+    return out_macroblock_fifo_.front();
+  }
+  return current_output_macroblock_seq_;
 }
 
 u8 Mdec::dma_out_block() const {
@@ -305,16 +380,7 @@ void Mdec::execute_set_quant_table() {
     }
   }
 
-  u32 luma_sum = 0;
-  u32 chroma_sum = 0;
-  for (size_t i = 0; i < 64u; ++i) {
-    luma_sum += quant_luma_[i];
-    chroma_sum += quant_chroma_[i];
-  }
-  debug_stats_.quant_luma0 = quant_luma_[0];
-  debug_stats_.quant_chroma0 = quant_chroma_[0];
-  debug_stats_.quant_luma_avg = luma_sum / 64u;
-  debug_stats_.quant_chroma_avg = chroma_sum / 64u;
+  refresh_debug_quant_stats();
 }
 
 void Mdec::execute_set_scale_table() {
@@ -370,6 +436,13 @@ void Mdec::execute_decode() {
         break;
       }
 
+      std::vector<u16> compare_input;
+      compare_input.reserve(cursor);
+      for (size_t i = 0; i < cursor; ++i) {
+        compare_input.push_back(in_halfword_fifo_[i]);
+      }
+      compare_colored_macroblock(compare_input);
+
       emit_colored_macroblock(cr, cb, y1, y2, y3, y4);
       while (cursor-- > 0) {
         in_halfword_fifo_.pop_front();
@@ -398,11 +471,20 @@ void Mdec::execute_decode() {
 
 bool Mdec::decode_block(Block &block, const std::array<u8, kBlockSize> &quant_table,
                         size_t &cursor) {
-  if (cursor >= in_halfword_fifo_.size()) {
-    return false;
+  block.fill(0);
+
+  u16 first = 0;
+  for (;;) {
+    if (cursor >= in_halfword_fifo_.size()) {
+      return false;
+    }
+    first = in_halfword_fifo_[cursor++];
+    if (first != 0xFE00u) {
+      break;
+    }
+    ++debug_stats_.eob_markers;
   }
 
-  const u16 first = in_halfword_fifo_[cursor++];
   const int q_scale = static_cast<int>((first >> 10) & 0x3Fu);
   int k = 0;
   bool has_nonzero_ac = false;
@@ -410,21 +492,24 @@ bool Mdec::decode_block(Block &block, const std::array<u8, kBlockSize> &quant_ta
 
   auto dequantize = [&](u16 word, int index, bool is_first) {
     const int level = sign_extend_10(word);
-    int val = 0;
-    if (q_scale == 0) {
-      val = level * 2;
-    } else if (is_first) {
-      val = level * static_cast<int>(quant_table[0]);
-    } else {
-      val = (level * static_cast<int>(quant_table[index]) * q_scale + 4) / 8;
+    const int bias = level ? ((level < 0) ? 8 : -8) : 0;
+    if (is_first) {
+      const int coeff =
+          (q_scale == 0) ? (level << 5)
+                         : ((level * static_cast<int>(quant_table[0]) << 4) + bias);
+      return std::clamp(coeff, -0x4000, 0x3FFF);
     }
-    return clamp_s11(val);
+
+    const int scale = q_scale * static_cast<int>(quant_table[index]);
+    const int coeff =
+        (scale == 0) ? (level << 5)
+                     : ((((level * scale) >> 3) << 4) + bias);
+    return std::clamp(coeff, -0x4000, 0x3FFF);
   };
 
-  block.fill(0);
   // q_scale==0 uses linear coefficient placement (no zigzag remap).
   const int dc = dequantize(first, 0, true);
-  block[(q_scale == 0) ? 0 : kZagZig[0]] = dc;
+  block[(q_scale == 0) ? 0 : kZigZag[0]] = dc;
   if (dc != 0) {
     ++nonzero_coeffs;
   }
@@ -435,22 +520,18 @@ bool Mdec::decode_block(Block &block, const std::array<u8, kBlockSize> &quant_ta
     }
     const u16 word = in_halfword_fifo_[cursor++];
 
-    if (word == 0xFE00u) {
-      ++debug_stats_.eob_markers;
-      break; // EOB
-    }
-
     k += static_cast<int>((word >> 10) & 0x3Fu) + 1;
-    if (k > 63) {
-      ++debug_stats_.overflow_breaks;
-      break; // Stream error
+    if (k < 64) {
+      const int coeff = dequantize(word, k, false);
+      block[(q_scale == 0) ? k : kZigZag[k]] = coeff;
+      if (coeff != 0) {
+        has_nonzero_ac = true;
+        ++nonzero_coeffs;
+      }
     }
 
-    const int coeff = dequantize(word, k, false);
-    block[(q_scale == 0) ? k : kZagZig[k]] = coeff;
-    if (coeff != 0) {
-      has_nonzero_ac = true;
-      ++nonzero_coeffs;
+    if (k >= 63) {
+      break;
     }
   }
 
@@ -480,23 +561,359 @@ bool Mdec::decode_block(Block &block, const std::array<u8, kBlockSize> &quant_ta
 }
 
 void Mdec::idct(const Block &coeffs, Block &pixels) const {
-  // PSX fixed-point IDCT with this scale-table representation uses >>16
-  // on both passes.
-  auto idct_pass = [&](const Block &src, Block &dst, int shift) {
-    for (int x = 0; x < 8; ++x) {
-      for (int y = 0; y < 8; ++y) {
-        s64 sum = 0;
-        for (int z = 0; z < 8; ++z) {
-          sum += (s64)src[y + z * 8] * scale_table_[x + z * 8];
-        }
-        dst[x + y * 8] = static_cast<int>((sum + (1LL << (shift - 1))) >> shift);
-      }
+  auto idct_row = [&](const int *row, const s16 *matrix_row) {
+    s64 sum = 0;
+    for (u32 i = 0; i < 8u; ++i) {
+      sum += static_cast<s64>(row[i]) * static_cast<s32>(matrix_row[i]);
     }
+    return static_cast<int>((sum + 0x20000LL) >> 18);
   };
 
-  Block temp{};
-  idct_pass(coeffs, temp, 16);
-  idct_pass(temp, pixels, 16);
+  std::array<int, 64> temp{};
+  for (u32 x = 0; x < 8u; ++x) {
+    for (u32 y = 0; y < 8u; ++y) {
+      int row[8]{};
+      for (u32 i = 0; i < 8u; ++i) {
+        row[i] = coeffs[x * 8u + i];
+      }
+      temp[y * 8u + x] = idct_row(row, &scale_table_[y * 8u]);
+    }
+  }
+
+  for (u32 x = 0; x < 8u; ++x) {
+    for (u32 y = 0; y < 8u; ++y) {
+      const int sum = idct_row(&temp[x * 8u], &scale_table_[y * 8u]);
+      int signed9 = sum & 0x1FF;
+      if ((signed9 & 0x100) != 0) {
+        signed9 -= 0x200;
+      }
+      pixels[x * 8u + y] = std::clamp(signed9, -128, 127);
+    }
+  }
+}
+
+void Mdec::compare_colored_macroblock(const std::vector<u16> &input) {
+  const u64 compare_count = debug_compare_.macroblocks_compared + 1u;
+
+  DebugCompare probe{};
+  probe.captured = true;
+  probe.color_macroblock = true;
+  probe.macroblocks_compared = compare_count;
+  probe.input_halfword_count = static_cast<u32>(input.size());
+  const size_t input_sample_count =
+      std::min(input.size(), DebugCompare::kInputSampleHalfwords);
+  for (size_t i = 0; i < input_sample_count; ++i) {
+    probe.input_halfwords[i] = input[i];
+  }
+
+  MacroblockBlocks current_coeffs{};
+  MacroblockBlocks current_pixels{};
+  MacroblockBlocks reference_coeffs{};
+  MacroblockBlocks reference_pixels{};
+  std::array<u8, DebugCompare::kBlocksPerMacroblock> current_qscales{};
+  std::array<u8, DebugCompare::kBlocksPerMacroblock> reference_qscales{};
+
+  if (!decode_colored_macroblock_variant(input, DecodeVariant::Current,
+                                         current_coeffs, current_pixels,
+                                         current_qscales) ||
+      !decode_colored_macroblock_variant(input, DecodeVariant::Reference,
+                                         reference_coeffs, reference_pixels,
+                                         reference_qscales)) {
+    debug_compare_ = probe;
+    return;
+  }
+
+  probe.qscales = current_qscales;
+
+  for (size_t block = 0; block < DebugCompare::kBlocksPerMacroblock; ++block) {
+    for (size_t i = 0; i < kBlockSize; ++i) {
+      if (current_coeffs[block][i] != reference_coeffs[block][i]) {
+        probe.stage = DebugCompare::Stage::Coeff;
+        probe.mismatch_block = static_cast<u8>(block);
+        probe.mismatch_index = static_cast<u8>(i);
+        probe.current_value = current_coeffs[block][i];
+        probe.reference_value = reference_coeffs[block][i];
+        debug_compare_ = probe;
+        return;
+      }
+    }
+  }
+
+  for (size_t block = 0; block < DebugCompare::kBlocksPerMacroblock; ++block) {
+    for (size_t i = 0; i < kBlockSize; ++i) {
+      if (current_pixels[block][i] != reference_pixels[block][i]) {
+        probe.stage = DebugCompare::Stage::Idct;
+        probe.mismatch_block = static_cast<u8>(block);
+        probe.mismatch_index = static_cast<u8>(i);
+        probe.current_value = current_pixels[block][i];
+        probe.reference_value = reference_pixels[block][i];
+        debug_compare_ = probe;
+        return;
+      }
+    }
+  }
+
+  MacroblockRgb current_rgb{};
+  MacroblockRgb reference_rgb{};
+  build_macroblock_rgb(current_pixels, current_rgb);
+  build_macroblock_rgb(reference_pixels, reference_rgb);
+
+  std::vector<u32> current_words;
+  std::vector<u32> reference_words;
+  pack_macroblock_words(current_rgb, DecodeVariant::Current, current_words);
+  pack_macroblock_words(reference_rgb, DecodeVariant::Reference,
+                        reference_words);
+
+  const size_t word_count = std::min(current_words.size(), reference_words.size());
+  for (size_t i = 0; i < word_count; ++i) {
+    if (current_words[i] != reference_words[i]) {
+      probe.stage = DebugCompare::Stage::Rgb;
+      probe.mismatch_block = static_cast<u8>(i / 48u);
+      probe.mismatch_index = static_cast<u8>(i & 0xFFu);
+      probe.current_value = static_cast<s32>(current_words[i]);
+      probe.reference_value = static_cast<s32>(reference_words[i]);
+      debug_compare_ = probe;
+      return;
+    }
+  }
+
+  if (current_words.size() != reference_words.size()) {
+    probe.stage = DebugCompare::Stage::Rgb;
+    probe.mismatch_block = 0xFEu;
+    probe.mismatch_index = 0u;
+    probe.current_value = static_cast<s32>(current_words.size());
+    probe.reference_value = static_cast<s32>(reference_words.size());
+    debug_compare_ = probe;
+    return;
+  }
+
+  probe.stage = DebugCompare::Stage::Match;
+  debug_compare_ = probe;
+}
+
+bool Mdec::decode_colored_macroblock_variant(
+    const std::vector<u16> &input, DecodeVariant variant,
+    MacroblockBlocks &coeff_blocks, MacroblockBlocks &pixel_blocks,
+    std::array<u8, DebugCompare::kBlocksPerMacroblock> &qscales) const {
+  size_t cursor = 0;
+  if (!decode_block_variant(input, cursor, quant_chroma_, variant,
+                            coeff_blocks[0], pixel_blocks[0], qscales[0])) {
+    return false;
+  }
+  if (!decode_block_variant(input, cursor, quant_chroma_, variant,
+                            coeff_blocks[1], pixel_blocks[1], qscales[1])) {
+    return false;
+  }
+  if (!decode_block_variant(input, cursor, quant_luma_, variant,
+                            coeff_blocks[2], pixel_blocks[2], qscales[2])) {
+    return false;
+  }
+  if (!decode_block_variant(input, cursor, quant_luma_, variant,
+                            coeff_blocks[3], pixel_blocks[3], qscales[3])) {
+    return false;
+  }
+  if (!decode_block_variant(input, cursor, quant_luma_, variant,
+                            coeff_blocks[4], pixel_blocks[4], qscales[4])) {
+    return false;
+  }
+  if (!decode_block_variant(input, cursor, quant_luma_, variant,
+                            coeff_blocks[5], pixel_blocks[5], qscales[5])) {
+    return false;
+  }
+  return true;
+}
+
+bool Mdec::decode_block_variant(const std::vector<u16> &input, size_t &cursor,
+                                const std::array<u8, kBlockSize> &quant_table,
+                                DecodeVariant variant, Block &coeffs,
+                                Block &pixels, u8 &q_scale) const {
+  coeffs.fill(0);
+  pixels.fill(0);
+
+  u16 first = 0;
+  for (;;) {
+    if (cursor >= input.size()) {
+      return false;
+    }
+    first = input[cursor++];
+    if (first != 0xFE00u) {
+      break;
+    }
+  }
+
+  const int q_scale_value =
+      (variant == DecodeVariant::Reference)
+          ? static_cast<int>(first >> 10)
+          : static_cast<int>((first >> 10) & 0x3Fu);
+  q_scale = static_cast<u8>(q_scale_value & 0x3Fu);
+  int k = 0;
+
+  auto dequantize = [&](u16 word, int index, bool is_first) {
+    const int level = sign_extend_10(word);
+    const int bias = level ? ((level < 0) ? 8 : -8) : 0;
+    if (is_first) {
+      const int coeff =
+          (q_scale_value == 0)
+              ? (level << 5)
+              : ((level * static_cast<int>(quant_table[0]) << 4) + bias);
+      return std::clamp(coeff, -0x4000, 0x3FFF);
+    }
+
+    const int scale = q_scale_value * static_cast<int>(quant_table[index]);
+    const int coeff =
+        (scale == 0) ? (level << 5)
+                     : ((((level * scale) >> 3) << 4) + bias);
+    return std::clamp(coeff, -0x4000, 0x3FFF);
+  };
+
+  coeffs[(q_scale_value == 0) ? 0 : kZigZag[0]] = dequantize(first, 0, true);
+
+  while (true) {
+    if (cursor >= input.size()) {
+      return false;
+    }
+    const u16 word = input[cursor++];
+    k += static_cast<int>((word >> 10) & 0x3Fu) + 1;
+    if (k < 64) {
+      coeffs[(q_scale_value == 0) ? k : kZigZag[k]] =
+          dequantize(word, k, false);
+    }
+    if (k >= 63) {
+      break;
+    }
+  }
+
+  idct_variant(coeffs, pixels, variant);
+  return true;
+}
+
+void Mdec::idct_variant(const Block &coeffs, Block &pixels,
+                        DecodeVariant variant) const {
+  if (variant == DecodeVariant::Current) {
+    idct(coeffs, pixels);
+    return;
+  }
+
+  auto idct_row = [&](const int *row, const s16 *matrix_row) {
+    s64 sum = 0;
+    for (u32 i = 0; i < 8u; ++i) {
+      sum += static_cast<s64>(row[i]) * static_cast<s32>(matrix_row[i]);
+    }
+    return static_cast<int>((sum + 0x20000LL) >> 18);
+  };
+
+  std::array<int, 64> temp{};
+  for (u32 x = 0; x < 8u; ++x) {
+    for (u32 y = 0; y < 8u; ++y) {
+      int row[8]{};
+      for (u32 i = 0; i < 8u; ++i) {
+        row[i] = coeffs[x * 8u + i];
+      }
+      temp[y * 8u + x] = idct_row(row, &scale_table_[y * 8u]);
+    }
+  }
+
+  for (u32 x = 0; x < 8u; ++x) {
+    for (u32 y = 0; y < 8u; ++y) {
+      const int sum = idct_row(&temp[x * 8u], &scale_table_[y * 8u]);
+      int signed9 = sum & 0x1FF;
+      if ((signed9 & 0x100) != 0) {
+        signed9 -= 0x200;
+      }
+      pixels[x * 8u + y] = std::clamp(signed9, -128, 127);
+    }
+  }
+}
+
+void Mdec::build_macroblock_rgb(const MacroblockBlocks &pixel_blocks,
+                                MacroblockRgb &rgb_out) const {
+  auto sign_extend_9 = [](int value) {
+    int signed9 = value & 0x1FF;
+    if ((signed9 & 0x100) != 0) {
+      signed9 -= 0x200;
+    }
+    return signed9;
+  };
+
+  const Block &cr = pixel_blocks[0];
+  const Block &cb = pixel_blocks[1];
+  const std::array<const Block *, 4> y_blocks = {
+      &pixel_blocks[2], &pixel_blocks[3], &pixel_blocks[4], &pixel_blocks[5]};
+
+  rgb_out.fill(0);
+  for (int block = 0; block < 4; ++block) {
+    const int bx = (block & 1) * 8;
+    const int by = (block & 2) * 4;
+    const Block &y_block = *y_blocks[static_cast<size_t>(block)];
+    for (int y = 0; y < 8; ++y) {
+      for (int x = 0; x < 8; ++x) {
+        const int yy = y_block[y * 8 + x];
+        const int cx = (bx + x) >> 1;
+        const int cy = (by + y) >> 1;
+        const int crv = cr[cy * 8 + cx];
+        const int cbv = cb[cy * 8 + cx];
+
+        const int r =
+            std::clamp(sign_extend_9(yy + (((359 * crv) + 0x80) >> 8)),
+                       -128, 127);
+        const int g = std::clamp(
+            sign_extend_9(yy + ((((-88 * cbv) & ~0x1F) +
+                                  ((-183 * crv) & ~0x07) + 0x80) >> 8)),
+            -128, 127);
+        const int b =
+            std::clamp(sign_extend_9(yy + (((454 * cbv) + 0x80) >> 8)),
+                       -128, 127);
+
+        rgb_out[static_cast<size_t>((by + y) * 16 + (bx + x))] =
+            static_cast<u32>(encode_component(r)) |
+            (static_cast<u32>(encode_component(g)) << 8) |
+            (static_cast<u32>(encode_component(b)) << 16);
+      }
+    }
+  }
+}
+
+void Mdec::pack_macroblock_words(const MacroblockRgb &rgb, DecodeVariant variant,
+                                 std::vector<u32> &words_out) const {
+  words_out.clear();
+  (void)variant;
+
+  if (out_depth_latched_ == 3u) {
+    const auto to15 = [&](u32 color) {
+      const auto to5 = [](u32 component) {
+        return std::min<u32>(((component + 4u) >> 3), 0x1Fu);
+      };
+      return static_cast<u16>(
+          to5(color & 0xFFu) | (to5((color >> 8) & 0xFFu) << 5) |
+          (to5((color >> 16) & 0xFFu) << 10) |
+          (output_set_bit15_ ? 0x8000u : 0u));
+    };
+
+    for (size_t i = 0; i + 1u < rgb.size(); i += 2u) {
+      const u16 p0 = to15(rgb[i]);
+      const u16 p1 = to15(rgb[i + 1u]);
+      words_out.push_back(static_cast<u32>(p0) |
+                          (static_cast<u32>(p1) << 16));
+    }
+    return;
+  }
+
+  u32 word = 0;
+  u32 byte_index = 0;
+  for (u32 color : rgb) {
+    for (u32 shift = 0; shift < 24u; shift += 8u) {
+      word |= ((color >> shift) & 0xFFu) << (byte_index * 8u);
+      ++byte_index;
+      if (byte_index == 4u) {
+        words_out.push_back(word);
+        word = 0;
+        byte_index = 0;
+      }
+    }
+  }
+  if (byte_index != 0u) {
+    words_out.push_back(word);
+  }
 }
 
 u8 Mdec::encode_component(int value) const {
@@ -520,45 +937,86 @@ u16 Mdec::encode_rgb15(int r, int g, int b) const {
 void Mdec::emit_colored_macroblock(const Block &cr, const Block &cb,
                                    const Block &y1, const Block &y2,
                                    const Block &y3, const Block &y4) {
-    for (int block = 0; block < 4; ++block) {
-        const int bx = (block & 1) * 8;
-        const int by = (block & 2) * 4;
-        output_word_block_id_ = static_cast<u8>(block);
-        const Block &y_block = (block == 0) ? y1 : (block == 1) ? y2 : (block == 2) ? y3 : y4;
-        const bool block_enabled =
-            ((g_mdec_debug_color_block_mask >> static_cast<u32>(block)) & 0x1u) != 0u;
-
-        for (int y = 0; y < 8; ++y) {
-            for (int x = 0; x < 8; ++x) {
-                const int yy = (!block_enabled || g_mdec_debug_disable_luma) ? 0 : y_block[y * 8 + x];
-                const int cx = (bx + x) >> 1;
-                const int cy = (by + y) >> 1;
-                const int crv =
-                    (!block_enabled || g_mdec_debug_disable_chroma) ? 0 : cr[cy * 8 + cx];
-                const int cbv =
-                    (!block_enabled || g_mdec_debug_disable_chroma) ? 0 : cb[cy * 8 + cx];
-
-                // CCIR 601 integer math (fixed point 12-bit):
-                const int r = yy + ((crv * 5743 + 2048) >> 12);
-                const int g = yy - ((cbv * 1410 + crv * 2925 + 2048) >> 12);
-                const int b = yy + ((cbv * 7258 + 2048) >> 12);
-
-                if (out_depth_latched_ == 3) {
-                    const u16 rgb15 = encode_rgb15(r, g, b);
-                    push_output_byte(static_cast<u8>(rgb15 & 0xFFu));
-                    push_output_byte(static_cast<u8>(rgb15 >> 8));
-                } else {
-                    push_output_byte(encode_component(r));
-                    push_output_byte(encode_component(g));
-                    push_output_byte(encode_component(b));
-                }
-            }
-        }
+  auto sign_extend_9 = [](int value) {
+    int signed9 = value & 0x1FF;
+    if ((signed9 & 0x100) != 0) {
+      signed9 -= 0x200;
     }
+    return signed9;
+  };
+
+  std::array<u32, 256> macroblock_rgb{};
+  const std::array<const Block *, 4> y_blocks = {&y1, &y2, &y3, &y4};
+  output_word_block_id_ = 4;
+  current_output_macroblock_seq_ = output_macroblock_seq_++;
+
+  for (int block = 0; block < 4; ++block) {
+    const int bx = (block & 1) * 8;
+    const int by = (block & 2) * 4;
+    const Block &y_block = *y_blocks[static_cast<size_t>(block)];
+    const bool block_enabled =
+        ((g_mdec_debug_color_block_mask >> static_cast<u32>(block)) & 0x1u) != 0u;
+
+    for (int y = 0; y < 8; ++y) {
+      for (int x = 0; x < 8; ++x) {
+        const int yy =
+            (!block_enabled || g_mdec_debug_disable_luma) ? 0 : y_block[y * 8 + x];
+        const int cx = (bx + x) >> 1;
+        const int cy = (by + y) >> 1;
+        const int crv =
+            (!block_enabled || g_mdec_debug_disable_chroma) ? 0 : cr[cy * 8 + cx];
+        const int cbv =
+            (!block_enabled || g_mdec_debug_disable_chroma) ? 0 : cb[cy * 8 + cx];
+
+        const int r =
+            std::clamp(sign_extend_9(yy + (((359 * crv) + 0x80) >> 8)),
+                       -128, 127);
+        const int g = std::clamp(
+            sign_extend_9(yy + ((((-88 * cbv) & ~0x1F) +
+                                  ((-183 * crv) & ~0x07) + 0x80) >> 8)),
+            -128, 127);
+        const int b =
+            std::clamp(sign_extend_9(yy + (((454 * cbv) + 0x80) >> 8)),
+                       -128, 127);
+
+        macroblock_rgb[static_cast<size_t>((by + y) * 16 + (bx + x))] =
+            static_cast<u32>(encode_component(r)) |
+            (static_cast<u32>(encode_component(g)) << 8) |
+            (static_cast<u32>(encode_component(b)) << 16);
+      }
+    }
+  }
+
+  if (out_depth_latched_ == 3) {
+    const auto to5 = [](u32 component) {
+      return std::min<u32>(((component + 4u) >> 3), 0x1Fu);
+    };
+    for (size_t i = 0; i < macroblock_rgb.size(); i += 2u) {
+      const u32 c0 = macroblock_rgb[i];
+      const u32 c1 = macroblock_rgb[i + 1u];
+      const u16 p0 = static_cast<u16>(
+          to5(c0 & 0xFFu) | (to5((c0 >> 8) & 0xFFu) << 5) |
+          (to5((c0 >> 16) & 0xFFu) << 10) |
+          (output_set_bit15_ ? 0x8000u : 0u));
+      const u16 p1 = static_cast<u16>(
+          to5(c1 & 0xFFu) | (to5((c1 >> 8) & 0xFFu) << 5) |
+          (to5((c1 >> 16) & 0xFFu) << 10) |
+          (output_set_bit15_ ? 0x8000u : 0u));
+      push_output_word(static_cast<u32>(p0) | (static_cast<u32>(p1) << 16));
+    }
+    return;
+  }
+
+  for (u32 rgb : macroblock_rgb) {
+    push_output_byte(static_cast<u8>(rgb & 0xFFu));
+    push_output_byte(static_cast<u8>((rgb >> 8) & 0xFFu));
+    push_output_byte(static_cast<u8>((rgb >> 16) & 0xFFu));
+  }
 }
 
 void Mdec::emit_monochrome_macroblock(const Block &y) {
   output_word_block_id_ = 4;
+  current_output_macroblock_seq_ = output_macroblock_seq_++;
   if (out_depth_latched_ == 0) { // 4-bit monochrome
     for (size_t i = 0; i < y.size(); i += 2) {
       const int y0 = g_mdec_debug_disable_luma ? 0 : y[i];
@@ -582,6 +1040,12 @@ void Mdec::emit_monochrome_macroblock(const Block &y) {
   }
 }
 
+void Mdec::push_output_word(u32 value) {
+  out_fifo_.push_back(value);
+  out_block_fifo_.push_back(output_word_block_id_);
+  out_macroblock_fifo_.push_back(current_output_macroblock_seq_);
+}
+
 void Mdec::push_output_byte(u8 value) {
   if (g_mdec_debug_force_solid_output) {
     value = 0x80u;
@@ -589,8 +1053,7 @@ void Mdec::push_output_byte(u8 value) {
   output_pack_word_ |= static_cast<u32>(value) << (output_pack_bytes_ * 8);
   ++output_pack_bytes_;
   if (output_pack_bytes_ == 4) {
-    out_fifo_.push_back(output_pack_word_);
-    out_block_fifo_.push_back(output_word_block_id_);
+    push_output_word(output_pack_word_);
     output_pack_word_ = 0;
     output_pack_bytes_ = 0;
   }
