@@ -29,6 +29,8 @@
 namespace {
     constexpr const char* kAppConfigFileName = "vibestation_config.ini";
     constexpr const char* kCorruptionPresetDirName = "corruption_presets";
+    constexpr const char* kMemoryCardDirName = "memcards";
+
     void clear_stdout_console() {
 #if defined(_WIN32)
         HANDLE console = GetStdHandle(STD_OUTPUT_HANDLE);
@@ -51,6 +53,7 @@ namespace {
         std::fflush(stdout);
     }
 
+    
     struct GrimReaperRange {
         const char* label;
         const char* slug;
@@ -93,6 +96,27 @@ namespace {
 
     constexpr int kKeyboardBindEntryCount =
         static_cast<int>(sizeof(kKeyboardBindEntries) / sizeof(kKeyboardBindEntries[0]));
+
+    std::string sanitize_memory_card_stem(const std::string& text) {
+        std::string out;
+        out.reserve(text.size());
+        for (char ch : text) {
+            const unsigned char uch = static_cast<unsigned char>(ch);
+            if (std::isalnum(uch)) {
+                out.push_back(static_cast<char>(std::tolower(uch)));
+            }
+            else if (ch == '-' || ch == '_') {
+                out.push_back(ch);
+            }
+            else if (std::isspace(uch)) {
+                out.push_back('_');
+            }
+        }
+        if (out.empty()) {
+            out = "game";
+        }
+        return out;
+    }
 
     std::string cue_trim_copy(std::string text) {
         const size_t begin = text.find_first_not_of(" \t\r\n");
@@ -870,6 +894,7 @@ bool App::init_runtime() {
     }
     emu_runner_.set_speed(1.0);
     apply_speed_override();
+    apply_memory_card_settings(false);
 
     runtime_ready_ = true;
     printf("[App::init_runtime] Runtime ready\n");
@@ -1519,6 +1544,7 @@ void App::menu_bar() {
                 }
                 else {
                     system_->reset();
+                    apply_memory_card_settings(false);
                     has_started_emulation_ = true;
                     emu_runner_.set_running(true);
                     status_message_ = "BIOS emulation restarted";
@@ -2017,6 +2043,64 @@ void App::panel_settings() {
                 }
                 ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f),
                     "Reduces audio complexity and internal precision.");
+
+                ImGui::EndTabItem();
+            }
+            if (ImGui::BeginTabItem("Memory Cards")) {
+                const char* mode_labels[] = { "Generic", "Per-Game", "Disabled" };
+                ImGui::TextWrapped(
+                    "Configure card behavior per slot. Per-Game auto-creates cards by disc name.");
+                ImGui::TextDisabled("Card files are stored in ./%s", kMemoryCardDirName);
+                ImGui::Separator();
+
+                for (int slot = 0; slot < kMemoryCardSlotCount; ++slot) {
+                    const std::string header =
+                        "Slot " + std::to_string(slot + 1);
+                    ImGui::TextColored(ImVec4(0.75f, 0.75f, 0.95f, 1.0f), "%s",
+                        header.c_str());
+
+                    int mode = std::max(0, std::min(2, config_memory_card_mode_[slot]));
+                    const std::string combo_label =
+                        "Mode##memcard_mode_" + std::to_string(slot);
+                    if (ImGui::Combo(combo_label.c_str(), &mode, mode_labels,
+                        IM_ARRAYSIZE(mode_labels))) {
+                        config_memory_card_mode_[slot] = mode;
+                        apply_memory_card_settings(true);
+                    }
+
+                    const std::string target =
+                        (slot < static_cast<int>(memory_card_target_paths_.size()))
+                        ? memory_card_target_paths_[slot]
+                        : std::string();
+                    if (target.empty()) {
+                        ImGui::TextDisabled("Target: (no card inserted)");
+                    }
+                    else {
+                        ImGui::TextWrapped("Target: %s", target.c_str());
+                    }
+
+                    bool inserted = runtime_snapshot_.memory_card_inserted[slot];
+                    bool dirty = runtime_snapshot_.memory_card_dirty[slot];
+                    std::string live_path = runtime_snapshot_.memory_card_path[slot];
+                    if ((!has_started_emulation_ || !emu_runner_.is_running()) &&
+                        system_ != nullptr) {
+                        inserted = system_->memory_card_inserted(static_cast<u32>(slot));
+                        dirty = system_->memory_card_dirty(static_cast<u32>(slot));
+                        live_path = system_->memory_card_path(static_cast<u32>(slot));
+                    }
+                    ImGui::Text("Live: %s%s", inserted ? "Inserted" : "Empty",
+                        dirty ? " (dirty)" : "");
+                    if (!live_path.empty()) {
+                        ImGui::TextWrapped("Mounted: %s", live_path.c_str());
+                    }
+                    if (slot + 1 < kMemoryCardSlotCount) {
+                        ImGui::Separator();
+                    }
+                }
+
+                if (ImGui::Button("Apply Memory Card Settings")) {
+                    apply_memory_card_settings(true);
+                }
 
                 ImGui::EndTabItem();
             }
@@ -2698,6 +2782,7 @@ void App::panel_grim_reaper() {
                 else {
                     has_started_emulation_ = false;
                     system_->reset();
+                    apply_memory_card_settings(false);
                     has_started_emulation_ = true;
                     emu_runner_.set_running(true);
                     status_message_ = "Corrupted BIOS emulation restarted";
@@ -3471,6 +3556,7 @@ void App::panel_debug_cpu() {
                 emu_runner_.pause_and_wait_idle();
             }
             else {
+                apply_memory_card_settings(false);
                 has_started_emulation_ = true;
                 emu_runner_.set_running(true);
             }
@@ -3610,6 +3696,73 @@ bool App::resolve_disc_paths(const std::string& selected_path,
     return false;
 }
 
+std::array<std::string, App::kMemoryCardSlotCount> App::resolve_memory_card_paths() const {
+    std::array<std::string, kMemoryCardSlotCount> paths{};
+    const std::filesystem::path card_dir =
+        std::filesystem::current_path() / kMemoryCardDirName;
+
+    std::string game_stem;
+    if (!game_cue_path_.empty()) {
+        game_stem = std::filesystem::path(game_cue_path_).stem().string();
+    }
+    else if (!game_bin_path_.empty()) {
+        game_stem = std::filesystem::path(game_bin_path_).stem().string();
+    }
+    else if (system_ != nullptr && !system_->cdrom().resolved_disc_path().empty()) {
+        game_stem = std::filesystem::path(system_->cdrom().resolved_disc_path()).stem().string();
+    }
+    if (!game_stem.empty()) {
+        game_stem = sanitize_memory_card_stem(game_stem);
+    }
+
+    for (int slot = 0; slot < kMemoryCardSlotCount; ++slot) {
+        const int mode = std::max(0, std::min(2, config_memory_card_mode_[slot]));
+        if (mode == 2) {
+            paths[slot].clear();
+            continue;
+        }
+
+        std::string file_stem;
+        if (mode == 1 && !game_stem.empty()) {
+            file_stem = game_stem + "_slot" + std::to_string(slot + 1);
+        }
+        else {
+            file_stem = "generic_slot" + std::to_string(slot + 1);
+        }
+
+        paths[slot] = (card_dir / (file_stem + ".mcd")).string();
+    }
+
+    return paths;
+}
+
+void App::apply_memory_card_settings(bool save_config) {
+    if (save_config) {
+        save_persistent_config();
+    }
+
+    memory_card_target_paths_ = resolve_memory_card_paths();
+    if (!system_) {
+        return;
+    }
+
+    if (has_started_emulation_ && emu_runner_.is_running()) {
+        emu_runner_.request_memory_card_paths(memory_card_target_paths_);
+        return;
+    }
+
+    if (has_started_emulation_) {
+        emu_runner_.pause_and_wait_idle();
+    }
+
+    for (u32 slot = 0; slot < memory_card_target_paths_.size(); ++slot) {
+        if (!system_->set_memory_card_slot(slot, memory_card_target_paths_[slot])) {
+            status_message_ = "Failed to mount memory card slot " +
+                std::to_string(static_cast<unsigned>(slot + 1));
+        }
+    }
+}
+
 bool App::load_disc_from_ui(const std::string& bin_path,
     const std::string& cue_path) {
     const std::string disc_label =
@@ -3621,6 +3774,7 @@ bool App::load_disc_from_ui(const std::string& bin_path,
     if (hot_insert) {
         game_bin_path_ = bin_path;
         game_cue_path_ = cue_path;
+        apply_memory_card_settings(false);
         emu_runner_.request_live_disc_insert(bin_path, cue_path);
         status_message_ = "Disc inserted: " + disc_label + " (live)";
         return true;
@@ -3628,6 +3782,7 @@ bool App::load_disc_from_ui(const std::string& bin_path,
 
     game_bin_path_ = bin_path;
     game_cue_path_ = cue_path;
+    apply_memory_card_settings(false);
     status_message_ = "Disc selected: " + disc_label + " (Emulation > Boot Disc)";
     return true;
 }
@@ -3699,6 +3854,7 @@ bool App::start_bios_from_ui() {
     disable_gpu_reaper_mode();
     disable_sound_reaper_mode();
     system_->reset();
+    apply_memory_card_settings(false);
     has_started_emulation_ = true;
     emu_runner_.set_running(true);
     status_message_ = "Emulation started (BIOS)";
@@ -3735,6 +3891,7 @@ bool App::boot_disc_from_ui() {
         return false;
     }
 
+    apply_memory_card_settings(false);
     has_started_emulation_ = true;
     emu_runner_.set_running(true);
     status_message_ = config_direct_disc_boot_
@@ -3995,6 +4152,7 @@ bool App::reap_and_reboot_bios() {
 
     has_started_emulation_ = false;
     system_->reset();
+    apply_memory_card_settings(false);
     has_started_emulation_ = true;
     emu_runner_.set_running(true);
 
@@ -4138,6 +4296,7 @@ bool App::reap_and_reboot_bios_batch() {
 
     has_started_emulation_ = false;
     system_->reset();
+    apply_memory_card_settings(false);
     has_started_emulation_ = true;
     emu_runner_.set_running(true);
 
@@ -4317,6 +4476,14 @@ void App::load_persistent_config() {
         else if (key == "direct_disc_boot") {
             config_direct_disc_boot_ =
                 parse_bool(value, config_direct_disc_boot_);
+        }
+        else if (key == "memory_card_slot1_mode") {
+            const int parsed = static_cast<int>(std::strtol(value.c_str(), nullptr, 10));
+            config_memory_card_mode_[0] = std::max(0, std::min(2, parsed));
+        }
+        else if (key == "memory_card_slot2_mode") {
+            const int parsed = static_cast<int>(std::strtol(value.c_str(), nullptr, 10));
+            config_memory_card_mode_[1] = std::max(0, std::min(2, parsed));
         }
         else if (key == "turbo_speed_percent") {
             const int parsed = static_cast<int>(std::strtol(value.c_str(), nullptr, 10));
@@ -4519,6 +4686,7 @@ void App::load_persistent_config() {
         std::max(0.05f, std::min(8.0f, g_spu_output_buffer_seconds));
     g_spu_xa_buffer_seconds =
         std::max(0.0f, std::min(5.0f, g_spu_xa_buffer_seconds));
+    memory_card_target_paths_ = resolve_memory_card_paths();
 
     if (g_unsafe_ps2_bios_mode) {
         g_experimental_bios_size_mode = true;
@@ -4536,6 +4704,10 @@ void App::save_persistent_config() const {
     out << "vsync=" << (config_vsync_ ? 1 : 0) << "\n";
     out << "low_spec_mode=" << (config_low_spec_mode_ ? 1 : 0) << "\n";
     out << "direct_disc_boot=" << (config_direct_disc_boot_ ? 1 : 0) << "\n";
+    out << "memory_card_slot1_mode="
+        << std::max(0, std::min(2, config_memory_card_mode_[0])) << "\n";
+    out << "memory_card_slot2_mode="
+        << std::max(0, std::min(2, config_memory_card_mode_[1])) << "\n";
     out << "turbo_speed_percent=" << config_turbo_speed_percent_ << "\n";
     out << "slowdown_speed_percent=" << config_slowdown_speed_percent_ << "\n";
     out << "spu_diagnostic_mode=" << (config_spu_diagnostic_mode_ ? 1 : 0) << "\n";

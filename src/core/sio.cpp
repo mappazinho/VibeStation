@@ -1,40 +1,90 @@
 #include "sio.h"
 #include "system.h"
 
+#include <algorithm>
+
 namespace {
 u64 g_sio_trace_counter = 0;
-constexpr int kDsrPulseCycles = 256;
+constexpr u8 kOpenBusByte = 0xFF;
+constexpr u16 kFallbackBaud = 0x88;
+constexpr u32 kControllerAckTicks = 450;
+constexpr u32 kMemoryCardAckTicks = 170;
+} // namespace
+
+constexpr u32 Sio::ack_ticks(bool memory_card) {
+  return memory_card ? kMemoryCardAckTicks : kControllerAckTicks;
 }
 
+void Sio::set_button_state(u16 buttons) { controller_.set_button_state(buttons); }
+
 void Sio::set_analog_state(u8 lx, u8 ly, u8 rx, u8 ry) {
-  analog_lx_ = lx;
-  analog_ly_ = ly;
-  analog_rx_ = rx;
-  analog_ry_ = ry;
+  controller_.set_analog_state(lx, ly, rx, ry);
+}
+
+void Sio::shutdown() { flush_memory_cards(); }
+
+bool Sio::set_memory_card_slot(u32 slot, const std::string &path) {
+  if (slot >= kMemoryCardSlots) {
+    return false;
+  }
+
+  bool ok = true;
+  if (path.empty()) {
+    memory_cards_[slot].eject();
+  } else {
+    ok = memory_cards_[slot].load_or_create(path);
+  }
+  if (!ok) {
+    return false;
+  }
+
+  reset_device_transfer_state();
+  return true;
+}
+
+void Sio::flush_memory_cards() {
+  for (MemoryCard &card : memory_cards_) {
+    card.save_if_dirty();
+  }
+}
+
+bool Sio::memory_card_inserted(u32 slot) const {
+  if (slot >= kMemoryCardSlots) {
+    return false;
+  }
+  return memory_cards_[slot].inserted();
+}
+
+bool Sio::memory_card_dirty(u32 slot) const {
+  if (slot >= kMemoryCardSlots) {
+    return false;
+  }
+  return memory_cards_[slot].dirty();
+}
+
+std::string Sio::memory_card_path(u32 slot) const {
+  if (slot >= kMemoryCardSlots) {
+    return {};
+  }
+  return memory_cards_[slot].path();
+}
+
+void Sio::reset_device_transfer_state() {
+  active_device_ = ActiveDevice::None;
+  active_slot_ = 0;
+  controller_.reset_transfer_state();
+  for (MemoryCard &card : memory_cards_) {
+    card.reset_transfer_state();
+  }
 }
 
 void Sio::reset() {
-  tx_data_ = 0;
-  rx_fifo_ = 0xFF;
-  mode_ = 0;
-  ctrl_ = 0;
-  baud_ = 0;
-  tx_ready_1_ = true;
-  rx_not_empty_ = false;
-  tx_ready_2_ = true;
-  dsr_input_level_ = false;
-  irq_flag_ = false;
-  dsr_pending_cycles_ = 0;
-  dsr_pulse_cycles_ = 0;
-  irq_pending_ = false;
-  joy_select_active_ = false;
-  byte_index_ = 0;
-  transfer_active_ = false;
-  rx_pending_valid_ = false;
-  rx_pending_byte_ = 0xFF;
-  tx_queued_valid_ = false;
-  tx_queued_byte_ = 0xFF;
-  state_ = State::Idle;
+  controller_.reset();
+  for (MemoryCard &card : memory_cards_) {
+    card.reset();
+  }
+  connected_ = true;
+
   saw_pad_cmd42_ = false;
   saw_tx_cmd42_ = false;
   saw_pad_id_ = false;
@@ -42,7 +92,7 @@ void Sio::reset() {
   saw_full_pad_poll_ = false;
   last_pad_buttons_ = 0xFFFF;
   last_tx_byte_ = 0x00;
-  last_rx_byte_ = 0xFF;
+  last_rx_byte_ = kOpenBusByte;
   pad_packet_count_ = 0;
   pad_cmd42_count_ = 0;
   pad_poll_count_ = 0;
@@ -51,39 +101,44 @@ void Sio::reset() {
   invalid_sequence_count_ = 0;
   irq_assert_count_ = 0;
   irq_ack_count_ = 0;
-  rebuild_stat();
+
+  soft_reset();
 }
 
 void Sio::rebuild_stat() {
   stat_ = 0;
-  if (tx_ready_1_) {
-    stat_ |= 0x0001;
+  if (!transmit_buffer_full_) {
+    stat_ |= 0x0001; // TXRDY
   }
-  if (rx_not_empty_) {
-    stat_ |= 0x0002;
+  if (receive_buffer_full_) {
+    stat_ |= 0x0002; // RXFIFONEMPTY
   }
-  if (tx_ready_2_) {
-    stat_ |= 0x0004;
+  if (!transmit_buffer_full_ && transfer_state_ != TransferState::Transmitting) {
+    stat_ |= 0x0004; // TXDONE
   }
-  if (dsr_input_level_) {
-    stat_ |= 0x0080;
+  if (ack_input_) {
+    stat_ |= 0x0080; // ACKINPUT
   }
   if (irq_flag_) {
-    stat_ |= 0x0200;
+    stat_ |= 0x0200; // INTR
   }
 }
 
-bool Sio::tx_enabled() const {
-  return (ctrl_ & 0x0001) != 0;
+bool Sio::is_transmitting() const { return transfer_state_ != TransferState::Idle; }
+
+bool Sio::can_transfer() const {
+  const bool selected = (ctrl_ & 0x0002u) != 0;
+  const bool tx_enabled = (ctrl_ & 0x0001u) != 0;
+  return transmit_buffer_full_ && selected && tx_enabled;
 }
 
-void Sio::raise_sio_irq_if_enabled() {
-  if (!irq_flag_) {
-    return;
-  }
-  if ((ctrl_ & 0x1000) == 0) {
-    return;
-  }
+u32 Sio::transfer_ticks() const {
+  const u16 baud = (baud_ != 0) ? baud_ : kFallbackBaud;
+  return (std::max)(1u, static_cast<u32>(baud) * 8u);
+}
+
+void Sio::trigger_irq() {
+  irq_flag_ = true;
   if (sys_ != nullptr && !irq_pending_) {
     sys_->irq().request(Interrupt::SIO);
     irq_pending_ = true;
@@ -91,35 +146,190 @@ void Sio::raise_sio_irq_if_enabled() {
   }
 }
 
-void Sio::schedule_dsr_pulse() {
-  const int baud_div = (baud_ != 0) ? static_cast<int>(baud_) : 0x88;
-  // Approximate one serial byte time from baud divider so BIOS can observe
-  // command-busy/ready phases in the expected order.
-  dsr_pending_cycles_ = (std::max)(32, baud_div * 8);
-  dsr_pulse_cycles_ = kDsrPulseCycles;
-  dsr_input_level_ = false;
+void Sio::end_transfer() {
+  transfer_state_ = TransferState::Idle;
+  transfer_event_cycles_ = 0;
+}
+
+void Sio::soft_reset() {
+  if (is_transmitting()) {
+    end_transfer();
+  }
+
+  mode_ = 0;
+  ctrl_ = 0;
+  baud_ = 0;
+  ack_input_ = false;
+  irq_flag_ = false;
+  irq_pending_ = false;
+
+  receive_buffer_ = kOpenBusByte;
+  receive_buffer_full_ = false;
+  transmit_buffer_ = 0x00;
+  transmit_value_ = 0x00;
+  transmit_buffer_full_ = false;
+
+  reset_device_transfer_state();
   rebuild_stat();
+}
+
+void Sio::begin_transfer() {
+  transfer_state_ = TransferState::Transmitting;
+  transfer_event_cycles_ = static_cast<int>(transfer_ticks());
+  transmit_value_ = transmit_buffer_;
+  transmit_buffer_full_ = false;
+  ctrl_ |= 0x0004u; // RXEN
+  rebuild_stat();
+}
+
+void Sio::do_transfer() {
+  const bool slot1 = (ctrl_ & 0x2000u) != 0;
+  const u8 selected_slot = static_cast<u8>(slot1 ? 1u : 0u);
+  const u8 host_byte = transmit_value_;
+  u8 device_byte = kOpenBusByte;
+  bool ack = false;
+  bool memory_card_transfer = false;
+
+  auto consume_pad_result = [&](const PadController::TransferResult &pad_result) {
+    device_byte = pad_result.data_out;
+    ack = pad_result.ack;
+    invalid_sequence_count_ += pad_result.invalid_sequences;
+    if (pad_result.saw_id) {
+      saw_pad_id_ = true;
+    }
+    if (pad_result.saw_cmd42) {
+      saw_pad_cmd42_ = true;
+      ++pad_cmd42_count_;
+    }
+    if (pad_result.non_ff_button) {
+      saw_non_ff_button_byte_ = true;
+    }
+    if (pad_result.poll_complete) {
+      saw_full_pad_poll_ = saw_tx_cmd42_;
+      last_pad_buttons_ = pad_result.polled_buttons;
+      ++pad_packet_count_;
+    }
+  };
+
+  auto consume_card_result = [&](const MemoryCard::TransferResult &card_result) {
+    device_byte = card_result.data_out;
+    ack = card_result.ack;
+    memory_card_transfer = true;
+  };
+
+  switch (active_device_) {
+  case ActiveDevice::None:
+    if (host_byte == 0x81 && memory_cards_[selected_slot].inserted()) {
+      consume_card_result(memory_cards_[selected_slot].transfer(host_byte));
+      if (ack) {
+        active_device_ = ActiveDevice::MemoryCard;
+        active_slot_ = selected_slot;
+      }
+    } else if (host_byte != 0x81 && !slot1 && connected_) {
+      const PadController::TransferResult pad_result = controller_.transfer(host_byte);
+      consume_pad_result(pad_result);
+      if (host_byte == 0x01 && pad_result.ack) {
+        ++pad_poll_count_;
+      }
+      if (ack) {
+        active_device_ = ActiveDevice::Controller;
+        active_slot_ = 0;
+      }
+    }
+    break;
+  case ActiveDevice::Controller:
+    if (!slot1 && connected_ && active_slot_ == 0) {
+      consume_pad_result(controller_.transfer(host_byte));
+    } else {
+      ack = false;
+      device_byte = kOpenBusByte;
+    }
+    break;
+  case ActiveDevice::MemoryCard: {
+    memory_card_transfer = true;
+    if (active_slot_ < kMemoryCardSlots &&
+        selected_slot == active_slot_ &&
+        memory_cards_[active_slot_].inserted()) {
+      consume_card_result(memory_cards_[active_slot_].transfer(host_byte));
+    } else {
+      ack = false;
+      device_byte = kOpenBusByte;
+    }
+    break;
+  }
+  }
+
+  if (g_trace_sio &&
+      trace_should_log(g_sio_trace_counter, g_trace_burst_sio,
+                       g_trace_stride_sio)) {
+    LOG_DEBUG(
+        "SIO: XFER host=0x%02X dev=0x%02X ack=%d slot=%d active=%d state=%d "
+        "invalid=%llu",
+        host_byte, device_byte, ack ? 1 : 0, slot1 ? 1 : 0,
+        static_cast<int>(active_device_), static_cast<int>(transfer_state_),
+        static_cast<unsigned long long>(invalid_sequence_count_));
+  }
+
+  receive_buffer_ = device_byte;
+  receive_buffer_full_ = true;
+  last_rx_byte_ = device_byte;
+
+  if ((ctrl_ & 0x0800u) != 0u) {
+    trigger_irq();
+  }
+
+  if (!ack) {
+    active_device_ = ActiveDevice::None;
+    active_slot_ = 0;
+    end_transfer();
+  } else {
+    transfer_state_ = TransferState::WaitingForAck;
+    transfer_event_cycles_ = static_cast<int>(ack_ticks(memory_card_transfer));
+  }
+
+  rebuild_stat();
+}
+
+void Sio::do_ack() {
+  ack_input_ = true;
+
+  if ((ctrl_ & 0x1000u) != 0u) {
+    trigger_irq();
+  }
+
+  if (g_trace_sio &&
+      trace_should_log(g_sio_trace_counter, g_trace_burst_sio,
+                       g_trace_stride_sio)) {
+    LOG_DEBUG("SIO: ACK pulse stat=0x%04X ctrl=0x%04X", stat_, ctrl_);
+  }
+
+  end_transfer();
+  rebuild_stat();
+
+  if (can_transfer()) {
+    begin_transfer();
+  }
 }
 
 u8 Sio::read8(u32 offset) const {
   Sio *self = const_cast<Sio *>(this);
   switch (offset) {
   case 0x0: {
-    const u8 value = rx_fifo_;
+    const u8 value = self->receive_buffer_full_ ? self->receive_buffer_ : kOpenBusByte;
+    self->receive_buffer_full_ = false;
     self->last_rx_byte_ = value;
-    self->rx_not_empty_ = false;
     self->rebuild_stat();
     if (g_trace_sio &&
         trace_should_log(g_sio_trace_counter, g_trace_burst_sio,
                          g_trace_stride_sio)) {
-      LOG_DEBUG("SIO: R8 DATA -> 0x%02X stat=0x%04X ctrl=0x%04X state=%d", value,
-                self->stat_, self->ctrl_, static_cast<int>(self->state_));
+      LOG_DEBUG("SIO: R8 DATA -> 0x%02X stat=0x%04X ctrl=0x%04X", value,
+                self->stat_, self->ctrl_);
     }
     return value;
   }
   default:
     LOG_WARN("SIO: Unhandled read8 at offset 0x%X", offset);
-    return 0xFF;
+    return kOpenBusByte;
   }
 }
 
@@ -127,26 +337,30 @@ u16 Sio::read16(u32 offset) const {
   Sio *self = const_cast<Sio *>(this);
   switch (offset) {
   case 0x0: {
-    const u8 value = rx_fifo_;
+    const u8 value = self->receive_buffer_full_ ? self->receive_buffer_ : kOpenBusByte;
+    self->receive_buffer_full_ = false;
     self->last_rx_byte_ = value;
-    self->rx_not_empty_ = false;
     self->rebuild_stat();
     if (g_trace_sio &&
         trace_should_log(g_sio_trace_counter, g_trace_burst_sio,
                          g_trace_stride_sio)) {
-      LOG_DEBUG("SIO: R16 DATA -> 0x%04X stat=0x%04X ctrl=0x%04X state=%d",
-                static_cast<u16>(value), self->stat_, self->ctrl_,
-                static_cast<int>(self->state_));
+      LOG_DEBUG("SIO: R16 DATA -> 0x%04X stat=0x%04X ctrl=0x%04X",
+                static_cast<u16>(value) | static_cast<u16>(value << 8),
+                self->stat_, self->ctrl_);
     }
-    return value;
+    return static_cast<u16>(value) | static_cast<u16>(value << 8);
   }
-  case 0x4:
+  case 0x4: {
+    const u16 bits = stat_;
+    self->ack_input_ = false;
+    self->rebuild_stat();
     if (g_trace_sio &&
         trace_should_log(g_sio_trace_counter, g_trace_burst_sio,
                          g_trace_stride_sio)) {
-      LOG_DEBUG("SIO: R16 STAT -> 0x%04X", stat_);
+      LOG_DEBUG("SIO: R16 STAT -> 0x%04X", bits);
     }
-    return stat_;
+    return bits;
+  }
   case 0x8:
     if (g_trace_sio &&
         trace_should_log(g_sio_trace_counter, g_trace_burst_sio,
@@ -178,26 +392,32 @@ u32 Sio::read32(u32 offset) const {
   Sio *self = const_cast<Sio *>(this);
   switch (offset) {
   case 0x0: {
-    const u8 value = rx_fifo_;
+    const u8 value = self->receive_buffer_full_ ? self->receive_buffer_ : kOpenBusByte;
+    self->receive_buffer_full_ = false;
     self->last_rx_byte_ = value;
-    self->rx_not_empty_ = false;
+    self->rebuild_stat();
+    const u32 full = static_cast<u32>(value) | (static_cast<u32>(value) << 8) |
+                     (static_cast<u32>(value) << 16) |
+                     (static_cast<u32>(value) << 24);
+    if (g_trace_sio &&
+        trace_should_log(g_sio_trace_counter, g_trace_burst_sio,
+                         g_trace_stride_sio)) {
+      LOG_DEBUG("SIO: R32 DATA -> 0x%08X stat=0x%04X ctrl=0x%04X", full,
+                self->stat_, self->ctrl_);
+    }
+    return full;
+  }
+  case 0x4: {
+    const u32 bits = stat_;
+    self->ack_input_ = false;
     self->rebuild_stat();
     if (g_trace_sio &&
         trace_should_log(g_sio_trace_counter, g_trace_burst_sio,
                          g_trace_stride_sio)) {
-      LOG_DEBUG("SIO: R32 DATA -> 0x%08X stat=0x%04X ctrl=0x%04X state=%d",
-                static_cast<u32>(value), self->stat_, self->ctrl_,
-                static_cast<int>(self->state_));
+      LOG_DEBUG("SIO: R32 STAT -> 0x%08X", bits);
     }
-    return value;
+    return bits;
   }
-  case 0x4:
-    if (g_trace_sio &&
-        trace_should_log(g_sio_trace_counter, g_trace_burst_sio,
-                         g_trace_stride_sio)) {
-      LOG_DEBUG("SIO: R32 STAT -> 0x%08X", static_cast<u32>(stat_));
-    }
-    return stat_;
   case 0x8:
     if (g_trace_sio &&
         trace_should_log(g_sio_trace_counter, g_trace_burst_sio,
@@ -214,116 +434,45 @@ u32 Sio::read32(u32 offset) const {
 
 void Sio::write8(u32 offset, u8 val) {
   switch (offset) {
-  case 0x0: { // TX Data
-    tx_data_ = val;
+  case 0x0: {
     last_tx_byte_ = val;
-    const bool joy_bus_selected = joy_select_active_ && connected_ && tx_enabled();
-    const bool channel0 = (ctrl_ & 0x2000u) == 0;
-    const bool channel1 = !channel0;
-    if (val == 0x01 && joy_bus_selected) {
-      if (channel0) {
-        ++channel0_poll_count_;
-      } else {
+
+    const bool selected = ((ctrl_ & 0x0002u) != 0u) && ((ctrl_ & 0x0001u) != 0u);
+    const bool slot1 = (ctrl_ & 0x2000u) != 0u;
+    if (val == 0x01 && selected) {
+      if (slot1) {
         ++channel1_poll_count_;
+      } else {
+        ++channel0_poll_count_;
       }
     }
-    if (val == 0x42 && joy_bus_selected) {
+    if (val == 0x42 && selected && !slot1) {
       saw_tx_cmd42_ = true;
     }
 
-    if (!joy_bus_selected) {
-      // Open-bus response when JOY bus is not selected/enabled.
-      dsr_pending_cycles_ = 0;
-      dsr_pulse_cycles_ = 0;
-      dsr_input_level_ = false;
-      irq_flag_ = false;
-      rx_fifo_ = 0xFF;
-      last_rx_byte_ = rx_fifo_;
-      rx_not_empty_ = true;
-      tx_ready_1_ = !tx_queued_valid_;
-      tx_ready_2_ = true;
-      transfer_active_ = false;
-      rx_pending_valid_ = false;
-      rebuild_stat();
-      break;
+    if (transmit_buffer_full_) {
+      ++invalid_sequence_count_;
+    }
+    transmit_buffer_ = val;
+    transmit_buffer_full_ = true;
+
+    if ((ctrl_ & 0x0400u) != 0u) {
+      trigger_irq();
     }
 
-    if (channel1 || val == 0x81) {
-      // This core only emulates a pad on channel 0.
-      // Treat channel 1 and memory-card selects as no-device open bus without
-      // entering controller protocol state.
-      state_ = State::Idle;
-      byte_index_ = 0;
-      dsr_pending_cycles_ = 0;
-      dsr_pulse_cycles_ = 0;
-      dsr_input_level_ = false;
-      irq_flag_ = false;
-      irq_pending_ = false;
-      rx_fifo_ = 0xFF;
-      last_rx_byte_ = rx_fifo_;
-      rx_not_empty_ = true;
-      tx_ready_1_ = !tx_queued_valid_;
-      tx_ready_2_ = true;
-      transfer_active_ = false;
-      rx_pending_valid_ = false;
-      rebuild_stat();
-      break;
+    if (!is_transmitting() && can_transfer()) {
+      begin_transfer();
     }
 
-    // Do not abort an in-flight transfer on early host writes. Dropping the
-    // byte can desync BIOS pad polling; queue one byte to execute right after
-    // the current transfer completes.
-    if (transfer_active_ || !tx_ready_1_) {
-      if (!tx_queued_valid_) {
-        tx_queued_byte_ = val;
-        tx_queued_valid_ = true;
-      } else {
-        ++invalid_sequence_count_;
-        tx_queued_byte_ = val;
-      }
-      tx_ready_1_ = false;
-      tx_ready_2_ = false;
-      rebuild_stat();
-      break;
-    }
-
-    // Keep protocol active on whichever channel BIOS currently selects.
-    // Memory-card probes (0x81) are treated as "no card connected" so they
-    // can't poison pad transaction state.
-    const ByteResult result = process_byte(val);
-    tx_ready_1_ = !tx_queued_valid_;
-    tx_ready_2_ = false;
-    transfer_active_ = true;
-    rx_pending_byte_ = result.response;
-    rx_pending_valid_ = true;
-    rx_not_empty_ = false;
-    if (result.pulse_dsr) {
-      schedule_dsr_pulse();
-    } else {
-      dsr_pending_cycles_ = 0;
-      dsr_pulse_cycles_ = 0;
-      dsr_input_level_ = false;
-      irq_flag_ = false;
-      rx_fifo_ = rx_pending_byte_;
-      last_rx_byte_ = rx_fifo_;
-      rx_not_empty_ = true;
-      tx_ready_1_ = !tx_queued_valid_;
-      tx_ready_2_ = true;
-      transfer_active_ = false;
-      rx_pending_valid_ = false;
-    }
-    ++byte_index_;
     rebuild_stat();
     if (g_trace_sio &&
         trace_should_log(g_sio_trace_counter, g_trace_burst_sio,
                          g_trace_stride_sio)) {
       LOG_DEBUG(
-          "SIO: W8 DATA=0x%02X -> RX=0x%02X state=%d stat=0x%04X ctrl=0x%04X "
-          "sel=%d txen=%d ch=%d txrdy=%d invalid=%llu",
-          val, rx_fifo_, static_cast<int>(state_), stat_, ctrl_,
-          joy_select_active_ ? 1 : 0, tx_enabled() ? 1 : 0,
-          ((ctrl_ & 0x2000u) != 0) ? 1 : 0, tx_ready_1_ ? 1 : 0,
-          static_cast<unsigned long long>(invalid_sequence_count_));
+          "SIO: W8 DATA=0x%02X stat=0x%04X ctrl=0x%04X sel=%d txen=%d slot=%d "
+          "state=%d",
+          val, stat_, ctrl_, (ctrl_ & 0x0002u) ? 1 : 0, (ctrl_ & 0x0001u) ? 1 : 0,
+          slot1 ? 1 : 0, static_cast<int>(transfer_state_));
     }
     break;
   }
@@ -341,81 +490,72 @@ void Sio::write16(u32 offset, u16 val) {
                          g_trace_stride_sio)) {
       LOG_DEBUG("SIO: W16 DATA=0x%04X", val);
     }
-    write8(0x0, static_cast<u8>(val & 0xFF));
+    write8(0x0, static_cast<u8>(val & 0xFFu));
     break;
+
   case 0x8:
+    mode_ = val;
     if (g_trace_sio &&
         trace_should_log(g_sio_trace_counter, g_trace_burst_sio,
                          g_trace_stride_sio)) {
-      LOG_DEBUG("SIO: W16 MODE=0x%04X", val);
+      LOG_DEBUG("SIO: W16 MODE=0x%04X", mode_);
     }
-    mode_ = val;
     break;
-  case 0xA:
-    {
-      ctrl_ = static_cast<u16>(val & ~0x0050u);
-      joy_select_active_ = (ctrl_ & 0x0002) != 0;
-      if (!joy_select_active_) { // /JOY_SELECT deasserted
-        state_ = State::Idle;
-        byte_index_ = 0;
-        transfer_active_ = false;
-        rx_pending_valid_ = false;
-        dsr_pending_cycles_ = 0;
-        dsr_pulse_cycles_ = 0;
-        dsr_input_level_ = false;
-        tx_queued_valid_ = false;
-        tx_queued_byte_ = 0xFF;
-        tx_ready_1_ = !tx_queued_valid_;
-        tx_ready_2_ = true;
+
+  case 0xA: {
+    ctrl_ = static_cast<u16>(val & ~0x0050u);
+
+    if ((val & 0x0040u) != 0u) {
+      soft_reset();
+      if (g_trace_sio &&
+          trace_should_log(g_sio_trace_counter, g_trace_burst_sio,
+                           g_trace_stride_sio)) {
+        LOG_DEBUG("SIO: W16 CTRL=0x%04X -> SOFT RESET", val);
       }
+      break;
     }
-    if (val & 0x0010) { // Acknowledge
+
+    if ((val & 0x0010u) != 0u) {
       ++irq_ack_count_;
-      irq_pending_ = false;
       irq_flag_ = false;
-      if (dsr_pulse_cycles_ <= 0) {
-        dsr_input_level_ = false;
+      irq_pending_ = false;
+    }
+
+    if ((ctrl_ & 0x0002u) == 0u) {
+      reset_device_transfer_state();
+    }
+
+    if ((ctrl_ & 0x0002u) == 0u || (ctrl_ & 0x0001u) == 0u) {
+      if (is_transmitting()) {
+        end_transfer();
       }
+    } else if (!is_transmitting() && can_transfer()) {
+      begin_transfer();
     }
-    if (val & 0x0040) { // Reset
-      state_ = State::Idle;
-      byte_index_ = 0;
-      tx_ready_1_ = !tx_queued_valid_;
-      tx_ready_2_ = true;
-      rx_not_empty_ = false;
-      rx_fifo_ = 0xFF;
-      dsr_input_level_ = false;
-      irq_flag_ = false;
-      irq_pending_ = false;
-      dsr_pending_cycles_ = 0;
-      dsr_pulse_cycles_ = 0;
-      tx_queued_valid_ = false;
-      tx_queued_byte_ = 0xFF;
-      mode_ = 0;
-      ctrl_ = 0;
-      baud_ = 0;
-      joy_select_active_ = false;
-    }
+
     rebuild_stat();
     if (g_trace_sio &&
         trace_should_log(g_sio_trace_counter, g_trace_burst_sio,
                          g_trace_stride_sio)) {
       LOG_DEBUG(
-          "SIO: W16 CTRL=0x%04X latched=0x%04X sel=%d txen=%d irqen=%d ack=%d "
-          "rst=%d state=%d stat=0x%04X",
-          val, ctrl_, joy_select_active_ ? 1 : 0, tx_enabled() ? 1 : 0,
-          (ctrl_ & 0x1000) ? 1 : 0, (val & 0x0010) ? 1 : 0,
-          (val & 0x0040) ? 1 : 0, static_cast<int>(state_), stat_);
+          "SIO: W16 CTRL=0x%04X latched=0x%04X sel=%d txen=%d ackint=%d slot=%d "
+          "state=%d stat=0x%04X",
+          val, ctrl_, (ctrl_ & 0x0002u) ? 1 : 0, (ctrl_ & 0x0001u) ? 1 : 0,
+          (ctrl_ & 0x1000u) ? 1 : 0, (ctrl_ & 0x2000u) ? 1 : 0,
+          static_cast<int>(transfer_state_), stat_);
     }
     break;
+  }
+
   case 0xE:
     baud_ = val;
     if (g_trace_sio &&
         trace_should_log(g_sio_trace_counter, g_trace_burst_sio,
                          g_trace_stride_sio)) {
-      LOG_DEBUG("SIO: BAUD=0x%04X", baud_);
+      LOG_DEBUG("SIO: W16 BAUD=0x%04X", baud_);
     }
     break;
+
   default:
     LOG_WARN("SIO: Unhandled write16 at offset 0x%X = 0x%04X", offset, val);
     break;
@@ -430,173 +570,40 @@ void Sio::write32(u32 offset, u32 val) {
                          g_trace_stride_sio)) {
       LOG_DEBUG("SIO: W32 DATA=0x%08X", val);
     }
-    write8(0, static_cast<u8>(val));
+    write8(0x0, static_cast<u8>(val & 0xFFu));
     break;
+
   case 0x8:
-    write16(0x8, static_cast<u16>(val));
-    write16(0xA, static_cast<u16>(val >> 16));
+    write16(0x8, static_cast<u16>(val & 0xFFFFu));
+    write16(0xA, static_cast<u16>((val >> 16) & 0xFFFFu));
     break;
+
   default:
     LOG_WARN("SIO: Unhandled write32 at offset 0x%X = 0x%08X", offset, val);
     break;
   }
 }
 
-Sio::ByteResult Sio::process_byte(u8 value) {
-  // BIOS can restart polling after aborted/failed exchanges without always
-  // giving us a clean state transition; treat a fresh 0x01 as resync.
-  if (value == 0x01 && state_ != State::Idle) {
-    state_ = State::SelectedPad;
-    ++pad_poll_count_;
-    return ByteResult{0xFF, true};
-  }
-
-  switch (state_) {
-  case State::Idle:
-    if (value == 0x01) { // Pad select
-      state_ = State::SelectedPad;
-      ++pad_poll_count_;
-      // BIOS expects DSR/IRQ pacing after the initial select byte before it
-      // transmits 0x42; without this pulse it retries 0x01 forever.
-      return ByteResult{0xFF, true};
-    }
-    ++invalid_sequence_count_;
-    return ByteResult{0xFF, false};
-
-  case State::SelectedPad:
-    if (value == 0x42) { // Read pad command
-      state_ = State::SendingID_Hi;
-      saw_pad_cmd42_ = true;
-      saw_pad_id_ = true;
-      ++pad_cmd42_count_;
-      // Return pad ID: 0x41 = digital, 0x73 = analog/DualShock
-      return ByteResult{analog_mode_ ? static_cast<u8>(0x73)
-                                     : static_cast<u8>(0x41),
-                        true};
-    }
-    ++invalid_sequence_count_;
-    state_ = State::Idle;
-    return ByteResult{0xFF, false};
-
-  case State::SendingID_Hi:
-    state_ = State::SendingID_Lo;
-    saw_pad_id_ = true;
-    return ByteResult{0x5A, true}; // ID byte 2 (always 0x5A)
-
-  case State::SendingID_Lo:
-    state_ = State::SendingButtons_Lo;
-    if ((button_state_ & 0xFFu) != 0xFFu) {
-      saw_non_ff_button_byte_ = true;
-    }
-    return ByteResult{static_cast<u8>(button_state_ & 0xFF), true};
-
-  case State::SendingButtons_Lo:
-    {
-      const bool has_more = analog_mode_;
-      if (analog_mode_) {
-        state_ = State::SendingButtons_Hi;
-      } else {
-        state_ = State::Idle;
-      }
-      const u8 hi = static_cast<u8>((button_state_ >> 8) & 0xFF);
-      if ((hi & 0xFFu) != 0xFFu) {
-        saw_non_ff_button_byte_ = true;
-      }
-      saw_full_pad_poll_ = saw_tx_cmd42_;
-      last_pad_buttons_ = button_state_;
-      ++pad_packet_count_;
-      return ByteResult{hi, has_more};
-    }
-
-  case State::SendingButtons_Hi:
-    state_ = State::SendingAnalog_RX;
-    return ByteResult{analog_rx_, true};
-
-  case State::SendingAnalog_RX:
-    state_ = State::SendingAnalog_RY;
-    return ByteResult{analog_ry_, true};
-
-  case State::SendingAnalog_RY:
-    state_ = State::SendingAnalog_LX;
-    return ByteResult{analog_lx_, true};
-
-  case State::SendingAnalog_LX:
-    state_ = State::SendingAnalog_LY;
-    return ByteResult{analog_ly_, true};
-
-  case State::SendingAnalog_LY:
-    state_ = State::Idle;
-    return ByteResult{0xFF, false};
-
-  default:
-    state_ = State::Idle;
-    return ByteResult{0xFF, false};
-  }
-}
-
 void Sio::tick(u32 cycles) {
-  bool stat_dirty = false;
-  if (dsr_pending_cycles_ > 0) {
-    dsr_pending_cycles_ -= static_cast<int>(cycles);
-    if (dsr_pending_cycles_ <= 0) {
-      if (rx_pending_valid_) {
-        rx_fifo_ = rx_pending_byte_;
-        last_rx_byte_ = rx_fifo_;
-        rx_not_empty_ = true;
-        rx_pending_valid_ = false;
-      }
-      tx_ready_1_ = !tx_queued_valid_;
-      tx_ready_2_ = true;
-      transfer_active_ = false;
-      dsr_input_level_ = true;
-      irq_flag_ = true;
-      raise_sio_irq_if_enabled();
-      stat_dirty = true;
+  u32 remaining = cycles;
+  while (remaining > 0 && is_transmitting()) {
+    if (transfer_event_cycles_ <= 0) {
+      transfer_event_cycles_ = 1;
+    }
 
-      if (tx_queued_valid_) {
-        if (joy_select_active_ && connected_ && tx_enabled()) {
-          const u8 queued = tx_queued_byte_;
-          tx_queued_valid_ = false;
-          tx_queued_byte_ = 0xFF;
-          const ByteResult result = process_byte(queued);
-          tx_ready_1_ = !tx_queued_valid_;
-          tx_ready_2_ = false;
-          transfer_active_ = true;
-          rx_pending_byte_ = result.response;
-          rx_pending_valid_ = true;
-          rx_not_empty_ = false;
-          if (result.pulse_dsr) {
-            schedule_dsr_pulse();
-          } else {
-            dsr_pending_cycles_ = 0;
-            dsr_pulse_cycles_ = 0;
-            dsr_input_level_ = false;
-            irq_flag_ = false;
-            rx_fifo_ = rx_pending_byte_;
-            last_rx_byte_ = rx_fifo_;
-            rx_not_empty_ = true;
-            tx_ready_1_ = !tx_queued_valid_;
-            tx_ready_2_ = true;
-            transfer_active_ = false;
-            rx_pending_valid_ = false;
-          }
-          ++byte_index_;
-        } else {
-          tx_queued_valid_ = false;
-          tx_queued_byte_ = 0xFF;
-        }
-      }
+    const u32 step = static_cast<u32>(transfer_event_cycles_);
+    if (remaining < step) {
+      transfer_event_cycles_ -= static_cast<int>(remaining);
+      break;
     }
-  }
-  if (dsr_pulse_cycles_ > 0) {
-    dsr_pulse_cycles_ -= static_cast<int>(cycles);
-    if (dsr_pulse_cycles_ <= 0) {
-      dsr_pulse_cycles_ = 0;
-      dsr_input_level_ = false;
-      stat_dirty = true;
+
+    remaining -= step;
+    transfer_event_cycles_ = 0;
+
+    if (transfer_state_ == TransferState::Transmitting) {
+      do_transfer();
+    } else if (transfer_state_ == TransferState::WaitingForAck) {
+      do_ack();
     }
-  }
-  if (stat_dirty) {
-    rebuild_stat();
   }
 }

@@ -353,7 +353,10 @@ void System::reset() {
     post_reg_ = 0;
 }
 
-void System::shutdown() { spu_.shutdown(); }
+void System::shutdown() {
+    sio_.shutdown();
+    spu_.shutdown();
+}
 
 double System::target_fps() const {
     const DisplayMode& mode = gpu_.display_mode();

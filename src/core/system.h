@@ -131,6 +131,17 @@ public:
   bool swap_disc_image(const std::string &bin_path, const std::string &cue_path) {
     return cdrom_.swap_disc_image(bin_path, cue_path);
   }
+  bool set_memory_card_slot(u32 slot, const std::string &path) {
+    return sio_.set_memory_card_slot(slot, path);
+  }
+  void flush_memory_cards() { sio_.flush_memory_cards(); }
+  bool memory_card_inserted(u32 slot) const {
+    return sio_.memory_card_inserted(slot);
+  }
+  bool memory_card_dirty(u32 slot) const { return sio_.memory_card_dirty(slot); }
+  std::string memory_card_path(u32 slot) const {
+    return sio_.memory_card_path(slot);
+  }
   void notify_disc_inserted() { cdrom_.notify_disc_inserted(); }
   bool boot_disc(bool direct_boot = false);
   void reset();

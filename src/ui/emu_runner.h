@@ -6,6 +6,7 @@
 #include <atomic>
 #include <condition_variable>
 #include <mutex>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -29,6 +30,9 @@ public:
     std::array<s16, 24> spu_voice_level_r{};
     std::array<bool, 24> spu_voice_active{};
     u32 spu_endx_mask = 0;
+    std::array<bool, 2> memory_card_inserted{};
+    std::array<bool, 2> memory_card_dirty{};
+    std::array<std::string, 2> memory_card_path{};
   };
 
   ~EmuRunner();
@@ -49,6 +53,7 @@ public:
   void set_input_state(u16 buttons, u8 lx, u8 ly, u8 rx, u8 ry);
   void request_live_disc_insert(const std::string &bin_path,
                                 const std::string &cue_path);
+  void request_memory_card_paths(const std::array<std::string, 2> &slot_paths);
   bool consume_latest_frame(FrameSnapshot &out_frame);
   bool consume_latest_vram_snapshot(std::vector<u16> &out_vram);
   RuntimeSnapshot runtime_snapshot() const;
@@ -58,6 +63,7 @@ private:
   static void unpack_input(u64 packed, u16 &buttons, u8 &lx, u8 &ly, u8 &rx,
                            u8 &ry);
   void apply_input_state(System &system);
+  void apply_pending_memory_card_paths();
   void apply_pending_disc_insert();
   bool should_capture_frame() const;
   void publish_frame(FrameSnapshot &&frame, const RuntimeSnapshot &snapshot);
@@ -95,4 +101,8 @@ private:
   bool has_pending_disc_request_ = false;
   std::string pending_disc_bin_path_;
   std::string pending_disc_cue_path_;
+
+  mutable std::mutex memcard_request_mutex_;
+  bool has_pending_memcard_request_ = false;
+  std::array<std::string, 2> pending_memcard_paths_{};
 };
