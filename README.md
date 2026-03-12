@@ -11,7 +11,8 @@ Audio ✅
 CPU/RAM/DMA ✅   
 Main UI ✅  
 MDEC 🚩  
-Real-time corrupter/BIOS corruption ✅
+Real-time corrupter/BIOS corruption ✅   
+Memory Cards ✅
 
 ✅ - Implemented  
 ⚠️ - Implemented, buggy  
