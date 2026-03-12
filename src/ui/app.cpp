@@ -87,6 +87,7 @@ namespace {
         {ImGuiCol_TitleBg, "Title Background", "TitleBg", ImVec4(0.10f, 0.08f, 0.18f, 1.00f)},
         {ImGuiCol_TitleBgActive, "Title Active", "TitleBgActive", ImVec4(0.16f, 0.10f, 0.30f, 1.00f)},
         {ImGuiCol_MenuBarBg, "Menu Bar", "MenuBarBg", ImVec4(0.10f, 0.08f, 0.15f, 1.00f)},
+        {ImGuiCol_PopupBg, "List Background", "PopupBg", ImVec4(0.09f, 0.07f, 0.16f, 0.98f)},
         {ImGuiCol_Tab, "Tab", "Tab", ImVec4(0.14f, 0.10f, 0.25f, 1.00f)},
         {ImGuiCol_TabHovered, "Tab Hovered", "TabHovered", ImVec4(0.30f, 0.20f, 0.55f, 1.00f)},
         {ImGuiCol_TabActive, "Tab Active", "TabActive", ImVec4(0.24f, 0.15f, 0.45f, 1.00f)},
@@ -113,18 +114,109 @@ namespace {
     constexpr ImVec4 kDefaultThemeSurface = ImVec4(0.12f, 0.09f, 0.20f, 1.00f);
     constexpr ImVec4 kDefaultThemeAccent = ImVec4(0.60f, 0.40f, 1.00f, 1.00f);
     constexpr ImVec4 kDefaultThemeText = ImVec4(0.90f, 0.88f, 0.95f, 1.00f);
+    constexpr ImVec4 kDefaultThemeLists = ImVec4(0.09f, 0.07f, 0.16f, 0.98f);
+
+    constexpr ImVec4 theme_color_rgba(int r, int g, int b, int a) {
+        return ImVec4(
+            static_cast<float>(r) / 255.0f,
+            static_cast<float>(g) / 255.0f,
+            static_cast<float>(b) / 255.0f,
+            static_cast<float>(a) / 255.0f);
+    }
 
     struct ThemeSettings {
         ImVec4 background = kDefaultThemeBackground;
         ImVec4 surface = kDefaultThemeSurface;
         ImVec4 accent = kDefaultThemeAccent;
         ImVec4 text = kDefaultThemeText;
+        ImVec4 lists = kDefaultThemeLists;
         bool advanced = false;
         std::array<ImVec4, kThemeColorSlotCount> colors{};
     };
 
+    struct ThemePreset {
+        const char* label;
+        ImVec4 background;
+        ImVec4 surface;
+        ImVec4 accent;
+        ImVec4 text;
+        ImVec4 lists;
+        std::array<ImVec4, kThemeColorSlotCount> colors;
+    };
+
+    constexpr ThemePreset kThemePresets[] = {
+        {
+            "Dark Mode",
+            theme_color_rgba(0, 0, 0, 242),
+            theme_color_rgba(20, 20, 20, 255),
+            theme_color_rgba(41, 40, 40, 255),
+            theme_color_rgba(255, 255, 255, 255),
+            theme_color_rgba(12, 12, 12, 252),
+            {
+                theme_color_rgba(0, 0, 0, 242),
+                theme_color_rgba(7, 7, 7, 247),
+                theme_color_rgba(28, 28, 28, 255),
+                theme_color_rgba(4, 4, 4, 245),
+                theme_color_rgba(12, 12, 12, 252),
+                theme_color_rgba(17, 17, 17, 253),
+                theme_color_rgba(35, 34, 34, 255),
+                theme_color_rgba(30, 30, 30, 255),
+                theme_color_rgba(26, 26, 26, 255),
+                theme_color_rgba(31, 31, 31, 255),
+                theme_color_rgba(35, 34, 34, 255),
+                theme_color_rgba(26, 25, 25, 255),
+                theme_color_rgba(32, 32, 32, 255),
+                theme_color_rgba(36, 36, 36, 255),
+                theme_color_rgba(20, 20, 20, 255),
+                theme_color_rgba(25, 25, 25, 255),
+                theme_color_rgba(28, 28, 28, 255),
+                theme_color_rgba(41, 40, 40, 255),
+                theme_color_rgba(32, 32, 32, 255),
+                theme_color_rgba(41, 40, 40, 255),
+                theme_color_rgba(62, 62, 62, 255),
+                theme_color_rgba(255, 255, 255, 255),
+            },
+        },
+        {
+            "Light Mode",
+            theme_color_rgba(255, 255, 255, 242),
+            theme_color_rgba(221, 221, 221, 255),
+            theme_color_rgba(200, 200, 200, 255),
+            theme_color_rgba(0, 0, 0, 255),
+            theme_color_rgba(235, 235, 235, 252),
+            {
+                theme_color_rgba(255, 255, 255, 242),
+                theme_color_rgba(243, 243, 243, 247),
+                theme_color_rgba(213, 213, 213, 255),
+                theme_color_rgba(248, 248, 248, 245),
+                theme_color_rgba(235, 235, 235, 252),
+                theme_color_rgba(226, 226, 226, 253),
+                theme_color_rgba(206, 206, 206, 255),
+                theme_color_rgba(211, 211, 211, 255),
+                theme_color_rgba(215, 215, 215, 255),
+                theme_color_rgba(210, 210, 210, 255),
+                theme_color_rgba(206, 206, 206, 255),
+                theme_color_rgba(215, 215, 215, 255),
+                theme_color_rgba(209, 209, 209, 255),
+                theme_color_rgba(205, 205, 205, 255),
+                theme_color_rgba(221, 221, 221, 255),
+                theme_color_rgba(216, 216, 216, 255),
+                theme_color_rgba(213, 213, 213, 255),
+                theme_color_rgba(200, 200, 200, 255),
+                theme_color_rgba(209, 209, 209, 255),
+                theme_color_rgba(200, 200, 200, 255),
+                theme_color_rgba(181, 181, 181, 255),
+                theme_color_rgba(0, 0, 0, 255),
+            },
+        },
+    };
+
+    constexpr int kThemePresetCount =
+        static_cast<int>(sizeof(kThemePresets) / sizeof(kThemePresets[0]));
+
     ThemeSettings g_theme_settings{};
     bool g_theme_settings_initialized = false;
+    int g_selected_theme_preset_index = 0;
 
     ImVec4 theme_lerp(const ImVec4& a, const ImVec4& b, float t) {
         return ImVec4(
@@ -151,6 +243,7 @@ namespace {
             theme_lerp(settings.surface, settings.accent, 0.40f));
         set_theme_slot(settings, ImGuiCol_MenuBarBg,
             theme_lerp(settings.background, settings.surface, 0.20f));
+        set_theme_slot(settings, ImGuiCol_PopupBg, settings.lists);
         set_theme_slot(settings, ImGuiCol_Tab,
             theme_lerp(settings.surface, settings.background, 0.15f));
         set_theme_slot(settings, ImGuiCol_TabHovered,
@@ -188,9 +281,20 @@ namespace {
         g_theme_settings.surface = kDefaultThemeSurface;
         g_theme_settings.accent = kDefaultThemeAccent;
         g_theme_settings.text = kDefaultThemeText;
+        g_theme_settings.lists = kDefaultThemeLists;
         g_theme_settings.advanced = false;
         rebuild_theme_colors_from_basics(g_theme_settings);
         g_theme_settings_initialized = true;
+    }
+
+    void apply_theme_preset(const ThemePreset& preset) {
+        g_theme_settings.background = preset.background;
+        g_theme_settings.surface = preset.surface;
+        g_theme_settings.accent = preset.accent;
+        g_theme_settings.text = preset.text;
+        g_theme_settings.lists = preset.lists;
+        g_theme_settings.advanced = true;
+        g_theme_settings.colors = preset.colors;
     }
 
     void apply_theme_style(ImGuiStyle& style) {
@@ -277,6 +381,10 @@ namespace {
             parse_theme_color(equals + 1, settings->text);
             return;
         }
+        if (key == "Lists") {
+            parse_theme_color(equals + 1, settings->lists);
+            return;
+        }
         if (key == "Advanced") {
             settings->advanced = parse_theme_bool(equals + 1, settings->advanced);
             return;
@@ -318,6 +426,9 @@ namespace {
         out_buf->appendf("TextColor=%.3f,%.3f,%.3f,%.3f\n",
             g_theme_settings.text.x, g_theme_settings.text.y,
             g_theme_settings.text.z, g_theme_settings.text.w);
+        out_buf->appendf("Lists=%.3f,%.3f,%.3f,%.3f\n",
+            g_theme_settings.lists.x, g_theme_settings.lists.y,
+            g_theme_settings.lists.z, g_theme_settings.lists.w);
         out_buf->appendf("Advanced=%d\n", g_theme_settings.advanced ? 1 : 0);
         for (size_t i = 0; i < kThemeColorSlotCount; ++i) {
             const ImVec4& color = g_theme_settings.colors[i];
@@ -2241,24 +2352,6 @@ void App::panel_settings() {
                 if (ImGui::Checkbox("Advanced Sound Status Logging", &g_spu_advanced_sound_status)) {
                     save_persistent_config();
                 }
-                if (!config_spu_diagnostic_mode_) {
-                    if (ImGui::Button("Slowed + Reverb Mode (0.83x / Reverb +100%)")) {
-                        config_spu_diagnostic_mode_ = true;
-                        apply_speed_override();
-                        save_persistent_config();
-                    }
-                }
-                else {
-                    if (ImGui::Button("Disable Slowed + Reverb Mode")) {
-                        config_spu_diagnostic_mode_ = false;
-                        apply_speed_override();
-                        save_persistent_config();
-                    }
-                }
-                ImGui::SameLine();
-                ImGui::TextUnformatted(config_spu_diagnostic_mode_ ? "Active" : "Inactive");
-                ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f),
-                    "Enables per-sample SPU diagnostics. Voice level meters stay live.");
 
                 ImGui::EndTabItem();
             }
@@ -2398,6 +2491,23 @@ void App::panel_settings() {
                 ImGui::TextDisabled("Quick controls update multiple parts of the UI at once and are stored in imgui.ini.");
                 ImGui::Separator();
 
+                const char* theme_preset_labels[kThemePresetCount] = {};
+                for (int i = 0; i < kThemePresetCount; ++i) {
+                    theme_preset_labels[i] = kThemePresets[i].label;
+                }
+                g_selected_theme_preset_index =
+                    std::max(0, std::min(kThemePresetCount - 1, g_selected_theme_preset_index));
+                ImGui::Combo("Preset", &g_selected_theme_preset_index,
+                    theme_preset_labels, kThemePresetCount);
+                ImGui::SameLine();
+                if (ImGui::Button("Apply Preset")) {
+                    apply_theme_preset(kThemePresets[g_selected_theme_preset_index]);
+                    apply_theme_style(ImGui::GetStyle());
+                    mark_theme_settings_dirty();
+                }
+                ImGui::TextDisabled(
+                    "Dark Mode and Light Mode use the preset screenshot values plus a dedicated list background color.");
+
                 bool theme_changed = false;
 
                 ImVec4 background = g_theme_settings.background;
@@ -2425,6 +2535,13 @@ void App::panel_settings() {
                 if (ImGui::ColorEdit4("Text", &text.x,
                     ImGuiColorEditFlags_DisplayRGB | ImGuiColorEditFlags_AlphaBar)) {
                     g_theme_settings.text = text;
+                    theme_changed = true;
+                }
+
+                ImVec4 lists = g_theme_settings.lists;
+                if (ImGui::ColorEdit4("Lists", &lists.x,
+                    ImGuiColorEditFlags_DisplayRGB | ImGuiColorEditFlags_AlphaBar)) {
+                    g_theme_settings.lists = lists;
                     theme_changed = true;
                 }
 
@@ -3271,6 +3388,27 @@ void App::panel_settings() {
     ImGui::End();
 }
 
+void App::draw_spu_diagnostic_mode_controls() {
+    if (!config_spu_diagnostic_mode_) {
+        if (ImGui::Button("Slowed + Reverb Mode")) {
+            config_spu_diagnostic_mode_ = true;
+            apply_speed_override();
+            save_persistent_config();
+        }
+    }
+    else {
+        if (ImGui::Button("Disable Slowed + Reverb Mode")) {
+            config_spu_diagnostic_mode_ = false;
+            apply_speed_override();
+            save_persistent_config();
+        }
+    }
+    ImGui::SameLine();
+    ImGui::TextUnformatted(config_spu_diagnostic_mode_ ? "Active" : "Inactive");
+    ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f),
+        "Enables per-sample SPU diagnostics. Voice level meters stay live.");
+}
+
 void App::draw_sound_status_content() {
     const auto& diag = runtime_snapshot_.spu_audio;
     const auto avg_count = [](u64 accum, u64 samples) -> float {
@@ -3787,6 +3925,8 @@ void App::panel_grim_reaper() {
             ImGui::TextColored(
                 ImVec4(0.7f, 0.7f, 0.7f, 1.0f),
                 "Real-time SPU corruption for pitch, reverb, ADSR release, and mixer routing.");
+            draw_spu_diagnostic_mode_controls();
+            ImGui::Separator();
             ImGui::Checkbox("Enable Sound Reaper", &sound_reaper_enabled_);
             ImGui::SliderFloat("Sound Chaos (%)", &sound_reaper_intensity_percent_, 0.0f,
                 100.0f, "%.1f%%");
