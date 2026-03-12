@@ -81,6 +81,7 @@ private:
 	int perf_history_count_ = 0;
 	EmuRunner::RuntimeSnapshot runtime_snapshot_{};
 	std::vector<u32> latest_frame_rgba_{};
+	std::vector<u32> turbo_frame_rgba_{};
 	int latest_frame_width_ = 0;
 	int latest_frame_height_ = 0;
 	unsigned int vram_debug_texture_ = 0;

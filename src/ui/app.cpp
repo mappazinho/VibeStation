@@ -561,6 +561,25 @@ namespace {
         return static_cast<double>(normalize_slowdown_speed_percent(percent)) / 100.0;
     }
 
+    void resample_rgba_nearest(const std::vector<u32>& src, int src_width, int src_height,
+        std::vector<u32>& dst, int dst_width, int dst_height) {
+        const int safe_src_width = std::max(1, src_width);
+        const int safe_src_height = std::max(1, src_height);
+        const int safe_dst_width = std::max(1, dst_width);
+        const int safe_dst_height = std::max(1, dst_height);
+        dst.resize(static_cast<size_t>(safe_dst_width) * static_cast<size_t>(safe_dst_height));
+        for (int y = 0; y < safe_dst_height; ++y) {
+            const int src_y = (y * safe_src_height) / safe_dst_height;
+            const size_t dst_row = static_cast<size_t>(y) * static_cast<size_t>(safe_dst_width);
+            const size_t src_row = static_cast<size_t>(src_y) * static_cast<size_t>(safe_src_width);
+            for (int x = 0; x < safe_dst_width; ++x) {
+                const int src_x = (x * safe_src_width) / safe_dst_width;
+                dst[dst_row + static_cast<size_t>(x)] =
+                    src[src_row + static_cast<size_t>(src_x)];
+            }
+        }
+    }
+
     constexpr double kSpuDiagnosticSpeedMultiplier = 0.83;
     constexpr double kSpuDiagnosticReverbMixMultiplier = 4.00;
 
@@ -1164,10 +1183,24 @@ void App::run() {
 
         FrameSnapshot frame;
         if (emu_runner_.consume_latest_frame(frame)) {
-            renderer_->upload_frame(frame.rgba, frame.width, frame.height);
-            latest_frame_width_ = frame.width;
-            latest_frame_height_ = frame.height;
-            latest_frame_rgba_ = std::move(frame.rgba);
+            const bool turbo_resolution_clamp =
+                turbo_hold_active_ &&
+                g_output_resolution_mode != OutputResolutionMode::R320x240 &&
+                (frame.width > 320 || frame.height > 240);
+            if (turbo_resolution_clamp) {
+                resample_rgba_nearest(frame.rgba, frame.width, frame.height,
+                    turbo_frame_rgba_, 320, 240);
+                renderer_->upload_frame(turbo_frame_rgba_, 320, 240);
+                latest_frame_width_ = 320;
+                latest_frame_height_ = 240;
+                latest_frame_rgba_ = turbo_frame_rgba_;
+            }
+            else {
+                renderer_->upload_frame(frame.rgba, frame.width, frame.height);
+                latest_frame_width_ = frame.width;
+                latest_frame_height_ = frame.height;
+                latest_frame_rgba_ = std::move(frame.rgba);
+            }
         }
         runtime_snapshot_ = emu_runner_.runtime_snapshot();
         push_performance_history_sample();
