@@ -203,6 +203,7 @@ private:
 	void panel_grim_reaper();
 	void panel_corruption_presets();
 	void draw_sound_status_content();
+	void draw_spu_diagnostic_mode_controls();
 	void update_vram_debug_texture();
 
 	// File dialog helpers
