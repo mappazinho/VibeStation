@@ -62,6 +62,10 @@ inline int clamp_signed_sample(int value) {
   return std::clamp(sign_extend_9(value), -128, 127);
 }
 
+inline bool fmv_diagnostics_enabled() {
+  return g_log_fmv_diagnostics;
+}
+
 } // namespace
 
 void Mdec::refresh_debug_quant_stats() {
@@ -143,11 +147,13 @@ void Mdec::reset() {
 void Mdec::begin_command(u32 value) {
   command_word_ = value;
   command_id_ = static_cast<u8>((value >> 29) & 0x7u);
-  const u32 hist_index =
-      debug_stats_.command_history_count % static_cast<u32>(DebugStats::kCommandHistory);
-  debug_stats_.command_history_words[hist_index] = value;
-  debug_stats_.command_history_ids[hist_index] = command_id_;
-  ++debug_stats_.command_history_count;
+  if (fmv_diagnostics_enabled()) {
+    const u32 hist_index =
+        debug_stats_.command_history_count % static_cast<u32>(DebugStats::kCommandHistory);
+    debug_stats_.command_history_words[hist_index] = value;
+    debug_stats_.command_history_ids[hist_index] = command_id_;
+    ++debug_stats_.command_history_count;
+  }
   status_command_bits_ = static_cast<u8>((value >> 25) & 0x0Fu);
   output_depth_ = static_cast<u8>((value >> 27) & 0x3u);
   output_signed_ = (value & (1u << 26)) != 0;
@@ -170,7 +176,9 @@ void Mdec::begin_command(u32 value) {
     command_busy_ = false;
     break;
   case 1: // Decode macroblocks
-    ++debug_stats_.decode_commands;
+    if (fmv_diagnostics_enabled()) {
+      ++debug_stats_.decode_commands;
+    }
     in_words_remaining_ = (value & 0xFFFFu);
     in_unlimited_ = false;
     command_busy_ = true;
@@ -180,14 +188,18 @@ void Mdec::begin_command(u32 value) {
     output_pack_bytes_ = 0;
     break;
   case 2: // Set quant table
-    ++debug_stats_.set_quant_commands;
+    if (fmv_diagnostics_enabled()) {
+      ++debug_stats_.set_quant_commands;
+    }
     in_words_remaining_ = (value & 0x1u) ? 32u : 16u;
     in_unlimited_ = false;
     command_busy_ = true;
     expect_command_word_ = false;
     break;
   case 3: // Set scale table
-    ++debug_stats_.set_scale_commands;
+    if (fmv_diagnostics_enabled()) {
+      ++debug_stats_.set_scale_commands;
+    }
     in_words_remaining_ = 32u;
     in_unlimited_ = false;
     command_busy_ = true;
@@ -207,13 +219,15 @@ void Mdec::begin_command(u32 value) {
 }
 
 void Mdec::write_command(u32 value) {
-  const u32 write_hist_index =
-      debug_stats_.write_history_count % static_cast<u32>(DebugStats::kWriteHistory);
-  debug_stats_.write_history_words[write_hist_index] = value;
-  debug_stats_.write_history_expect_command[write_hist_index] =
-      expect_command_word_ ? 1u : 0u;
-  debug_stats_.write_history_active_command[write_hist_index] = command_id_;
-  ++debug_stats_.write_history_count;
+  if (fmv_diagnostics_enabled()) {
+    const u32 write_hist_index =
+        debug_stats_.write_history_count % static_cast<u32>(DebugStats::kWriteHistory);
+    debug_stats_.write_history_words[write_hist_index] = value;
+    debug_stats_.write_history_expect_command[write_hist_index] =
+        expect_command_word_ ? 1u : 0u;
+    debug_stats_.write_history_active_command[write_hist_index] = command_id_;
+    ++debug_stats_.write_history_count;
+  }
 
   if (expect_command_word_) {
     begin_command(value);
@@ -248,10 +262,12 @@ void Mdec::write_command(u32 value) {
 }
 
 void Mdec::write_control(u32 value) {
-  const u32 control_hist_index =
-      debug_stats_.control_history_count % static_cast<u32>(DebugStats::kCommandHistory);
-  debug_stats_.control_history_words[control_hist_index] = value;
-  ++debug_stats_.control_history_count;
+  if (fmv_diagnostics_enabled()) {
+    const u32 control_hist_index =
+        debug_stats_.control_history_count % static_cast<u32>(DebugStats::kCommandHistory);
+    debug_stats_.control_history_words[control_hist_index] = value;
+    ++debug_stats_.control_history_count;
+  }
   if (value & 0x80000000u) {
     soft_reset_state();
     // Reset is edge-triggered, but the same write still carries the DMA enable bits.
@@ -540,7 +556,9 @@ bool Mdec::decode_block(Block &block, const std::array<u8, kBlockSize> &quant_ta
     if (first != 0xFE00u) {
       break;
     }
-    ++debug_stats_.eob_markers;
+    if (fmv_diagnostics_enabled()) {
+      ++debug_stats_.eob_markers;
+    }
   }
 
   const int q_scale = static_cast<int>((first >> 10) & 0x3Fu);
@@ -597,17 +615,19 @@ bool Mdec::decode_block(Block &block, const std::array<u8, kBlockSize> &quant_ta
   idct(block, spatial);
   block = spatial;
 
-  ++debug_stats_.blocks_decoded;
-  if (!has_nonzero_ac) {
-    ++debug_stats_.dc_only_blocks;
+  if (fmv_diagnostics_enabled()) {
+    ++debug_stats_.blocks_decoded;
+    if (!has_nonzero_ac) {
+      ++debug_stats_.dc_only_blocks;
+    }
+    if (q_scale == 0) {
+      ++debug_stats_.qscale_zero_blocks;
+    }
+    debug_stats_.qscale_sum += static_cast<u64>(q_scale);
+    debug_stats_.qscale_max = std::max<u32>(debug_stats_.qscale_max,
+                                            static_cast<u32>(q_scale));
+    debug_stats_.nonzero_coeff_count += static_cast<u64>(nonzero_coeffs);
   }
-  if (q_scale == 0) {
-    ++debug_stats_.qscale_zero_blocks;
-  }
-  debug_stats_.qscale_sum += static_cast<u64>(q_scale);
-  debug_stats_.qscale_max = std::max<u32>(debug_stats_.qscale_max,
-                                          static_cast<u32>(q_scale));
-  debug_stats_.nonzero_coeff_count += static_cast<u64>(nonzero_coeffs);
   return true;
 }
 

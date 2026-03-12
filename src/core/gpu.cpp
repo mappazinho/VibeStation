@@ -5,6 +5,10 @@
 #include <cmath>
 
 namespace {
+    inline bool fmv_diagnostics_enabled() {
+        return g_log_fmv_diagnostics;
+    }
+
     int clamp_display_dimension(int value, int fallback, int max_value) {
         const int candidate = (value > 0) ? value : fallback;
         return std::max(1, std::min(candidate, max_value));
@@ -456,7 +460,7 @@ void Gpu::gp0(u32 command) {
 
     // Handle VRAM write mode
     if (gp0_mode_ == Gp0Mode::VramWrite) {
-        if (sys_ && g_mdec_debug_upload_probe) {
+        if (sys_ && g_mdec_debug_upload_probe && fmv_diagnostics_enabled()) {
             sys_->debug_note_gpu_image_load_word(command);
         }
         // Write two 16-bit pixels per 32-bit word
@@ -727,7 +731,9 @@ void Gpu::gp0_mono_quad() {
 }
 
 void Gpu::gp0_textured_tri() {
-    ++command_debug_.gp0_textured_tri_count;
+    if (fmv_diagnostics_enabled()) {
+        ++command_debug_.gp0_textured_tri_count;
+    }
     Color c(gp0_buffer_[0]);
     clut_ = static_cast<u16>(gp0_buffer_[2] >> 16);
     texpage_ = static_cast<u16>(gp0_buffer_[4] >> 16);
@@ -748,7 +754,9 @@ void Gpu::gp0_textured_tri() {
 }
 
 void Gpu::gp0_textured_quad() {
-    ++command_debug_.gp0_textured_quad_count;
+    if (fmv_diagnostics_enabled()) {
+        ++command_debug_.gp0_textured_quad_count;
+    }
     Color c(gp0_buffer_[0]);
     clut_ = static_cast<u16>(gp0_buffer_[2] >> 16);
     texpage_ = static_cast<u16>(gp0_buffer_[4] >> 16);
@@ -952,7 +960,9 @@ void Gpu::gp0_mono_rect() {
 }
 
 void Gpu::gp0_textured_rect() {
-    ++command_debug_.gp0_textured_rect_count;
+    if (fmv_diagnostics_enabled()) {
+        ++command_debug_.gp0_textured_rect_count;
+    }
     Color c(gp0_buffer_[0]);
     const Vertex origin = decode_vertex_word(gp0_buffer_[1]);
     s16 x = origin.x;
@@ -980,7 +990,7 @@ void Gpu::gp0_textured_rect() {
     }
 
     const bool raw_texture = (gp0_command_ & 0x1u) != 0;
-    {
+    if (fmv_diagnostics_enabled()) {
         const u32 rect_index =
             (command_debug_.gp0_textured_rect_count - 1u) %
             static_cast<u32>(GpuCommandDebugInfo::kRecentRects);
@@ -1124,8 +1134,10 @@ void Gpu::gp0_image_load() {
     vram_tx_total_ = static_cast<u32>(vram_tx_w_) * vram_tx_h_;
 
     if (sys_) {
-        sys_->debug_note_gpu_image_load_begin(vram_tx_x_, vram_tx_y_,
-                                              vram_tx_w_, vram_tx_h_);
+        if (fmv_diagnostics_enabled()) {
+            sys_->debug_note_gpu_image_load_begin(vram_tx_x_, vram_tx_y_,
+                                                  vram_tx_w_, vram_tx_h_);
+        }
     }
     gp0_mode_ = Gp0Mode::VramWrite;
 }
@@ -1162,7 +1174,9 @@ void Gpu::gp0_vram_copy() {
         h = 512;
 
     if (sys_) {
-        sys_->debug_note_gpu_vram_copy(src_x, src_y, dst_x, dst_y, w, h);
+        if (fmv_diagnostics_enabled()) {
+            sys_->debug_note_gpu_vram_copy(src_x, src_y, dst_x, dst_y, w, h);
+        }
     }
 
     // Copy through a temp line buffer to handle overlaps safely.
@@ -1285,28 +1299,34 @@ void Gpu::gp1_display_area(u32 val) {
     const u32 value = val & 0x00FFFFFFu;
     display_.x_start = value & 0x3FE; // 10 bits, aligned to 2
     display_.y_start = (value >> 10) & 0x1FF;
-    ++command_debug_.gp1_display_area_count;
-    command_debug_.gp1_display_area_raw = value;
-    command_debug_.gp1_display_area_x = display_.x_start;
-    command_debug_.gp1_display_area_y = display_.y_start;
+    if (fmv_diagnostics_enabled()) {
+        ++command_debug_.gp1_display_area_count;
+        command_debug_.gp1_display_area_raw = value;
+        command_debug_.gp1_display_area_x = display_.x_start;
+        command_debug_.gp1_display_area_y = display_.y_start;
+    }
 }
 
 void Gpu::gp1_horizontal_range(u32 val) {
     display_.x1 = val & 0xFFF;
     display_.x2 = (val >> 12) & 0xFFF;
-    ++command_debug_.gp1_horizontal_range_count;
-    command_debug_.gp1_horizontal_range_raw = val & 0x00FFFFFFu;
-    command_debug_.gp1_horizontal_range_x1 = display_.x1;
-    command_debug_.gp1_horizontal_range_x2 = display_.x2;
+    if (fmv_diagnostics_enabled()) {
+        ++command_debug_.gp1_horizontal_range_count;
+        command_debug_.gp1_horizontal_range_raw = val & 0x00FFFFFFu;
+        command_debug_.gp1_horizontal_range_x1 = display_.x1;
+        command_debug_.gp1_horizontal_range_x2 = display_.x2;
+    }
 }
 
 void Gpu::gp1_vertical_range(u32 val) {
     display_.y1 = val & 0x3FF;
     display_.y2 = (val >> 10) & 0x3FF;
-    ++command_debug_.gp1_vertical_range_count;
-    command_debug_.gp1_vertical_range_raw = val & 0x001FFFFFu;
-    command_debug_.gp1_vertical_range_y1 = display_.y1;
-    command_debug_.gp1_vertical_range_y2 = display_.y2;
+    if (fmv_diagnostics_enabled()) {
+        ++command_debug_.gp1_vertical_range_count;
+        command_debug_.gp1_vertical_range_raw = val & 0x001FFFFFu;
+        command_debug_.gp1_vertical_range_y1 = display_.y1;
+        command_debug_.gp1_vertical_range_y2 = display_.y2;
+    }
 }
 
 void Gpu::gp1_display_mode(u32 val) {
@@ -1317,8 +1337,10 @@ void Gpu::gp1_display_mode(u32 val) {
     display_.is_pal = (val >> 3) & 1;
     display_.is_24bit = (val >> 4) & 1;
     display_.interlaced = (val >> 5) & 1;
-    ++command_debug_.gp1_display_mode_count;
-    command_debug_.gp1_display_mode_raw = val & 0x7Fu;
+    if (fmv_diagnostics_enabled()) {
+        ++command_debug_.gp1_display_mode_count;
+        command_debug_.gp1_display_mode_raw = val & 0x7Fu;
+    }
 }
 
 void Gpu::gp1_get_info(u32 val) {
@@ -1790,7 +1812,7 @@ DisplayDebugInfo Gpu::debug_display_info() const {
 void Gpu::vblank() {
     static u64 vblank_count = 0;
     frame_complete_ = true;
-    if (sys_) {
+    if (sys_ && fmv_diagnostics_enabled()) {
         sys_->debug_note_gpu_vblank();
     }
     interlace_field_ = !interlace_field_;

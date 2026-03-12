@@ -2808,6 +2808,22 @@ void App::panel_settings() {
                 if (ImGui::Checkbox("SIO Trace", &g_trace_sio)) {
                     logging_config_dirty = true;
                 }
+                if (ImGui::Checkbox("CPU Deep Diagnostics (slow)",
+                        &g_cpu_deep_diagnostics)) {
+                    logging_config_dirty = true;
+                }
+                if (ImGui::Checkbox("Enable FMV Diagnostics",
+                        &g_log_fmv_diagnostics)) {
+                    if (!g_log_fmv_diagnostics) {
+                        g_mdec_debug_compare_macroblocks = false;
+                        g_mdec_debug_upload_probe = false;
+                        if (system_) {
+                            system_->reset_mdec_debug_compare();
+                            system_->reset_mdec_upload_probe();
+                        }
+                    }
+                    logging_config_dirty = true;
+                }
 
                 if (ImGui::Button("Enable All Traces")) {
                     g_trace_dma = true;
@@ -2894,7 +2910,10 @@ void App::panel_settings() {
 
                 if (system_) {
                     ImGui::Separator();
-                    if (ImGui::CollapsingHeader("FMV Diagnostics",
+                    if (!g_log_fmv_diagnostics) {
+                        ImGui::TextDisabled("FMV diagnostics are disabled.");
+                    }
+                    else if (ImGui::CollapsingHeader("FMV Diagnostics",
                         ImGuiTreeNodeFlags_DefaultOpen)) {
                         const float diag_height =
                             420.0f * ImGui::GetIO().FontGlobalScale;
@@ -4604,7 +4623,7 @@ void App::panel_about() {
     ImGui::SetNextWindowSize(ImVec2(400, 200), ImGuiCond_FirstUseEver);
     if (ImGui::Begin("About VibeStation", &show_about_,
         ImGuiWindowFlags_NoResize)) {
-        ImGui::TextColored(ImVec4(0.6f, 0.4f, 1.0f, 1.0f), "VibeStation v0.1.0");
+        ImGui::TextColored(ImVec4(0.6f, 0.4f, 1.0f, 1.0f), "VibeStation v0.4.5a-h1");
         ImGui::Separator();
         ImGui::Text("A PlayStation 1 emulator");
         ImGui::Spacing();
@@ -5697,6 +5716,10 @@ void App::load_persistent_config() {
         else if (key == "log_collapse_repeats") {
             g_log_dedupe = parse_bool(value, g_log_dedupe);
         }
+        else if (key == "log_fmv_diagnostics") {
+            g_log_fmv_diagnostics =
+                parse_bool(value, g_log_fmv_diagnostics);
+        }
         else if (key == "log_repeat_flush") {
             const unsigned long parsed = std::strtoul(value.c_str(), nullptr, 10);
             g_log_dedupe_flush = static_cast<u32>(std::max(1ul, parsed));
@@ -5737,6 +5760,10 @@ void App::load_persistent_config() {
         }
         else if (key == "trace_sio") {
             g_trace_sio = parse_bool(value, g_trace_sio);
+        }
+        else if (key == "cpu_deep_diagnostics") {
+            g_cpu_deep_diagnostics =
+                parse_bool(value, g_cpu_deep_diagnostics);
         }
         else if (key == "trace_burst_cpu") {
             g_trace_burst_cpu = static_cast<u32>(std::max(1ul, std::strtoul(value.c_str(), nullptr, 10)));
@@ -5882,6 +5909,7 @@ void App::save_persistent_config() const {
     out << "log_level=" << log_level_to_config_value(g_log_level) << "\n";
     out << "log_timestamps=" << (g_log_timestamp ? 1 : 0) << "\n";
     out << "log_collapse_repeats=" << (g_log_dedupe ? 1 : 0) << "\n";
+    out << "log_fmv_diagnostics=" << (g_log_fmv_diagnostics ? 1 : 0) << "\n";
     out << "log_repeat_flush=" << static_cast<unsigned>(g_log_dedupe_flush) << "\n";
     out << "log_category_mask=" << g_log_category_mask << "\n";
     out << "log_file_path=" << log_path_ << "\n";
@@ -5895,6 +5923,7 @@ void App::save_persistent_config() const {
     out << "trace_irq=" << (g_trace_irq ? 1 : 0) << "\n";
     out << "trace_timer=" << (g_trace_timer ? 1 : 0) << "\n";
     out << "trace_sio=" << (g_trace_sio ? 1 : 0) << "\n";
+    out << "cpu_deep_diagnostics=" << (g_cpu_deep_diagnostics ? 1 : 0) << "\n";
     out << "trace_burst_cpu=" << g_trace_burst_cpu << "\n";
     out << "trace_stride_cpu=" << g_trace_stride_cpu << "\n";
     out << "trace_burst_bus=" << g_trace_burst_bus << "\n";
