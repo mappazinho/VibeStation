@@ -2,12 +2,14 @@
 #include <SDL.h>
 #include <SDL_opengl.h>
 #include <imgui.h>
+#include <imgui_internal.h>
 #include <imgui_impl_opengl2.h>
 #include <imgui_impl_opengl3.h>
 #include <imgui_impl_sdl2.h>
 #include <algorithm>
 #include <cctype>
 #include <chrono>
+#include <cstring>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
@@ -72,6 +74,281 @@ namespace {
 
     constexpr int kKeyboardBindEntryCount =
         static_cast<int>(sizeof(kKeyboardBindEntries) / sizeof(kKeyboardBindEntries[0]));
+
+    struct ThemeColorSlot {
+        ImGuiCol color_id;
+        const char* label;
+        const char* key;
+        ImVec4 default_color;
+    };
+
+    constexpr ThemeColorSlot kThemeColorSlots[] = {
+        {ImGuiCol_WindowBg, "Window Background", "WindowBg", ImVec4(0.08f, 0.06f, 0.12f, 0.95f)},
+        {ImGuiCol_TitleBg, "Title Background", "TitleBg", ImVec4(0.10f, 0.08f, 0.18f, 1.00f)},
+        {ImGuiCol_TitleBgActive, "Title Active", "TitleBgActive", ImVec4(0.16f, 0.10f, 0.30f, 1.00f)},
+        {ImGuiCol_MenuBarBg, "Menu Bar", "MenuBarBg", ImVec4(0.10f, 0.08f, 0.15f, 1.00f)},
+        {ImGuiCol_Tab, "Tab", "Tab", ImVec4(0.14f, 0.10f, 0.25f, 1.00f)},
+        {ImGuiCol_TabHovered, "Tab Hovered", "TabHovered", ImVec4(0.30f, 0.20f, 0.55f, 1.00f)},
+        {ImGuiCol_TabActive, "Tab Active", "TabActive", ImVec4(0.24f, 0.15f, 0.45f, 1.00f)},
+        {ImGuiCol_Header, "Header", "Header", ImVec4(0.20f, 0.14f, 0.36f, 1.00f)},
+        {ImGuiCol_HeaderHovered, "Header Hovered", "HeaderHovered", ImVec4(0.30f, 0.20f, 0.50f, 1.00f)},
+        {ImGuiCol_HeaderActive, "Header Active", "HeaderActive", ImVec4(0.35f, 0.25f, 0.60f, 1.00f)},
+        {ImGuiCol_Button, "Button", "Button", ImVec4(0.20f, 0.14f, 0.36f, 1.00f)},
+        {ImGuiCol_ButtonHovered, "Button Hovered", "ButtonHovered", ImVec4(0.34f, 0.22f, 0.58f, 1.00f)},
+        {ImGuiCol_ButtonActive, "Button Active", "ButtonActive", ImVec4(0.40f, 0.28f, 0.65f, 1.00f)},
+        {ImGuiCol_FrameBg, "Frame Background", "FrameBg", ImVec4(0.12f, 0.09f, 0.20f, 1.00f)},
+        {ImGuiCol_FrameBgHovered, "Frame Hovered", "FrameBgHovered", ImVec4(0.18f, 0.12f, 0.30f, 1.00f)},
+        {ImGuiCol_FrameBgActive, "Frame Active", "FrameBgActive", ImVec4(0.24f, 0.16f, 0.40f, 1.00f)},
+        {ImGuiCol_CheckMark, "Check Mark", "CheckMark", ImVec4(0.60f, 0.40f, 1.00f, 1.00f)},
+        {ImGuiCol_SliderGrab, "Slider Grab", "SliderGrab", ImVec4(0.50f, 0.35f, 0.85f, 1.00f)},
+        {ImGuiCol_SliderGrabActive, "Slider Grab Active", "SliderGrabActive", ImVec4(0.60f, 0.40f, 1.00f, 1.00f)},
+        {ImGuiCol_Separator, "Separator", "Separator", ImVec4(0.20f, 0.15f, 0.35f, 1.00f)},
+        {ImGuiCol_Text, "Text", "Text", ImVec4(0.90f, 0.88f, 0.95f, 1.00f)},
+    };
+
+    constexpr size_t kThemeColorSlotCount =
+        sizeof(kThemeColorSlots) / sizeof(kThemeColorSlots[0]);
+
+    constexpr ImVec4 kDefaultThemeBackground = ImVec4(0.08f, 0.06f, 0.12f, 0.95f);
+    constexpr ImVec4 kDefaultThemeSurface = ImVec4(0.12f, 0.09f, 0.20f, 1.00f);
+    constexpr ImVec4 kDefaultThemeAccent = ImVec4(0.60f, 0.40f, 1.00f, 1.00f);
+    constexpr ImVec4 kDefaultThemeText = ImVec4(0.90f, 0.88f, 0.95f, 1.00f);
+
+    struct ThemeSettings {
+        ImVec4 background = kDefaultThemeBackground;
+        ImVec4 surface = kDefaultThemeSurface;
+        ImVec4 accent = kDefaultThemeAccent;
+        ImVec4 text = kDefaultThemeText;
+        bool advanced = false;
+        std::array<ImVec4, kThemeColorSlotCount> colors{};
+    };
+
+    ThemeSettings g_theme_settings{};
+    bool g_theme_settings_initialized = false;
+
+    ImVec4 theme_lerp(const ImVec4& a, const ImVec4& b, float t) {
+        return ImVec4(
+            a.x + (b.x - a.x) * t,
+            a.y + (b.y - a.y) * t,
+            a.z + (b.z - a.z) * t,
+            a.w + (b.w - a.w) * t);
+    }
+
+    void set_theme_slot(ThemeSettings& settings, ImGuiCol color_id, const ImVec4& color) {
+        for (size_t i = 0; i < kThemeColorSlotCount; ++i) {
+            if (kThemeColorSlots[i].color_id == color_id) {
+                settings.colors[i] = color;
+                return;
+            }
+        }
+    }
+
+    void rebuild_theme_colors_from_basics(ThemeSettings& settings) {
+        set_theme_slot(settings, ImGuiCol_WindowBg, settings.background);
+        set_theme_slot(settings, ImGuiCol_TitleBg,
+            theme_lerp(settings.background, settings.surface, 0.35f));
+        set_theme_slot(settings, ImGuiCol_TitleBgActive,
+            theme_lerp(settings.surface, settings.accent, 0.40f));
+        set_theme_slot(settings, ImGuiCol_MenuBarBg,
+            theme_lerp(settings.background, settings.surface, 0.20f));
+        set_theme_slot(settings, ImGuiCol_Tab,
+            theme_lerp(settings.surface, settings.background, 0.15f));
+        set_theme_slot(settings, ImGuiCol_TabHovered,
+            theme_lerp(settings.surface, settings.accent, 0.72f));
+        set_theme_slot(settings, ImGuiCol_TabActive,
+            theme_lerp(settings.surface, settings.accent, 0.50f));
+        set_theme_slot(settings, ImGuiCol_Header,
+            theme_lerp(settings.surface, settings.accent, 0.30f));
+        set_theme_slot(settings, ImGuiCol_HeaderHovered,
+            theme_lerp(settings.surface, settings.accent, 0.55f));
+        set_theme_slot(settings, ImGuiCol_HeaderActive,
+            theme_lerp(settings.surface, settings.accent, 0.72f));
+        set_theme_slot(settings, ImGuiCol_Button,
+            theme_lerp(settings.surface, settings.accent, 0.28f));
+        set_theme_slot(settings, ImGuiCol_ButtonHovered,
+            theme_lerp(settings.surface, settings.accent, 0.60f));
+        set_theme_slot(settings, ImGuiCol_ButtonActive,
+            theme_lerp(settings.surface, settings.accent, 0.78f));
+        set_theme_slot(settings, ImGuiCol_FrameBg, settings.surface);
+        set_theme_slot(settings, ImGuiCol_FrameBgHovered,
+            theme_lerp(settings.surface, settings.accent, 0.25f));
+        set_theme_slot(settings, ImGuiCol_FrameBgActive,
+            theme_lerp(settings.surface, settings.accent, 0.40f));
+        set_theme_slot(settings, ImGuiCol_CheckMark, settings.accent);
+        set_theme_slot(settings, ImGuiCol_SliderGrab,
+            theme_lerp(settings.surface, settings.accent, 0.60f));
+        set_theme_slot(settings, ImGuiCol_SliderGrabActive, settings.accent);
+        set_theme_slot(settings, ImGuiCol_Separator,
+            theme_lerp(settings.surface, settings.text, 0.18f));
+        set_theme_slot(settings, ImGuiCol_Text, settings.text);
+    }
+
+    void reset_theme_settings() {
+        g_theme_settings.background = kDefaultThemeBackground;
+        g_theme_settings.surface = kDefaultThemeSurface;
+        g_theme_settings.accent = kDefaultThemeAccent;
+        g_theme_settings.text = kDefaultThemeText;
+        g_theme_settings.advanced = false;
+        rebuild_theme_colors_from_basics(g_theme_settings);
+        g_theme_settings_initialized = true;
+    }
+
+    void apply_theme_style(ImGuiStyle& style) {
+        style.WindowRounding = 6.0f;
+        style.FrameRounding = 4.0f;
+        style.GrabRounding = 4.0f;
+        style.TabRounding = 4.0f;
+        style.WindowBorderSize = 1.0f;
+        style.FrameBorderSize = 0.0f;
+        style.ScrollbarRounding = 6.0f;
+        style.WindowPadding = ImVec2(10.0f, 10.0f);
+
+        for (size_t i = 0; i < kThemeColorSlotCount; ++i) {
+            style.Colors[kThemeColorSlots[i].color_id] = g_theme_settings.colors[i];
+        }
+    }
+
+    void ensure_theme_settings_initialized() {
+        if (!g_theme_settings_initialized) {
+            reset_theme_settings();
+        }
+    }
+
+    void mark_theme_settings_dirty() {
+        if (ImGui::GetCurrentContext() != nullptr) {
+            ImGui::MarkIniSettingsDirty();
+        }
+    }
+
+    bool parse_theme_color(const char* text, ImVec4& color) {
+        float r = 0.0f;
+        float g = 0.0f;
+        float b = 0.0f;
+        float a = 0.0f;
+        if (std::sscanf(text, "%f,%f,%f,%f", &r, &g, &b, &a) != 4) {
+            return false;
+        }
+        color = ImVec4(r, g, b, a);
+        return true;
+    }
+
+    bool parse_theme_bool(const char* text, bool fallback) {
+        if (std::strcmp(text, "1") == 0 || std::strcmp(text, "true") == 0 ||
+            std::strcmp(text, "TRUE") == 0) {
+            return true;
+        }
+        if (std::strcmp(text, "0") == 0 || std::strcmp(text, "false") == 0 ||
+            std::strcmp(text, "FALSE") == 0) {
+            return false;
+        }
+        return fallback;
+    }
+
+    void* theme_settings_read_open(ImGuiContext*, ImGuiSettingsHandler*, const char* name) {
+        if (std::strcmp(name, "Colors") != 0) {
+            return nullptr;
+        }
+        ensure_theme_settings_initialized();
+        return &g_theme_settings;
+    }
+
+    void theme_settings_read_line(ImGuiContext*, ImGuiSettingsHandler*, void* entry,
+        const char* line) {
+        auto* settings = static_cast<ThemeSettings*>(entry);
+        const char* equals = std::strchr(line, '=');
+        if (equals == nullptr) {
+            return;
+        }
+
+        const std::string key(line, static_cast<size_t>(equals - line));
+        if (key == "Background") {
+            parse_theme_color(equals + 1, settings->background);
+            return;
+        }
+        if (key == "Surface") {
+            parse_theme_color(equals + 1, settings->surface);
+            return;
+        }
+        if (key == "Accent") {
+            parse_theme_color(equals + 1, settings->accent);
+            return;
+        }
+        if (key == "TextColor") {
+            parse_theme_color(equals + 1, settings->text);
+            return;
+        }
+        if (key == "Advanced") {
+            settings->advanced = parse_theme_bool(equals + 1, settings->advanced);
+            return;
+        }
+
+        ImVec4 parsed{};
+        if (!parse_theme_color(equals + 1, parsed)) {
+            return;
+        }
+        for (size_t i = 0; i < kThemeColorSlotCount; ++i) {
+            if (key == kThemeColorSlots[i].key) {
+                settings->colors[i] = parsed;
+                return;
+            }
+        }
+    }
+
+    void theme_settings_apply_all(ImGuiContext*, ImGuiSettingsHandler*) {
+        ensure_theme_settings_initialized();
+        if (!g_theme_settings.advanced) {
+            rebuild_theme_colors_from_basics(g_theme_settings);
+        }
+        apply_theme_style(ImGui::GetStyle());
+    }
+
+    void theme_settings_write_all(ImGuiContext*, ImGuiSettingsHandler* handler,
+        ImGuiTextBuffer* out_buf) {
+        ensure_theme_settings_initialized();
+        out_buf->appendf("[%s][Colors]\n", handler->TypeName);
+        out_buf->appendf("Background=%.3f,%.3f,%.3f,%.3f\n",
+            g_theme_settings.background.x, g_theme_settings.background.y,
+            g_theme_settings.background.z, g_theme_settings.background.w);
+        out_buf->appendf("Surface=%.3f,%.3f,%.3f,%.3f\n",
+            g_theme_settings.surface.x, g_theme_settings.surface.y,
+            g_theme_settings.surface.z, g_theme_settings.surface.w);
+        out_buf->appendf("Accent=%.3f,%.3f,%.3f,%.3f\n",
+            g_theme_settings.accent.x, g_theme_settings.accent.y,
+            g_theme_settings.accent.z, g_theme_settings.accent.w);
+        out_buf->appendf("TextColor=%.3f,%.3f,%.3f,%.3f\n",
+            g_theme_settings.text.x, g_theme_settings.text.y,
+            g_theme_settings.text.z, g_theme_settings.text.w);
+        out_buf->appendf("Advanced=%d\n", g_theme_settings.advanced ? 1 : 0);
+        for (size_t i = 0; i < kThemeColorSlotCount; ++i) {
+            const ImVec4& color = g_theme_settings.colors[i];
+            out_buf->appendf("%s=%.3f,%.3f,%.3f,%.3f\n",
+                kThemeColorSlots[i].key, color.x, color.y, color.z, color.w);
+        }
+        out_buf->append("\n");
+    }
+
+    void register_theme_settings_handler() {
+        ImGuiContext* ctx = ImGui::GetCurrentContext();
+        if (ctx == nullptr) {
+            return;
+        }
+
+        const ImGuiID type_hash = ImHashStr("VibeStationTheme");
+        for (const ImGuiSettingsHandler& handler : ctx->SettingsHandlers) {
+            if (handler.TypeHash == type_hash) {
+                return;
+            }
+        }
+
+        ImGuiSettingsHandler handler{};
+        handler.TypeName = "VibeStationTheme";
+        handler.TypeHash = type_hash;
+        handler.ReadOpenFn = theme_settings_read_open;
+        handler.ReadLineFn = theme_settings_read_line;
+        handler.ApplyAllFn = theme_settings_apply_all;
+        handler.WriteAllFn = theme_settings_write_all;
+        ImGui::AddSettingsHandler(&handler);
+    }
 
     std::string sanitize_memory_card_stem(const std::string& text) {
         std::string out;
@@ -763,43 +1040,18 @@ bool App::init() {
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
     ImGuiIO& io = ImGui::GetIO();
-    (void)io; // Reserved for future config flags
+    io.IniFilename = "imgui.ini";
 
     // Style â€” Dark with custom colors
     ImGui::StyleColorsDark();
-    ImGuiStyle& style = ImGui::GetStyle();
-    style.WindowRounding = 6.0f;
-    style.FrameRounding = 4.0f;
-    style.GrabRounding = 4.0f;
-    style.TabRounding = 4.0f;
-    style.WindowBorderSize = 1.0f;
-    style.FrameBorderSize = 0.0f;
-    style.ScrollbarRounding = 6.0f;
-    style.WindowPadding = ImVec2(10, 10);
+    ensure_theme_settings_initialized();
+    apply_theme_style(ImGui::GetStyle());
+    register_theme_settings_handler();
+    if (io.IniFilename != nullptr && io.IniFilename[0] != '\0') {
+        ImGui::LoadIniSettingsFromDisk(io.IniFilename);
+    }
 
     // Custom color palette â€” deep purple/blue
-    auto& colors = style.Colors;
-    colors[ImGuiCol_WindowBg] = ImVec4(0.08f, 0.06f, 0.12f, 0.95f);
-    colors[ImGuiCol_TitleBg] = ImVec4(0.10f, 0.08f, 0.18f, 1.00f);
-    colors[ImGuiCol_TitleBgActive] = ImVec4(0.16f, 0.10f, 0.30f, 1.00f);
-    colors[ImGuiCol_MenuBarBg] = ImVec4(0.10f, 0.08f, 0.15f, 1.00f);
-    colors[ImGuiCol_Tab] = ImVec4(0.14f, 0.10f, 0.25f, 1.00f);
-    colors[ImGuiCol_TabHovered] = ImVec4(0.30f, 0.20f, 0.55f, 1.00f);
-    colors[ImGuiCol_TabActive] = ImVec4(0.24f, 0.15f, 0.45f, 1.00f);
-    colors[ImGuiCol_Header] = ImVec4(0.20f, 0.14f, 0.36f, 1.00f);
-    colors[ImGuiCol_HeaderHovered] = ImVec4(0.30f, 0.20f, 0.50f, 1.00f);
-    colors[ImGuiCol_HeaderActive] = ImVec4(0.35f, 0.25f, 0.60f, 1.00f);
-    colors[ImGuiCol_Button] = ImVec4(0.20f, 0.14f, 0.36f, 1.00f);
-    colors[ImGuiCol_ButtonHovered] = ImVec4(0.34f, 0.22f, 0.58f, 1.00f);
-    colors[ImGuiCol_ButtonActive] = ImVec4(0.40f, 0.28f, 0.65f, 1.00f);
-    colors[ImGuiCol_FrameBg] = ImVec4(0.12f, 0.09f, 0.20f, 1.00f);
-    colors[ImGuiCol_FrameBgHovered] = ImVec4(0.18f, 0.12f, 0.30f, 1.00f);
-    colors[ImGuiCol_FrameBgActive] = ImVec4(0.24f, 0.16f, 0.40f, 1.00f);
-    colors[ImGuiCol_CheckMark] = ImVec4(0.60f, 0.40f, 1.00f, 1.00f);
-    colors[ImGuiCol_SliderGrab] = ImVec4(0.50f, 0.35f, 0.85f, 1.00f);
-    colors[ImGuiCol_SliderGrabActive] = ImVec4(0.60f, 0.40f, 1.00f, 1.00f);
-    colors[ImGuiCol_Separator] = ImVec4(0.20f, 0.15f, 0.35f, 1.00f);
-    colors[ImGuiCol_Text] = ImVec4(0.90f, 0.88f, 0.95f, 1.00f);
     printf("[App::init] ImGui styled\n");
     fflush(stdout);
 
@@ -947,7 +1199,8 @@ void App::run() {
         int w, h;
         SDL_GetWindowSize(window_, &w, &h);
         glViewport(0, 0, w, h);
-        glClearColor(0.05f, 0.03f, 0.08f, 1.0f);
+        const ImVec4& clear_color = ImGui::GetStyle().Colors[ImGuiCol_WindowBg];
+        glClearColor(clear_color.x, clear_color.y, clear_color.z, 1.0f);
         glClear(GL_COLOR_BUFFER_BIT);
 
         const auto render_start = std::chrono::high_resolution_clock::now();
@@ -2104,6 +2357,86 @@ void App::panel_settings() {
                 ImGui::TextColored(
                     ImVec4(0.8f, 0.5f, 0.3f, 1.0f),
                     "When enabled, unknown SPECIAL funct values write 0 to rd instead of raising Reserved Instruction.");
+
+                ImGui::EndTabItem();
+            }
+            if (ImGui::BeginTabItem("Customize")) {
+                ImGui::Text("Theme Colors");
+                ImGui::TextDisabled("Quick controls update multiple parts of the UI at once and are stored in imgui.ini.");
+                ImGui::Separator();
+
+                bool theme_changed = false;
+
+                ImVec4 background = g_theme_settings.background;
+                if (ImGui::ColorEdit4("Background", &background.x,
+                    ImGuiColorEditFlags_DisplayRGB | ImGuiColorEditFlags_AlphaBar)) {
+                    g_theme_settings.background = background;
+                    theme_changed = true;
+                }
+
+                ImVec4 surface = g_theme_settings.surface;
+                if (ImGui::ColorEdit4("Surface", &surface.x,
+                    ImGuiColorEditFlags_DisplayRGB | ImGuiColorEditFlags_AlphaBar)) {
+                    g_theme_settings.surface = surface;
+                    theme_changed = true;
+                }
+
+                ImVec4 accent = g_theme_settings.accent;
+                if (ImGui::ColorEdit4("Accent", &accent.x,
+                    ImGuiColorEditFlags_DisplayRGB | ImGuiColorEditFlags_AlphaBar)) {
+                    g_theme_settings.accent = accent;
+                    theme_changed = true;
+                }
+
+                ImVec4 text = g_theme_settings.text;
+                if (ImGui::ColorEdit4("Text", &text.x,
+                    ImGuiColorEditFlags_DisplayRGB | ImGuiColorEditFlags_AlphaBar)) {
+                    g_theme_settings.text = text;
+                    theme_changed = true;
+                }
+
+                bool advanced = g_theme_settings.advanced;
+                if (ImGui::Checkbox("Advanced", &advanced)) {
+                    g_theme_settings.advanced = advanced;
+                    theme_changed = true;
+                }
+
+                if (theme_changed) {
+                    rebuild_theme_colors_from_basics(g_theme_settings);
+                    apply_theme_style(ImGui::GetStyle());
+                    mark_theme_settings_dirty();
+                }
+
+                if (g_theme_settings.advanced) {
+                    ImGui::Separator();
+                    ImGui::TextDisabled("Advanced per-element overrides.");
+                    bool advanced_theme_changed = false;
+                    for (size_t i = 0; i < kThemeColorSlotCount; ++i) {
+                        ImVec4 color = g_theme_settings.colors[i];
+                        if (ImGui::ColorEdit4(kThemeColorSlots[i].label, &color.x,
+                            ImGuiColorEditFlags_DisplayRGB | ImGuiColorEditFlags_AlphaBar)) {
+                            g_theme_settings.colors[i] = color;
+                            advanced_theme_changed = true;
+                        }
+                    }
+                    if (advanced_theme_changed) {
+                        apply_theme_style(ImGui::GetStyle());
+                        mark_theme_settings_dirty();
+                    }
+                }
+
+                if (ImGui::Button("Reset Theme Colors")) {
+                    reset_theme_settings();
+                    apply_theme_style(ImGui::GetStyle());
+                    mark_theme_settings_dirty();
+                }
+                ImGui::SameLine();
+                if (ImGui::Button("Save Theme Now")) {
+                    ImGuiIO& io = ImGui::GetIO();
+                    if (io.IniFilename != nullptr && io.IniFilename[0] != '\0') {
+                        ImGui::SaveIniSettingsToDisk(io.IniFilename);
+                    }
+                }
 
                 ImGui::EndTabItem();
             }
@@ -5339,6 +5672,12 @@ void App::try_autoload_bios_from_config() {
 }
 void App::shutdown() {
     save_persistent_config();
+    if (ImGui::GetCurrentContext() != nullptr) {
+        ImGuiIO& io = ImGui::GetIO();
+        if (io.IniFilename != nullptr && io.IniFilename[0] != '\0') {
+            ImGui::SaveIniSettingsToDisk(io.IniFilename);
+        }
+    }
     emu_runner_.stop();
     if (renderer_) {
         renderer_->shutdown();
