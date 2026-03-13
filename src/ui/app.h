@@ -73,6 +73,9 @@ private:
 	u32 frame_count_ = 0;
 	u32 last_fps_time_ = 0;
 	u32 last_vram_update_ms_ = 0;
+	u32 last_emulation_speed_sample_ms_ = 0;
+	u64 last_emulation_speed_sample_frame_ = 0;
+	double measured_emulation_speed_multiplier_ = 0.0;
 	double present_ms_ = 0.0;
 	double render_ms_ = 0.0;
 	double swap_ms_ = 0.0;
@@ -84,6 +87,7 @@ private:
 	EmuRunner::RuntimeSnapshot runtime_snapshot_{};
 	std::vector<u32> latest_frame_rgba_{};
 	std::vector<u32> turbo_frame_rgba_{};
+	std::vector<u32> scaled_frame_rgba_{};
 	int latest_frame_width_ = 0;
 	int latest_frame_height_ = 0;
 	unsigned int vram_debug_texture_ = 0;

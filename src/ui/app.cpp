@@ -32,6 +32,7 @@ namespace {
     constexpr const char* kAppConfigFileName = "vibestation_config.ini";
     constexpr const char* kCorruptionPresetDirName = "corruption_presets";
     constexpr const char* kMemoryCardDirName = "memcards";
+    constexpr float kEmulatorScreenBottomOverscanPixels = 3.0f;
     struct GrimReaperRange {
         const char* label;
         const char* slug;
@@ -764,6 +765,25 @@ namespace {
         }
     }
 
+    void output_resolution_dimensions(OutputResolutionMode mode,
+        int& out_width, int& out_height) {
+        switch (mode) {
+        case OutputResolutionMode::R640x480:
+            out_width = 640;
+            out_height = 480;
+            break;
+        case OutputResolutionMode::R1024x768:
+            out_width = 1024;
+            out_height = 768;
+            break;
+        case OutputResolutionMode::R320x240:
+        default:
+            out_width = 320;
+            out_height = 240;
+            break;
+        }
+    }
+
     constexpr double kSpuDiagnosticSpeedMultiplier = 0.83;
     constexpr double kSpuDiagnosticReverbMixMultiplier = 4.00;
     constexpr u64 kDiscordApplicationId = 1481706201375838279ull;
@@ -1488,6 +1508,9 @@ void App::run() {
                 turbo_hold_active_ &&
                 g_output_resolution_mode != OutputResolutionMode::R320x240 &&
                 (frame.width > 320 || frame.height > 240);
+            int output_width = 320;
+            int output_height = 240;
+            output_resolution_dimensions(g_output_resolution_mode, output_width, output_height);
             if (turbo_resolution_clamp) {
                 resample_rgba_nearest(frame.rgba, frame.width, frame.height,
                     turbo_frame_rgba_, 320, 240);
@@ -1496,14 +1519,57 @@ void App::run() {
                 latest_frame_height_ = 240;
                 latest_frame_rgba_ = turbo_frame_rgba_;
             }
+            else if (frame.width != output_width || frame.height != output_height) {
+                resample_rgba_nearest(frame.rgba, frame.width, frame.height,
+                    scaled_frame_rgba_, output_width, output_height);
+                renderer_->upload_frame(scaled_frame_rgba_, output_width, output_height);
+                latest_frame_width_ = output_width;
+                latest_frame_height_ = output_height;
+                latest_frame_rgba_ = scaled_frame_rgba_;
+            }
             else {
                 renderer_->upload_frame(frame.rgba, frame.width, frame.height);
                 latest_frame_width_ = frame.width;
                 latest_frame_height_ = frame.height;
                 latest_frame_rgba_ = std::move(frame.rgba);
             }
+            emu_runner_.recycle_consumed_frame(std::move(frame));
         }
         runtime_snapshot_ = emu_runner_.runtime_snapshot();
+        u32 now_ms = SDL_GetTicks();
+        if (has_started_emulation_ && system_ != nullptr) {
+            const double target_fps = system_->target_fps();
+            const u64 completed_frames = emu_runner_.completed_frame_count();
+            if (target_fps > 0.0) {
+                if (last_emulation_speed_sample_ms_ == 0 ||
+                    completed_frames < last_emulation_speed_sample_frame_) {
+                    last_emulation_speed_sample_ms_ = now_ms;
+                    last_emulation_speed_sample_frame_ = completed_frames;
+                }
+                else {
+                    const u32 elapsed_ms = now_ms - last_emulation_speed_sample_ms_;
+                    if (elapsed_ms >= 250) {
+                        const u64 frame_delta =
+                            completed_frames - last_emulation_speed_sample_frame_;
+                        measured_emulation_speed_multiplier_ =
+                            ((static_cast<double>(frame_delta) * 1000.0) /
+                                static_cast<double>(elapsed_ms)) / target_fps;
+                        last_emulation_speed_sample_ms_ = now_ms;
+                        last_emulation_speed_sample_frame_ = completed_frames;
+                    }
+                }
+            }
+            else {
+                measured_emulation_speed_multiplier_ = 0.0;
+                last_emulation_speed_sample_ms_ = now_ms;
+                last_emulation_speed_sample_frame_ = completed_frames;
+            }
+        }
+        else {
+            measured_emulation_speed_multiplier_ = 0.0;
+            last_emulation_speed_sample_ms_ = 0;
+            last_emulation_speed_sample_frame_ = 0;
+        }
         push_performance_history_sample();
         update_discord_presence();
         if (discord_presence_) {
@@ -1511,7 +1577,6 @@ void App::run() {
         }
         emu_runner_.set_vram_debug_capture_enabled(show_vram_);
 
-        u32 now_ms = SDL_GetTicks();
         if (show_vram_ ||
             (!emu_runner_.is_running() &&
                 (now_ms - last_vram_update_ms_) >= 1000)) {
@@ -1899,7 +1964,10 @@ void App::draw_performance_overlay(const ImVec2& image_pos, const ImVec2& image_
     const double slowdown_percent = current_emulation_slowdown_percent();
     const bool unlimited_turbo_active =
         turbo_hold_active_ && config_turbo_speed_percent_ <= 0;
-    const double effective_speed_multiplier = current_effective_speed_multiplier();
+    const double effective_speed_multiplier =
+        (measured_emulation_speed_multiplier_ > 0.0)
+        ? measured_emulation_speed_multiplier_
+        : current_effective_speed_multiplier();
     char header[160];
     std::snprintf(header, sizeof(header),
         "CPU %.2f ms   GPU %.2f ms   Core %.2f ms   FPS %.1f",
@@ -2420,8 +2488,14 @@ void App::panel_emulator_screen() {
         ImVec2 cursor = ImGui::GetCursorPos();
         ImGui::SetCursorPos(ImVec2(cursor.x + x_pad, cursor.y + y_pad));
         const ImVec2 image_pos = ImGui::GetCursorScreenPos();
+        const float overscan_v =
+            (latest_frame_height_ > 0)
+            ? std::min(0.02f,
+                kEmulatorScreenBottomOverscanPixels /
+                static_cast<float>(std::max(1, latest_frame_height_)))
+            : 0.0f;
         ImGui::Image((ImTextureID)(intptr_t)renderer_->get_texture_id(), draw_size,
-            ImVec2(0, 0), ImVec2(1, 1));
+            ImVec2(0.0f, 0.0f), ImVec2(1.0f, std::max(0.0f, 1.0f - overscan_v)));
         draw_performance_overlay(image_pos, draw_size);
     }
 }
@@ -2508,6 +2582,24 @@ void App::panel_settings() {
                     resolution_index = std::max(0, std::min(2, resolution_index));
                     g_output_resolution_mode =
                         static_cast<OutputResolutionMode>(resolution_index);
+                    if (!latest_frame_rgba_.empty() && latest_frame_width_ > 0 &&
+                        latest_frame_height_ > 0) {
+                        int output_width = 320;
+                        int output_height = 240;
+                        output_resolution_dimensions(g_output_resolution_mode,
+                            output_width, output_height);
+                        if (latest_frame_width_ != output_width ||
+                            latest_frame_height_ != output_height) {
+                            resample_rgba_nearest(latest_frame_rgba_, latest_frame_width_,
+                                latest_frame_height_, scaled_frame_rgba_,
+                                output_width, output_height);
+                            renderer_->upload_frame(scaled_frame_rgba_, output_width,
+                                output_height);
+                            latest_frame_rgba_ = scaled_frame_rgba_;
+                            latest_frame_width_ = output_width;
+                            latest_frame_height_ = output_height;
+                        }
+                    }
                 }
                 ImGui::Text("Internal Upscaling: 1x (native)");
                 ImGui::EndTabItem();
@@ -2570,7 +2662,7 @@ void App::panel_settings() {
                 }
                 if (config_turbo_speed_percent_ <= 0) {
                     ImGui::TextDisabled(
-                        "Unlimited turbo removes frame pacing and skips turbo audio while held.");
+                        "Unlimited turbo removes frame pacing, skips turbo audio, and drops most display frames while held.");
                 }
                 int slowdown_speed_percent = config_slowdown_speed_percent_;
                 if (ImGui::SliderInt("Slowdown Speed (Hold Right Shift)",

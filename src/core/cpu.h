@@ -82,6 +82,7 @@ private:
   void write_cop0_reg(u32 index, u32 value);
   void raise_cop_unusable(u32 cop_index);
   u32 instruction_cycles(u32 instruction) const;
+  static u32 gte_command_cycles(u32 instruction);
 
   // Memory access (through system bus)
   u32 fetch32(u32 addr);

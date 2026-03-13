@@ -483,6 +483,35 @@ void Cpu::schedule_load(u32 index, u32 value) {
   next_load_ = {index, value};
 }
 
+u32 Cpu::gte_command_cycles(u32 instruction) {
+  switch (instruction & 0x3Fu) {
+  case 0x01: return 15; // RTPS
+  case 0x06: return 8;  // NCLIP
+  case 0x0C: return 6;  // OP
+  case 0x10: return 8;  // DPCS
+  case 0x11: return 8;  // INTPL
+  case 0x12: return 8;  // MVMVA
+  case 0x13: return 19; // NCDS
+  case 0x14: return 13; // CDP
+  case 0x16: return 44; // NCDT
+  case 0x1B: return 17; // NCCS
+  case 0x1C: return 11; // CC
+  case 0x1E: return 14; // NCS
+  case 0x20: return 30; // NCT
+  case 0x28: return 5;  // SQR
+  case 0x29: return 8;  // DCPL
+  case 0x2A: return 17; // DPCT
+  case 0x2D: return 5;  // AVSZ3
+  case 0x2E: return 6;  // AVSZ4
+  case 0x30: return 23; // RTPT
+  case 0x3D: return 5;  // GPF
+  case 0x3E: return 5;  // GPL
+  case 0x3F: return 39; // NCCT
+  default:
+    return 2;
+  }
+}
+
 void Cpu::begin_branch(bool taken, u32 target) {
   pending_delay_slot_ = true;
   pending_branch_taken_ = taken;
@@ -1528,8 +1557,12 @@ u32 Cpu::instruction_cycles(u32 instruction) const {
     return pending_branch_taken_ ? 2 : 1;
   case 0x10: // COP0
   case 0x11: // COP1
-  case 0x12: // COP2 / GTE
   case 0x13: // COP3
+    return 2;
+  case 0x12: // COP2 / GTE
+    if (rs(instruction) & 0x10u) {
+      return gte_command_cycles(instruction);
+    }
     return 2;
   case 0x20: // LB
   case 0x21: // LH

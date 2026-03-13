@@ -55,7 +55,11 @@ public:
                                 const std::string &cue_path);
   void request_memory_card_paths(const std::array<std::string, 2> &slot_paths);
   bool consume_latest_frame(FrameSnapshot &out_frame);
+  void recycle_consumed_frame(FrameSnapshot &&frame);
   bool consume_latest_vram_snapshot(std::vector<u16> &out_vram);
+  u64 completed_frame_count() const {
+    return completed_frame_count_.load(std::memory_order_acquire);
+  }
   RuntimeSnapshot runtime_snapshot() const;
 
 private:
@@ -79,6 +83,7 @@ private:
   std::atomic<bool> frame_active_{false};
   std::atomic<double> speed_{1.0};
   std::atomic<u64> input_mailbox_{0};
+  std::atomic<u64> completed_frame_count_{0};
 
   mutable std::mutex control_mutex_;
   std::condition_variable control_cv_;
@@ -90,6 +95,8 @@ private:
   FrameSnapshot pending_frame_{};
   bool has_pending_frame_ = false;
   mutable std::atomic<u32> fast_mode_capture_counter_{0};
+  mutable std::mutex recycled_frame_mutex_;
+  FrameSnapshot recycled_frame_{};
 
   mutable std::mutex snapshot_mutex_;
   RuntimeSnapshot latest_snapshot_{};

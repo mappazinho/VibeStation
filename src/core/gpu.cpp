@@ -14,6 +14,46 @@ namespace {
         return std::max(1, std::min(candidate, max_value));
     }
 
+    void suppress_isolated_bottom_noise_row(std::vector<u32>* rgba,
+        int width, int height) {
+        if (rgba == nullptr || width <= 0 || height < 3) {
+            return;
+        }
+
+        auto count_non_black = [&](int row) {
+            const size_t row_base =
+                static_cast<size_t>(row) * static_cast<size_t>(width);
+            int count = 0;
+            for (int x = 0; x < width; ++x) {
+                const u32 pixel = (*rgba)[row_base + static_cast<size_t>(x)];
+                if ((pixel & 0x00FFFFFFu) != 0u) {
+                    ++count;
+                }
+            }
+            return count;
+            };
+
+        const int row_last = height - 1;
+        const int row_prev = height - 2;
+        const int row_prev2 = height - 3;
+        const int last_non_black = count_non_black(row_last);
+        const int prev_non_black = count_non_black(row_prev);
+        const int prev2_non_black = count_non_black(row_prev2);
+
+        // Some BIOS/menu scenes leave a sparse junk row at the very bottom while
+        // the rows above are fully black. Suppress only that isolated case.
+        if (last_non_black <= 0 || last_non_black > (width / 3) ||
+            prev_non_black > std::max(1, width / 64) ||
+            prev2_non_black > std::max(1, width / 64)) {
+            return;
+        }
+
+        const size_t row_base =
+            static_cast<size_t>(row_last) * static_cast<size_t>(width);
+        std::fill_n(rgba->begin() + static_cast<std::ptrdiff_t>(row_base),
+            width, 0xFF000000u);
+    }
+
     inline s16 sign_extend_11(u32 value) {
         return static_cast<s16>(static_cast<s16>((value & 0x7FFu) << 5) >> 5);
     }
@@ -39,6 +79,16 @@ namespace {
 
     inline float edge_float(float ax, float ay, float bx, float by, float cx, float cy) {
         return (cx - ax) * (by - ay) - (cy - ay) * (bx - ax);
+    }
+
+    inline bool is_top_left_edge(const Vertex& a, const Vertex& b) {
+        const int dy = static_cast<int>(b.y) - static_cast<int>(a.y);
+        const int dx = static_cast<int>(b.x) - static_cast<int>(a.x);
+        return (dy < 0) || (dy == 0 && dx > 0);
+    }
+
+    inline bool edge_inside_ccw(s32 w, bool top_left) {
+        return (w > 0) || (w == 0 && top_left);
     }
 
     inline int dither_bias(s16 x, s16 y) {
@@ -744,6 +794,7 @@ void Gpu::gp0_textured_tri() {
     Color c(gp0_buffer_[0]);
     clut_ = static_cast<u16>(gp0_buffer_[2] >> 16);
     texpage_ = static_cast<u16>(gp0_buffer_[4] >> 16);
+    semi_transparency_ = static_cast<u8>((texpage_ >> 5) & 0x3u);
     Vertex v[3];
     v[0] = decode_vertex_word(gp0_buffer_[1]);
     v[0].u = gp0_buffer_[2] & 0xFF;
@@ -767,6 +818,7 @@ void Gpu::gp0_textured_quad() {
     Color c(gp0_buffer_[0]);
     clut_ = static_cast<u16>(gp0_buffer_[2] >> 16);
     texpage_ = static_cast<u16>(gp0_buffer_[4] >> 16);
+    semi_transparency_ = static_cast<u8>((texpage_ >> 5) & 0x3u);
     Vertex v[4];
     for (int i = 0; i < 4; i++) {
         int base = 1 + i * 2;
@@ -806,6 +858,7 @@ void Gpu::gp0_shaded_textured_tri() {
     Vertex v[3];
     clut_ = static_cast<u16>(gp0_buffer_[2] >> 16);
     texpage_ = static_cast<u16>(gp0_buffer_[5] >> 16);
+    semi_transparency_ = static_cast<u8>((texpage_ >> 5) & 0x3u);
     for (int i = 0; i < 3; i++) {
         int base = i * 3;
         v[i].color = Color(gp0_buffer_[base]);
@@ -822,6 +875,7 @@ void Gpu::gp0_shaded_textured_quad() {
     Vertex v[4];
     clut_ = static_cast<u16>(gp0_buffer_[2] >> 16);
     texpage_ = static_cast<u16>(gp0_buffer_[5] >> 16);
+    semi_transparency_ = static_cast<u8>((texpage_ >> 5) & 0x3u);
     for (int i = 0; i < 4; i++) {
         int base = i * 3;
         v[i].color = Color(gp0_buffer_[base]);
@@ -977,6 +1031,7 @@ void Gpu::gp0_textured_rect() {
     u8 u = gp0_buffer_[2] & 0xFF;
     u8 v = (gp0_buffer_[2] >> 8) & 0xFF;
     clut_ = static_cast<u16>(gp0_buffer_[2] >> 16);
+    semi_transparency_ = static_cast<u8>((texpage_ >> 5) & 0x3u);
     u16 w, h;
     u8 opcode = gp0_command_;
     if (opcode >= 0x74 && opcode <= 0x77) {
@@ -1525,7 +1580,11 @@ DisplaySampleInfo Gpu::build_display_rgba(std::vector<u32>* rgba,
         const int min_ok = std::max(1, (mode_h * 3) / 4);
         const int max_ok = std::max(min_ok, (mode_h * 5) / 4);
         if (candidate >= min_ok && candidate <= max_ok) {
-            height = clamp_display_dimension(candidate, height, psx::VRAM_HEIGHT);
+            const int chosen_height =
+                (!display_.interlaced && candidate > mode_h && (candidate - mode_h) <= 2)
+                ? mode_h
+                : candidate;
+            height = clamp_display_dimension(chosen_height, height, psx::VRAM_HEIGHT);
         }
     }
 
@@ -1569,9 +1628,21 @@ DisplaySampleInfo Gpu::build_display_rgba(std::vector<u32>* rgba,
                 (info.x_start + display_skip_x) % static_cast<int>(psx::VRAM_WIDTH);
         }
     }
-
     const int src_width = std::max(1, display_.is_24bit ? display_vram_width : width);
     const int src_height = std::max(1, height);
+    if (display_.y2 > display_.y1) {
+        const int vertical_lines = static_cast<int>(display_.y2 - display_.y1);
+        const int vertical_skip =
+            (!display_.interlaced && vertical_lines > height &&
+                (vertical_lines - height) <= 2)
+            ? (vertical_lines - height)
+            : 0;
+        if (vertical_skip > 0) {
+            display_vram_top =
+                std::min(display_vram_top + vertical_skip,
+                    static_cast<int>(psx::VRAM_HEIGHT) - src_height);
+        }
+    }
     // Present the actual CRTC-sized frame. The UI layer already scales this
     // texture for display, so forcing a fixed software output resolution here
     // only adds an extra resample and can hide the true GPU output.
@@ -1621,6 +1692,7 @@ DisplaySampleInfo Gpu::build_display_rgba(std::vector<u32>* rgba,
                     (static_cast<u32>((b5 << 3) | (b5 >> 2)) << 16) | 0xFF000000u;
             }
         }
+        suppress_isolated_bottom_noise_row(rgba, info.width, info.height);
         return info;
     }
 
@@ -1739,6 +1811,7 @@ DisplaySampleInfo Gpu::build_display_rgba(std::vector<u32>* rgba,
         info.non_black_pixels = non_black;
         info.hash = hash;
     }
+    suppress_isolated_bottom_noise_row(rgba, info.width, info.height);
     return info;
 }
 
@@ -1773,7 +1846,13 @@ DisplayDebugInfo Gpu::debug_display_info() const {
         const int min_ok = std::max(1, (info.mode_height * 3) / 4);
         const int max_ok = std::max(min_ok, (info.mode_height * 5) / 4);
         if (candidate >= min_ok && candidate <= max_ok) {
-            info.height = clamp_display_dimension(candidate, info.height, psx::VRAM_HEIGHT);
+            const int chosen_height =
+                (!display_.interlaced && candidate > info.mode_height &&
+                    (candidate - info.mode_height) <= 2)
+                ? info.mode_height
+                : candidate;
+            info.height =
+                clamp_display_dimension(chosen_height, info.height, psx::VRAM_HEIGHT);
         }
     }
 
@@ -1810,9 +1889,21 @@ DisplayDebugInfo Gpu::debug_display_info() const {
                 (info.x_start + info.display_skip_x) % static_cast<int>(psx::VRAM_WIDTH);
         }
     }
-
     info.src_width = std::max(1, display_.is_24bit ? info.display_vram_width : info.width);
     info.src_height = std::max(1, info.height);
+    if (display_.y2 > display_.y1) {
+        const int vertical_lines = static_cast<int>(display_.y2 - display_.y1);
+        const int vertical_skip =
+            (!display_.interlaced && vertical_lines > info.height &&
+                (vertical_lines - info.height) <= 2)
+            ? (vertical_lines - info.height)
+            : 0;
+        if (vertical_skip > 0) {
+            info.display_vram_top =
+                std::min(info.display_vram_top + vertical_skip,
+                    static_cast<int>(psx::VRAM_HEIGHT) - info.src_height);
+        }
+    }
     return info;
 }
 
@@ -1952,6 +2043,12 @@ u16 Gpu::read_texel(u8 u, u8 v) const {
 
 void Gpu::draw_flat_triangle(Vertex v0, Vertex v1, Vertex v2, Color c) {
     const u16 color15 = c.to_15bit();
+    if (edge(v0, v1, v2.x, v2.y) < 0) {
+        std::swap(v1, v2);
+    }
+    const bool edge0_top_left = is_top_left_edge(v1, v2);
+    const bool edge1_top_left = is_top_left_edge(v2, v0);
+    const bool edge2_top_left = is_top_left_edge(v0, v1);
     if (!g_gpu_fast_mode) {
         s16 min_x = std::min({ v0.x, v1.x, v2.x });
         s16 max_x = std::max({ v0.x, v1.x, v2.x });
@@ -1970,8 +2067,9 @@ void Gpu::draw_flat_triangle(Vertex v0, Vertex v1, Vertex v2, Color c) {
                 const s32 w0 = edge(v1, v2, x, y);
                 const s32 w1 = edge(v2, v0, x, y);
                 const s32 w2 = edge(v0, v1, x, y);
-                if ((w0 >= 0 && w1 >= 0 && w2 >= 0) ||
-                    (w0 <= 0 && w1 <= 0 && w2 <= 0)) {
+                if (edge_inside_ccw(w0, edge0_top_left) &&
+                    edge_inside_ccw(w1, edge1_top_left) &&
+                    edge_inside_ccw(w2, edge2_top_left)) {
                     set_pixel(x, y, color15, semi_transparency_mode_);
                 }
             }
@@ -2000,15 +2098,15 @@ void Gpu::draw_flat_triangle(Vertex v0, Vertex v1, Vertex v2, Color c) {
     s32 w0_row = edge(v1, v2, min_x, min_y);
     s32 w1_row = edge(v2, v0, min_x, min_y);
     s32 w2_row = edge(v0, v1, min_x, min_y);
-    const bool positive_area = edge(v0, v1, v2.x, v2.y) > 0;
 
     for (s16 y = min_y; y <= max_y; ++y) {
         s32 w0 = w0_row;
         s32 w1 = w1_row;
         s32 w2 = w2_row;
         for (s16 x = min_x; x <= max_x; ++x) {
-            if (positive_area ? (w0 >= 0 && w1 >= 0 && w2 >= 0)
-                : (w0 <= 0 && w1 <= 0 && w2 <= 0)) {
+            if (edge_inside_ccw(w0, edge0_top_left) &&
+                edge_inside_ccw(w1, edge1_top_left) &&
+                edge_inside_ccw(w2, edge2_top_left)) {
                 if (opaque_fast_path) {
                     write_pixel_opaque_clipped(x, y, color15);
                 }
@@ -2027,6 +2125,17 @@ void Gpu::draw_flat_triangle(Vertex v0, Vertex v1, Vertex v2, Color c) {
 }
 
 void Gpu::draw_shaded_triangle(Vertex v0, Vertex v1, Vertex v2) {
+    s32 area = edge(v0, v1, v2.x, v2.y);
+    if (area == 0) {
+        return;
+    }
+    if (area < 0) {
+        std::swap(v1, v2);
+        area = -area;
+    }
+    const bool edge0_top_left = is_top_left_edge(v1, v2);
+    const bool edge1_top_left = is_top_left_edge(v2, v0);
+    const bool edge2_top_left = is_top_left_edge(v0, v1);
     if (!g_gpu_fast_mode) {
         s16 min_x = std::min({ v0.x, v1.x, v2.x });
         s16 max_x = std::max({ v0.x, v1.x, v2.x });
@@ -2040,18 +2149,14 @@ void Gpu::draw_shaded_triangle(Vertex v0, Vertex v1, Vertex v2) {
             return;
         }
 
-        const s32 area = edge(v0, v1, v2.x, v2.y);
-        if (area == 0) {
-            return;
-        }
-
         for (s16 y = min_y; y <= max_y; ++y) {
             for (s16 x = min_x; x <= max_x; ++x) {
                 const s32 w0 = edge(v1, v2, x, y);
                 const s32 w1 = edge(v2, v0, x, y);
                 const s32 w2 = edge(v0, v1, x, y);
-                if ((w0 >= 0 && w1 >= 0 && w2 >= 0) ||
-                    (w0 <= 0 && w1 <= 0 && w2 <= 0)) {
+                if (edge_inside_ccw(w0, edge0_top_left) &&
+                    edge_inside_ccw(w1, edge1_top_left) &&
+                    edge_inside_ccw(w2, edge2_top_left)) {
                     const s32 r_mix =
                         (w0 * v0.color.r + w1 * v1.color.r + w2 * v2.color.r) / area;
                     const s32 g_mix =
@@ -2085,10 +2190,6 @@ void Gpu::draw_shaded_triangle(Vertex v0, Vertex v1, Vertex v2) {
     if (max_x - min_x > 1023 || max_y - min_y > 511)
         return;
 
-    s32 area = edge(v0, v1, v2.x, v2.y);
-    if (area == 0)
-        return;
-
     const s32 step_w0_x = -(v2.y - v1.y);
     const s32 step_w0_y = (v2.x - v1.x);
     const s32 step_w1_x = -(v0.y - v2.y);
@@ -2099,15 +2200,15 @@ void Gpu::draw_shaded_triangle(Vertex v0, Vertex v1, Vertex v2) {
     s32 w0_row = edge(v1, v2, min_x, min_y);
     s32 w1_row = edge(v2, v0, min_x, min_y);
     s32 w2_row = edge(v0, v1, min_x, min_y);
-    const bool positive_area = area > 0;
 
     for (s16 y = min_y; y <= max_y; ++y) {
         s32 w0 = w0_row;
         s32 w1 = w1_row;
         s32 w2 = w2_row;
         for (s16 x = min_x; x <= max_x; ++x) {
-            if (positive_area ? (w0 >= 0 && w1 >= 0 && w2 >= 0)
-                : (w0 <= 0 && w1 <= 0 && w2 <= 0)) {
+            if (edge_inside_ccw(w0, edge0_top_left) &&
+                edge_inside_ccw(w1, edge1_top_left) &&
+                edge_inside_ccw(w2, edge2_top_left)) {
                 const s32 r_mix =
                     (w0 * v0.color.r + w1 * v1.color.r + w2 * v2.color.r) / area;
                 const s32 g_mix =
@@ -2136,6 +2237,17 @@ void Gpu::draw_shaded_triangle(Vertex v0, Vertex v1, Vertex v2) {
 }
 
 void Gpu::draw_textured_triangle(Vertex v0, Vertex v1, Vertex v2, Color /*c*/) {
+    s32 area = edge(v0, v1, v2.x, v2.y);
+    if (area == 0) {
+        return;
+    }
+    if (area < 0) {
+        std::swap(v1, v2);
+        area = -area;
+    }
+    const bool edge0_top_left = is_top_left_edge(v1, v2);
+    const bool edge1_top_left = is_top_left_edge(v2, v0);
+    const bool edge2_top_left = is_top_left_edge(v0, v1);
     if (!g_gpu_fast_mode) {
         s16 min_x = std::min({ v0.x, v1.x, v2.x });
         s16 max_x = std::max({ v0.x, v1.x, v2.x });
@@ -2149,11 +2261,6 @@ void Gpu::draw_textured_triangle(Vertex v0, Vertex v1, Vertex v2, Color /*c*/) {
             return;
         }
 
-        const s32 area = edge(v0, v1, v2.x, v2.y);
-        if (area == 0) {
-            return;
-        }
-
         const bool raw_texture = (gp0_command_ & 0x1u) != 0;
         const u8 mr = v0.color.r;
         const u8 mg = v0.color.g;
@@ -2164,8 +2271,9 @@ void Gpu::draw_textured_triangle(Vertex v0, Vertex v1, Vertex v2, Color /*c*/) {
                 const s32 w0 = edge(v1, v2, x, y);
                 const s32 w1 = edge(v2, v0, x, y);
                 const s32 w2 = edge(v0, v1, x, y);
-                if ((w0 >= 0 && w1 >= 0 && w2 >= 0) ||
-                    (w0 <= 0 && w1 <= 0 && w2 <= 0)) {
+                if (edge_inside_ccw(w0, edge0_top_left) &&
+                    edge_inside_ccw(w1, edge1_top_left) &&
+                    edge_inside_ccw(w2, edge2_top_left)) {
                     const u8 u = static_cast<u8>((w0 * v0.u + w1 * v1.u + w2 * v2.u) / area);
                     const u8 v_coord =
                         static_cast<u8>((w0 * v0.v + w1 * v1.v + w2 * v2.v) / area);
@@ -2200,10 +2308,6 @@ void Gpu::draw_textured_triangle(Vertex v0, Vertex v1, Vertex v2, Color /*c*/) {
     if (max_x - min_x > 1023 || max_y - min_y > 511)
         return;
 
-    s32 area = edge(v0, v1, v2.x, v2.y);
-    if (area == 0)
-        return;
-
     const bool raw_texture = (gp0_command_ & 0x1u) != 0;
     const u8 mr = v0.color.r;
     const u8 mg = v0.color.g;
@@ -2221,7 +2325,6 @@ void Gpu::draw_textured_triangle(Vertex v0, Vertex v1, Vertex v2, Color /*c*/) {
     s32 w0_row = edge(v1, v2, min_x, min_y);
     s32 w1_row = edge(v2, v0, min_x, min_y);
     s32 w2_row = edge(v0, v1, min_x, min_y);
-    const bool positive_area = area > 0;
     const s32 step_u_x_num =
         step_w0_x * static_cast<s32>(v0.u) + step_w1_x * static_cast<s32>(v1.u) +
         step_w2_x * static_cast<s32>(v2.u);
@@ -2250,8 +2353,9 @@ void Gpu::draw_textured_triangle(Vertex v0, Vertex v1, Vertex v2, Color /*c*/) {
         const float du_dx = static_cast<float>(step_u_x_num) * inv_area;
         const float dv_dx = static_cast<float>(step_v_x_num) * inv_area;
         for (s16 x = min_x; x <= max_x; ++x) {
-            if (positive_area ? (w0 >= 0 && w1 >= 0 && w2 >= 0)
-                : (w0 <= 0 && w1 <= 0 && w2 <= 0)) {
+            if (edge_inside_ccw(w0, edge0_top_left) &&
+                edge_inside_ccw(w1, edge1_top_left) &&
+                edge_inside_ccw(w2, edge2_top_left)) {
                 const u8 u =
                     static_cast<u8>(static_cast<s32>(u_value) & 0xFF);
                 const u8 v_coord =
@@ -2291,6 +2395,17 @@ void Gpu::draw_textured_triangle(Vertex v0, Vertex v1, Vertex v2, Color /*c*/) {
 }
 
 void Gpu::draw_shaded_textured_triangle(Vertex v0, Vertex v1, Vertex v2) {
+    s32 area = edge(v0, v1, v2.x, v2.y);
+    if (area == 0) {
+        return;
+    }
+    if (area < 0) {
+        std::swap(v1, v2);
+        area = -area;
+    }
+    const bool edge0_top_left = is_top_left_edge(v1, v2);
+    const bool edge1_top_left = is_top_left_edge(v2, v0);
+    const bool edge2_top_left = is_top_left_edge(v0, v1);
     if (!g_gpu_fast_mode) {
         s16 min_x = std::min({ v0.x, v1.x, v2.x });
         s16 max_x = std::max({ v0.x, v1.x, v2.x });
@@ -2304,19 +2419,15 @@ void Gpu::draw_shaded_textured_triangle(Vertex v0, Vertex v1, Vertex v2) {
             return;
         }
 
-        const s32 area = edge(v0, v1, v2.x, v2.y);
-        if (area == 0) {
-            return;
-        }
-
         const bool raw_texture = (gp0_command_ & 0x1u) != 0;
         for (s16 y = min_y; y <= max_y; ++y) {
             for (s16 x = min_x; x <= max_x; ++x) {
                 const s32 w0 = edge(v1, v2, x, y);
                 const s32 w1 = edge(v2, v0, x, y);
                 const s32 w2 = edge(v0, v1, x, y);
-                if (!((w0 >= 0 && w1 >= 0 && w2 >= 0) ||
-                    (w0 <= 0 && w1 <= 0 && w2 <= 0))) {
+                if (!(edge_inside_ccw(w0, edge0_top_left) &&
+                    edge_inside_ccw(w1, edge1_top_left) &&
+                    edge_inside_ccw(w2, edge2_top_left))) {
                     continue;
                 }
 
@@ -2374,10 +2485,6 @@ void Gpu::draw_shaded_textured_triangle(Vertex v0, Vertex v1, Vertex v2) {
     if (max_x - min_x > 1023 || max_y - min_y > 511)
         return;
 
-    const s32 area = edge(v0, v1, v2.x, v2.y);
-    if (area == 0)
-        return;
-
     const bool raw_texture = (gp0_command_ & 0x1u) != 0;
     const bool opaque_fast_path = !semi_transparency_mode_;
     const float inv_area = 1.0f / static_cast<float>(area);
@@ -2392,7 +2499,6 @@ void Gpu::draw_shaded_textured_triangle(Vertex v0, Vertex v1, Vertex v2) {
     s32 w0_row = edge(v1, v2, min_x, min_y);
     s32 w1_row = edge(v2, v0, min_x, min_y);
     s32 w2_row = edge(v0, v1, min_x, min_y);
-    const bool positive_area = area > 0;
     const s32 step_u_x_num =
         step_w0_x * static_cast<s32>(v0.u) + step_w1_x * static_cast<s32>(v1.u) +
         step_w2_x * static_cast<s32>(v2.u);
@@ -2460,8 +2566,9 @@ void Gpu::draw_shaded_textured_triangle(Vertex v0, Vertex v1, Vertex v2) {
         const float dg_dx = static_cast<float>(step_g_x_num) * inv_area;
         const float db_dx = static_cast<float>(step_b_x_num) * inv_area;
         for (s16 x = min_x; x <= max_x; ++x) {
-            if (positive_area ? (w0 >= 0 && w1 >= 0 && w2 >= 0)
-                : (w0 <= 0 && w1 <= 0 && w2 <= 0)) {
+            if (edge_inside_ccw(w0, edge0_top_left) &&
+                edge_inside_ccw(w1, edge1_top_left) &&
+                edge_inside_ccw(w2, edge2_top_left)) {
                 const u8 u =
                     static_cast<u8>(static_cast<s32>(u_value) & 0xFF);
                 const u8 v_coord =
