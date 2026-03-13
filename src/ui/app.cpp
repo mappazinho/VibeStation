@@ -2016,6 +2016,8 @@ void App::render_ui() {
         panel_vram();
     if (show_sound_status_)
         panel_sound_status();
+    if (show_bindings_config_)
+        panel_bindings_config();
     if (show_corruption_presets_)
         panel_corruption_presets();
 }
@@ -2077,6 +2079,8 @@ void App::menu_bar() {
             ImGui::EndMenu();
         }
         if (ImGui::BeginMenu("Emulation")) {
+            const char* bios_menu_label =
+                has_started_emulation_ ? "Resume" : "Start BIOS";
             if (ImGui::MenuItem("Boot Disc", "Ctrl+F5", false,
                 bios_loaded && !emu_running &&
                 (disc_loaded || !game_bin_path_.empty()))) {
@@ -2091,7 +2095,7 @@ void App::menu_bar() {
                 config_direct_disc_boot_ = !config_direct_disc_boot_;
                 save_persistent_config();
             }
-            if (ImGui::MenuItem("Start / Resume BIOS", "F5", false,
+            if (ImGui::MenuItem(bios_menu_label, "F5", false,
                 bios_loaded && !emu_running)) {
                 if (has_started_emulation_) {
                     emu_runner_.set_running(true);
@@ -2427,16 +2431,6 @@ void App::panel_settings() {
     if (ImGui::Begin("Settings", &show_settings_)) {
         if (ImGui::BeginTabBar("SettingsTabs")) {
             if (ImGui::BeginTabItem("Input")) {
-                ImGui::Text("Keyboard Bindings");
-                ImGui::Separator();
-
-                const char* button_names[] = { "Cross (Z)",     "Circle (X)",
-                                              "Square (A)",    "Triangle (S)",
-                                              "L1 (Q)",        "R1 (W)",
-                                              "L2 (E)",        "R2 (R)",
-                                              "Start (Enter)", "Select (Backspace)",
-                                              "D-Pad Up",      "D-Pad Down",
-                                              "D-Pad Left",    "D-Pad Right" };
                 ImGui::TextWrapped("Default: Arrows=D-Pad, Z/X/A/S=Face, "
                     "Q/W/E/R=Shoulders, Enter=Start, Backspace=Select");
                 ImGui::Spacing();
@@ -2445,6 +2439,11 @@ void App::panel_settings() {
                         "Press a key for %s (Esc to cancel)",
                         kKeyboardBindEntries[pending_bind_index_].label);
                 }
+                if (ImGui::Button("Configure Bindings")) {
+                    show_bindings_config_ = true;
+                }
+                ImGui::TextDisabled("Opens the keyboard binding editor in a separate window.");
+                ImGui::Spacing();
                 ImGui::Text("Input Focus: %s", emu_input_focused_ ? "Active" : "Inactive");
                 ImGui::Text("Buttons (active-low): 0x%04X", last_button_state_);
                 const auto& diag = runtime_snapshot_.boot_diag;
@@ -2454,41 +2453,6 @@ void App::panel_settings() {
                 ImGui::Text("SIO tx42/full-poll: %s / %s",
                     diag.saw_tx_cmd42 ? "Yes" : "No",
                     diag.saw_full_pad_poll ? "Yes" : "No");
-                ImGui::Spacing();
-
-                if (ImGui::Button("Reset to Defaults")) {
-                    input_->set_default_bindings();
-                    pending_bind_index_ = -1;
-                    save_persistent_config();
-                }
-
-                ImGui::Spacing();
-                for (int i = 0; i < kKeyboardBindEntryCount; ++i) {
-                    const SDL_Scancode scancode =
-                        input_->key_for_button(kKeyboardBindEntries[i].button);
-                    const char* key_name =
-                        (scancode != SDL_SCANCODE_UNKNOWN) ? SDL_GetScancodeName(scancode)
-                        : "Unbound";
-                    ImGui::Text("%s", kKeyboardBindEntries[i].label);
-                    ImGui::SameLine(140.0f);
-                    std::string assign_label =
-                        std::string((key_name && key_name[0] != '\0') ? key_name : "Unbound") +
-                        "##bind_" + kKeyboardBindEntries[i].config_key;
-                    if (ImGui::Button(assign_label.c_str(), ImVec2(120.0f, 0.0f))) {
-                        pending_bind_index_ = i;
-                    }
-                    ImGui::SameLine();
-                    std::string clear_label =
-                        std::string("Clear##") + kKeyboardBindEntries[i].config_key;
-                    if (ImGui::Button(clear_label.c_str())) {
-                        input_->clear_key_binding(kKeyboardBindEntries[i].button);
-                        if (pending_bind_index_ == i) {
-                            pending_bind_index_ = -1;
-                        }
-                        save_persistent_config();
-                    }
-                }
-
                 ImGui::Spacing();
                 ImGui::Text("Gamepad: %s", input_->gamepad_name().c_str());
                 if (input_->has_gamepad()) {
@@ -2553,13 +2517,6 @@ void App::panel_settings() {
                 ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.3f, 1.0f),
                     "XA/CDDA baseline is live; advanced modulation is still in progress.");
 
-                int desired_samples = static_cast<int>(g_spu_desired_samples);
-                if (ImGui::InputInt("Desired Samples", &desired_samples, 256, 1024)) {
-                    desired_samples = std::max(64, std::min(65535, desired_samples));
-                    g_spu_desired_samples = static_cast<u32>(desired_samples);
-                    save_persistent_config();
-                }
-                ImGui::TextDisabled("Applied on next audio device init.");
                 float output_buffer_seconds = g_spu_output_buffer_seconds;
                 if (ImGui::InputFloat("Output Buffer (seconds)",
                     &output_buffer_seconds, 0.1f, 0.5f, "%.2f")) {
@@ -2582,10 +2539,10 @@ void App::panel_settings() {
                     save_persistent_config();
                 }
 
-                ImGui::EndTabItem();
-            }
-            if (ImGui::BeginTabItem("Sound Status")) {
+                ImGui::Separator();
+                ImGui::Text("Sound Status");
                 draw_sound_status_content();
+
                 ImGui::EndTabItem();
             }
             if (ImGui::BeginTabItem("System")) {
@@ -3852,6 +3809,50 @@ void App::draw_sound_status_content() {
     }
 }
 
+void App::draw_bindings_config_content() {
+    if (pending_bind_index_ >= 0) {
+        ImGui::TextColored(ImVec4(0.95f, 0.8f, 0.3f, 1.0f),
+            "Press a key for %s (Esc to cancel)",
+            kKeyboardBindEntries[pending_bind_index_].label);
+    }
+    else {
+        ImGui::TextDisabled("Select a binding to assign a new key.");
+    }
+
+    if (ImGui::Button("Reset to Defaults")) {
+        input_->set_default_bindings();
+        pending_bind_index_ = -1;
+        save_persistent_config();
+    }
+
+    ImGui::Spacing();
+    for (int i = 0; i < kKeyboardBindEntryCount; ++i) {
+        const SDL_Scancode scancode =
+            input_->key_for_button(kKeyboardBindEntries[i].button);
+        const char* key_name =
+            (scancode != SDL_SCANCODE_UNKNOWN) ? SDL_GetScancodeName(scancode)
+            : "Unbound";
+        ImGui::Text("%s", kKeyboardBindEntries[i].label);
+        ImGui::SameLine(140.0f);
+        std::string assign_label =
+            std::string((key_name && key_name[0] != '\0') ? key_name : "Unbound") +
+            "##bind_" + kKeyboardBindEntries[i].config_key;
+        if (ImGui::Button(assign_label.c_str(), ImVec2(120.0f, 0.0f))) {
+            pending_bind_index_ = i;
+        }
+        ImGui::SameLine();
+        std::string clear_label =
+            std::string("Clear##") + kKeyboardBindEntries[i].config_key;
+        if (ImGui::Button(clear_label.c_str())) {
+            input_->clear_key_binding(kKeyboardBindEntries[i].button);
+            if (pending_bind_index_ == i) {
+                pending_bind_index_ = -1;
+            }
+            save_persistent_config();
+        }
+    }
+}
+
 void App::panel_sound_status() {
     ImGui::SetNextWindowSize(ImVec2(720, 500), ImGuiCond_FirstUseEver);
     if (ImGui::Begin("Voice Levels", &show_sound_status_)) {
@@ -3902,6 +3903,20 @@ void App::panel_sound_status() {
     }
     ImGui::End();
 }
+
+void App::panel_bindings_config() {
+    ImGui::SetNextWindowSize(ImVec2(460, 520), ImGuiCond_FirstUseEver);
+    const bool was_open = show_bindings_config_;
+    if (ImGui::Begin("Configure Bindings", &show_bindings_config_)) {
+        draw_bindings_config_content();
+    }
+    ImGui::End();
+    if (was_open && !show_bindings_config_ && pending_bind_index_ >= 0) {
+        pending_bind_index_ = -1;
+        status_message_ = "Keyboard rebinding canceled";
+    }
+}
+
 void App::panel_performance() {
     ImGui::SetNextWindowSize(ImVec2(400, 300), ImGuiCond_FirstUseEver);
     if (ImGui::Begin("Performance Profiler", &show_perf_)) {
@@ -4870,7 +4885,7 @@ void App::panel_about() {
     ImGui::SetNextWindowSize(ImVec2(400, 200), ImGuiCond_FirstUseEver);
     if (ImGui::Begin("About VibeStation", &show_about_,
         ImGuiWindowFlags_NoResize)) {
-        ImGui::TextColored(ImVec4(0.6f, 0.4f, 1.0f, 1.0f), "VibeStation v0.4.5-fix");
+        ImGui::TextColored(ImVec4(0.6f, 0.4f, 1.0f, 1.0f), "VibeStation v0.4.6a-h1");
         ImGui::Separator();
         ImGui::Text("A PlayStation 1 emulator");
         ImGui::Spacing();
@@ -5925,11 +5940,6 @@ void App::load_persistent_config() {
                 }
             }
         }
-        else if (key == "spu_desired_samples") {
-            const unsigned long parsed = std::strtoul(value.c_str(), nullptr, 10);
-            const u32 clamped = static_cast<u32>(std::max(64ul, std::min(65535ul, parsed)));
-            g_spu_desired_samples = clamped;
-        }
         else if (key == "spu_output_buffer_seconds") {
             const float parsed = std::strtof(value.c_str(), nullptr);
             const float clamped = std::max(0.05f, std::min(8.0f, parsed));
@@ -6155,7 +6165,6 @@ void App::save_persistent_config() const {
         out << entry.config_key << "="
             << static_cast<int>(input_->key_for_button(entry.button)) << "\n";
     }
-    out << "spu_desired_samples=" << static_cast<unsigned>(g_spu_desired_samples) << "\n";
     out << std::fixed << std::setprecision(3);
     out << "spu_output_buffer_seconds=" << g_spu_output_buffer_seconds << "\n";
     out << "spu_xa_buffer_seconds=" << g_spu_xa_buffer_seconds << "\n";

@@ -45,6 +45,7 @@ private:
 	bool show_sound_status_ = false;
 	bool show_grim_reaper_ = false;
 	bool show_corruption_presets_ = false;
+	bool show_bindings_config_ = false;
 	std::string bios_path_;
 	std::string rom_directory_;
 	std::string game_bin_path_;
@@ -207,7 +208,9 @@ private:
 	void panel_sound_status();
 	void panel_grim_reaper();
 	void panel_corruption_presets();
+	void panel_bindings_config();
 	void draw_sound_status_content();
+	void draw_bindings_config_content();
 	void draw_spu_diagnostic_mode_controls();
 	void update_vram_debug_texture();
 
