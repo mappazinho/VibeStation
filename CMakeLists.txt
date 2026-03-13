@@ -79,6 +79,12 @@ set(VIBESTATION_DISCORD_SDK_ROOT "" CACHE PATH
     "Path to the extracted Discord Social SDK directory")
 
 if(VIBESTATION_ENABLE_DISCORD_RPC)
+    # The SDK root can move outside the repo. Clear cached lookup results so
+    # reconfigure picks up the current root instead of reusing stale paths.
+    unset(VIBESTATION_DISCORD_INCLUDE_DIR CACHE)
+    unset(VIBESTATION_DISCORD_LIBRARY CACHE)
+    unset(VIBESTATION_DISCORD_DLL CACHE)
+
     find_path(VIBESTATION_DISCORD_INCLUDE_DIR
         NAMES discordpp.h
         PATHS
