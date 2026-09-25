@@ -100,6 +100,15 @@ bool is_mtc0(u32 instruction) {
            (instruction & 7u) == 0u;
 }
 
+bool is_cop0_ei_di(u32 instruction) {
+    if ((instruction >> 26) != 0x10u ||
+        ((instruction >> 21) & 31u) != 0x10u) {
+        return false;
+    }
+    const u32 funct = instruction & 63u;
+    return funct == 0x38u || funct == 0x39u;
+}
+
 bool is_cop1_move(u32 instruction) {
     if ((instruction >> 26) != 0x11u) return false;
     const u32 rs = (instruction >> 21) & 31u;
@@ -180,6 +189,7 @@ bool supported_noncontrol(u32 instruction) {
     if (is_load(instruction) || is_store(instruction)) return true;
     if (is_cop1_move(instruction)) return true;
     if (is_mfc0(instruction)) return true;
+    if (is_cop0_ei_di(instruction)) return true;
     if (is_mtc0(instruction)) {
         // All select-0 MTC0 writes are native precise exits. Count is formed
         // as a one-instruction block so its write precedes exactly one Count
@@ -307,7 +317,7 @@ bool writes_gpr(u32 instruction, u32 reg) {
         const u32 cop_rs = (instruction >> 21) & 31u;
         return (cop_rs == 0x00u || cop_rs == 0x02u) && rt == reg;
     }
-    if (is_mtc0(instruction)) return false;
+    if (is_mtc0(instruction) || is_cop0_ei_di(instruction)) return false;
     if (is_mfc0(instruction)) return rt == reg;
     switch (opcode) {
     case 0x09u:
@@ -409,6 +419,7 @@ void score_registers(
     if (is_mtc0(instruction)) {
         use(rt); return;
     }
+    if (is_cop0_ei_di(instruction)) return;
 
     use(rs);
     use(rt, 2u);
@@ -1404,6 +1415,38 @@ bool emit_body(
         return true;
     }
 
+    if (is_cop0_ei_di(instruction)) {
+        const bool enable = (instruction & 63u) == 0x38u;
+        const u32 status_offset = static_cast<u32>(
+            offsetof(EeCpuState, cop0) + 12u * sizeof(u32));
+        out.load32(RAX, RBX, status_offset);
+
+        // EI/DI is allowed when EDI is set, EXL/ERL is active, or KSU is
+        // kernel. Match execute_cop0() exactly, then force a precise exit so
+        // the system immediately resamples pending interrupts.
+        out.mov_rr32(RCX, RAX);
+        out.and_r32_imm32(RCX, 0x00020006u);
+        out.test_rr64(RCX, RCX);
+        const std::size_t allowed_a = out.jcc32(0x5u); // JNE
+
+        out.mov_rr32(RCX, RAX);
+        out.and_r32_imm32(RCX, 0x00000018u);
+        out.test_rr64(RCX, RCX);
+        const std::size_t allowed_b = out.jcc32(0x4u); // JE
+        const std::size_t done_jump = out.jmp32();
+
+        const std::size_t allowed = out.bytes.size();
+        out.patch(allowed_a, allowed);
+        out.patch(allowed_b, allowed);
+        if (enable) {
+            emit_or_state32(out, status_offset, 0x00010000u);
+        } else {
+            emit_and_state32(out, status_offset, ~0x00010000u);
+        }
+        out.patch(done_jump, out.bytes.size());
+        return true;
+    }
+
     if (is_mtc0(instruction)) {
         if (rd != 15u) {
             out.load_guest(RAX, rt, true);
@@ -1764,7 +1807,7 @@ EeDynarec::Block* EeDynarec::lookup_or_compile(
             break;
         }
         cs.words[cs.count++] = instruction;
-        if (is_mtc0(instruction)) {
+        if (is_mtc0(instruction) || is_cop0_ei_di(instruction)) {
             cs.ends_cop0_write = true;
             break;
         }
