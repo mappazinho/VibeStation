@@ -2493,12 +2493,23 @@ EeDynarec::Block* EeDynarec::resolve_link(
 
     const u32 requested_budget =
         compile_budget_for_limit(compile_limit);
-    if (slot != nullptr &&
+    bool linked_pages_valid =
+        slot != nullptr &&
         slot->pc == target_pc &&
         slot->page_generation == generation &&
         generation_slot == generation &&
         slot->compile_budget == requested_budget &&
-        slot->function != nullptr) {
+        slot->function != nullptr;
+    if (linked_pages_valid) {
+        for (u32 i = 0u; i < slot->source_page_count; ++i) {
+            if (page_generations[slot->source_pages[i]] !=
+                slot->source_generations[i]) {
+                linked_pages_valid = false;
+                break;
+            }
+        }
+    }
+    if (linked_pages_valid) {
         ++link_hits_;
         return slot;
     }
@@ -2535,6 +2546,17 @@ EeDynarec::RunResult EeDynarec::execute(
     (void)state;
     return result;
 #else
+    auto block_code_valid = [&](const Block& candidate) {
+        if (candidate.source_page_count == 0u) return false;
+        for (u32 i = 0u; i < candidate.source_page_count; ++i) {
+            if (page_generations[candidate.source_pages[i]] !=
+                candidate.source_generations[i]) {
+                return false;
+            }
+        }
+        return true;
+    };
+
     auto record_unsupported = [&](u32 pc) {
         bool valid = false;
         const u32 physical = ram_physical(pc, valid);
@@ -2564,9 +2586,7 @@ EeDynarec::RunResult EeDynarec::execute(
             return result;
         }
 
-        const u32 old_generation =
-            page_generations[block->code_page];
-        if (old_generation != block->page_generation) {
+        if (!block_code_valid(*block)) {
             result.reason = ExitReason::CodeInvalidated;
             ++code_invalidation_exits_;
             return result;
@@ -2587,8 +2607,7 @@ EeDynarec::RunResult EeDynarec::execute(
             retired + 1u == block->instruction_count &&
             state.pc == block->fallthrough_pc;
         if (retired < block->instruction_count && !likely_annul) {
-            if (page_generations[block->code_page] !=
-                block->page_generation) {
+            if (!block_code_valid(*block)) {
                 result.reason = ExitReason::CodeInvalidated;
                 ++code_invalidation_exits_;
             } else {
