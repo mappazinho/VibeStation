@@ -90,6 +90,8 @@ private:
     using NativeFunction =
         u32 (*)(EeCpuState*, u8*, u32*, u8*);
 
+    struct Block;
+
     struct SideExit {
         u32 retired = 0;
         u32 target_pc = 0;
