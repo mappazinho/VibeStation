@@ -4700,6 +4700,111 @@ bool test_ee_second_gen_dynarec() {
             "EE second-gen BLTZAL rs=r31 ordering diverged") && ok;
     }
 
+    // Branch-likely paths must annul the delay slot when not taken and
+    // execute it exactly once when taken.
+    {
+        const std::array<ps2::u32, 4> not_taken_code = {
+            (0x09u << 26) | (1u << 16) | 1u,
+            (0x14u << 26) | (1u << 21) | (0u << 16) | 1u, // BEQL false
+            (0x09u << 26) | (2u << 16) | 99u, // annulled
+            0x0000000Cu,
+        };
+        ps2::Ps2System exact;
+        ps2::Ps2System native;
+        for (ps2::u32 i = 0u; i < not_taken_code.size(); ++i) {
+            ok = expect(
+                exact.bus().write32(pc + i * 4u, not_taken_code[i]) &&
+                native.bus().write32(pc + i * 4u, not_taken_code[i]),
+                "EE dynarec likely-not-taken code setup failed") && ok;
+        }
+        exact.ee().reset(pc);
+        native.ee().reset(pc);
+        std::string error;
+        ok = expect(
+            exact.ee().step(error) && exact.ee().step(error),
+            "EE dynarec likely-not-taken reference failed") && ok;
+        native.ee().set_dynarec_enabled(true);
+        const auto result = native.ee().run_dynarec(
+            16u,
+            native.ram().data(),
+            native.ram().page_generation_data(),
+            native.ram().code_page_tracked_data());
+        ok = expect(
+            result.retired == 2u &&
+            native.ee().state().pc == exact.ee().state().pc &&
+            native.ee().state().next_pc == exact.ee().state().next_pc &&
+            native.ee().state().gpr[2].lo == 0u,
+            "EE second-gen BEQL annul path diverged") && ok;
+
+        const std::array<ps2::u32, 4> taken_code = {
+            (0x09u << 26) | (1u << 16) | 1u,
+            (0x14u << 26) | (1u << 21) | (1u << 16) | 1u, // BEQL true
+            (0x09u << 26) | (2u << 16) | 7u, // delay
+            0x0000000Cu,
+        };
+        ps2::Ps2System exact_taken;
+        ps2::Ps2System native_taken;
+        for (ps2::u32 i = 0u; i < taken_code.size(); ++i) {
+            ok = expect(
+                exact_taken.bus().write32(pc + i * 4u, taken_code[i]) &&
+                native_taken.bus().write32(pc + i * 4u, taken_code[i]),
+                "EE dynarec likely-taken code setup failed") && ok;
+        }
+        exact_taken.ee().reset(pc);
+        native_taken.ee().reset(pc);
+        ok = expect(
+            exact_taken.ee().step(error) &&
+            exact_taken.ee().step(error) &&
+            exact_taken.ee().step(error),
+            "EE dynarec likely-taken reference failed") && ok;
+        native_taken.ee().set_dynarec_enabled(true);
+        const auto taken_result = native_taken.ee().run_dynarec(
+            16u,
+            native_taken.ram().data(),
+            native_taken.ram().page_generation_data(),
+            native_taken.ram().code_page_tracked_data());
+        ok = expect(
+            taken_result.retired == 3u &&
+            native_taken.ee().state().pc == exact_taken.ee().state().pc &&
+            native_taken.ee().state().gpr[2].lo ==
+                exact_taken.ee().state().gpr[2].lo,
+            "EE second-gen BEQL taken delay-slot path diverged") && ok;
+
+        const std::array<ps2::u32, 3> link_likely_code = {
+            (0x01u << 26) | (31u << 21) | (0x12u << 16) | 1u, // BLTZALL
+            (0x09u << 26) | (2u << 16) | 8u,
+            0x0000000Cu,
+        };
+        ps2::Ps2System exact_link;
+        ps2::Ps2System native_link;
+        for (ps2::u32 i = 0u; i < link_likely_code.size(); ++i) {
+            ok = expect(
+                exact_link.bus().write32(pc + i * 4u, link_likely_code[i]) &&
+                native_link.bus().write32(pc + i * 4u, link_likely_code[i]),
+                "EE dynarec likely-link code setup failed") && ok;
+        }
+        exact_link.ee().reset(pc);
+        native_link.ee().reset(pc);
+        exact_link.ee().state().gpr[31].lo = 1u;
+        native_link.ee().state().gpr[31].lo = 1u;
+        ok = expect(
+            exact_link.ee().step(error),
+            "EE dynarec likely-link reference failed") && ok;
+        native_link.ee().set_dynarec_enabled(true);
+        const auto link_result = native_link.ee().run_dynarec(
+            8u,
+            native_link.ram().data(),
+            native_link.ram().page_generation_data(),
+            native_link.ram().code_page_tracked_data());
+        ok = expect(
+            link_result.retired == 1u &&
+            native_link.ee().state().pc == exact_link.ee().state().pc &&
+            native_link.ee().state().gpr[31].lo ==
+                exact_link.ee().state().gpr[31].lo &&
+            native_link.ee().state().gpr[2].lo == 0u,
+            "EE second-gen BLTZALL annul/link semantics diverged") && ok;
+    }
+
     // COP0 reads stay native; state-changing writes are precise exits.
     {
         const std::array<ps2::u32, 4> code = {
