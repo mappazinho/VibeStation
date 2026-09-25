@@ -4808,10 +4808,10 @@ bool test_ee_second_gen_dynarec() {
     // COP1 condition branches, including likely-annul variants, remain native.
     {
         const std::array<ps2::u32, 4> code = {
-            (0x11u << 26) | (0x08u << 21) | (0x03u << 16) | 1u, // BC1TL
+            (0x11u << 26) | (0x08u << 21) | (0x03u << 16) | 2u, // BC1TL -> +12
             (0x09u << 26) | (2u << 16) | 9u, // delay
-            (0x09u << 26) | (3u << 16) | 3u,
-            0x0000000Cu,
+            0x0000000Cu, // not-taken boundary
+            0x0000000Cu, // taken boundary
         };
         ps2::Ps2System exact_false;
         ps2::Ps2System native_false;
