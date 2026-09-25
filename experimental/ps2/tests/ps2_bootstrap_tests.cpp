@@ -4372,6 +4372,69 @@ bool test_ee_second_gen_dynarec() {
             "EE second-gen fallthrough link was not reused") && ok;
     }
 
+    // Event-deadline variants for one PC must coexist. A short 8:1
+    // deadline must not permanently poison the same PC with a tiny block.
+    {
+        std::array<ps2::u32, 21> code{};
+        for (ps2::u32 i = 0u; i < 20u; ++i) {
+            code[i] =
+                (0x09u << 26) | (1u << 21) | (1u << 16) | 1u;
+        }
+        code[20] = 0x0000000Cu; // SYSCALL boundary
+
+        ps2::Ps2System native;
+        for (ps2::u32 i = 0u; i < code.size(); ++i) {
+            ok = expect(
+                native.bus().write32(pc + i * 4u, code[i]),
+                "EE dynarec deadline-variant code setup failed") && ok;
+        }
+        native.ee().reset(pc);
+        native.ee().set_dynarec_enabled(true);
+
+        const auto short_result = native.ee().run_dynarec(
+            4u,
+            native.ram().data(),
+            native.ram().page_generation_data(),
+            native.ram().code_page_tracked_data());
+        const ps2::u64 compiles_after_short =
+            native.ee().dynarec().compiled_blocks();
+        ok = expect(
+            short_result.retired == 4u &&
+            native.ee().state().gpr[1].lo == 4u,
+            "EE second-gen short deadline variant diverged") && ok;
+
+        // Reset architectural state only; retain the native cache.
+        native.ee().reset(pc);
+        native.ee().set_dynarec_enabled(true);
+        const auto long_result = native.ee().run_dynarec(
+            32u,
+            native.ram().data(),
+            native.ram().page_generation_data(),
+            native.ram().code_page_tracked_data());
+        ok = expect(
+            long_result.retired == 20u &&
+            native.ee().state().gpr[1].lo == 20u &&
+            native.ee().dynarec().compiled_blocks() >
+                compiles_after_short,
+            "EE second-gen long block was poisoned by short deadline") && ok;
+
+        native.ee().reset(pc);
+        native.ee().set_dynarec_enabled(true);
+        const ps2::u64 compiles_before_reuse =
+            native.ee().dynarec().compiled_blocks();
+        const auto long_reuse = native.ee().run_dynarec(
+            32u,
+            native.ram().data(),
+            native.ram().page_generation_data(),
+            native.ram().code_page_tracked_data());
+        ok = expect(
+            long_reuse.retired == 20u &&
+            native.ee().state().gpr[1].lo == 20u &&
+            native.ee().dynarec().compiled_blocks() ==
+                compiles_before_reuse,
+            "EE second-gen long deadline variant was not reused") && ok;
+    }
+
     // A first-instruction MMIO access must guard out without retirement.
     {
         const std::array<ps2::u32, 2> code = {
