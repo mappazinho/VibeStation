@@ -7092,7 +7092,15 @@ int main() {
     ok = test_gs_signal_finish_label_and_imr() && ok;
     ok = test_gs_local_to_host_transfer() && ok;
     ok = test_vif1_reverse_dma() && ok;
-    ok = test_ee_second_gen_dynarec() && ok;
+#ifdef _WIN32
+    std::cerr << "WIN_BOOTSTRAP_PHASE=pre-second-gen OK=" << ok << '\n';
+#endif
+    const bool second_gen_ok = test_ee_second_gen_dynarec();
+#ifdef _WIN32
+    std::cerr << "WIN_BOOTSTRAP_PHASE=post-second-gen OK="
+              << second_gen_ok << '\n';
+#endif
+    ok = second_gen_ok && ok;
     ok = test_ee_native_linear_block() && ok;
     ok = test_ee_native_extended_integer_block() && ok;
     ok = test_ee_native_ram_loads() && ok;
@@ -7101,6 +7109,9 @@ int main() {
     ok = test_ee_native_fpu_and_sc_fastmem() && ok;
     ok = test_ee_native_regimm() && ok;
     ok = test_ee_native_branch_delay() && ok;
+#ifdef _WIN32
+    std::cerr << "WIN_BOOTSTRAP_PHASE=post-native-jit OK=" << ok << '\n';
+#endif
     ok = test_ee_phase_aware_idle_skip() && ok;
     ok = test_ee_quiet_fast_prefix() && ok;
     ok = test_ee_quiet_fast_ram_store_barrier() && ok;
@@ -7111,6 +7122,9 @@ int main() {
     ok = test_iop_osdsys_idle_detection() && ok;
     ok = test_iop_halt_is_nonfatal_to_ee_bootstrap() && ok;
     ok = test_fpu_accumulator() && ok;
+#ifdef _WIN32
+    std::cerr << "WIN_BOOTSTRAP_PHASE=complete OK=" << ok << '\n';
+#endif
     if (!ok) return EXIT_FAILURE;
     std::cout << "VibeStation PS2 bootstrap tests passed.\n";
     return EXIT_SUCCESS;
