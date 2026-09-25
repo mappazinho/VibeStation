@@ -4380,6 +4380,51 @@ bool test_ee_second_gen_dynarec() {
         }
     }
 
+    // Bit-exact COP1 unary operations do not depend on host floating-point
+    // denormal/NaN behavior and therefore remain inside the native block.
+    {
+        const std::array<ps2::u32, 4> code = {
+            (0x11u << 26) | (0x10u << 21) |
+                (2u << 11) | (3u << 6) | 0x05u, // ABS.S f3,f2
+            (0x11u << 26) | (0x10u << 21) |
+                (2u << 11) | (4u << 6) | 0x06u, // MOV.S f4,f2
+            (0x11u << 26) | (0x10u << 21) |
+                (2u << 11) | (5u << 6) | 0x07u, // NEG.S f5,f2
+            0x0000000Cu,
+        };
+        ps2::Ps2System exact;
+        ps2::Ps2System native;
+        for (ps2::u32 i = 0u; i < code.size(); ++i) {
+            ok = expect(
+                exact.bus().write32(pc + i * 4u, code[i]) &&
+                native.bus().write32(pc + i * 4u, code[i]),
+                "EE dynarec COP1 unary code setup failed") && ok;
+        }
+        exact.ee().reset(pc);
+        native.ee().reset(pc);
+        exact.ee().state().fpr[2] = 0xBF812345u;
+        native.ee().state().fpr[2] = 0xBF812345u;
+        std::string error;
+        for (ps2::u32 i = 0u; i < 3u; ++i) {
+            ok = expect(
+                exact.ee().step(error),
+                "EE COP1 unary reference failed") && ok;
+        }
+        native.ee().set_dynarec_enabled(true);
+        const auto result = native.ee().run_dynarec(
+            16u,
+            native.ram().data(),
+            native.ram().page_generation_data(),
+            native.ram().code_page_tracked_data());
+        ok = expect(
+            result.retired == 3u &&
+            exact.ee().state().pc == native.ee().state().pc &&
+            exact.ee().state().fpr[3] == native.ee().state().fpr[3] &&
+            exact.ee().state().fpr[4] == native.ee().state().fpr[4] &&
+            exact.ee().state().fpr[5] == native.ee().state().fpr[5],
+            "EE second-gen COP1 unary block diverged") && ok;
+    }
+
     // COP1 register/control transfers stay native around FPU-heavy code.
     {
         const std::array<ps2::u32, 7> code = {
