@@ -4380,6 +4380,74 @@ bool test_ee_second_gen_dynarec() {
         }
     }
 
+    // Extended scalar COP1 coverage keeps accumulator operations, MIN/MAX,
+    // comparisons, and CVT.S.W native while matching the interpreter state.
+    {
+        auto cop1s = [](ps2::u32 ft, ps2::u32 fs, ps2::u32 fd,
+                        ps2::u32 funct) {
+            return (0x11u << 26) | (0x10u << 21) |
+                   (ft << 16) | (fs << 11) | (fd << 6) | funct;
+        };
+        const std::array<ps2::u32, 12> code = {
+            cop1s(3u, 2u, 0u, 0x18u), // ADDA.S
+            cop1s(3u, 2u, 4u, 0x1Cu), // MADD.S
+            cop1s(3u, 2u, 0u, 0x19u), // SUBA.S
+            cop1s(3u, 2u, 5u, 0x1Du), // MSUB.S
+            cop1s(3u, 2u, 0u, 0x1Au), // MULA.S
+            cop1s(3u, 2u, 0u, 0x1Eu), // MADDA.S
+            cop1s(3u, 2u, 0u, 0x1Fu), // MSUBA.S
+            cop1s(3u, 2u, 8u, 0x28u), // MAX.S
+            cop1s(3u, 2u, 9u, 0x29u), // MIN.S
+            cop1s(3u, 2u, 0u, 0x36u), // C.LE.S
+            (0x11u << 26) | (0x14u << 21) |
+                (6u << 11) | (7u << 6) | 0x20u, // CVT.S.W f7,f6
+            0x0000000Cu,
+        };
+        ps2::Ps2System exact;
+        ps2::Ps2System native;
+        for (ps2::u32 i = 0u; i < code.size(); ++i) {
+            ok = expect(
+                exact.bus().write32(pc + i * 4u, code[i]) &&
+                native.bus().write32(pc + i * 4u, code[i]),
+                "EE dynarec extended COP1 setup failed") && ok;
+        }
+        exact.ee().reset(pc);
+        native.ee().reset(pc);
+        exact.ee().state().fpr[2] = 0x3FC00000u; // 1.5
+        exact.ee().state().fpr[3] = 0x40100000u; // 2.25
+        exact.ee().state().fpr[6] =
+            static_cast<ps2::u32>(static_cast<ps2::s32>(-1234567));
+        native.ee().state().fpr[2] = exact.ee().state().fpr[2];
+        native.ee().state().fpr[3] = exact.ee().state().fpr[3];
+        native.ee().state().fpr[6] = exact.ee().state().fpr[6];
+
+        std::string error;
+        for (ps2::u32 i = 0u; i + 1u < code.size(); ++i) {
+            ok = expect(
+                exact.ee().step(error),
+                "EE extended COP1 reference failed") && ok;
+        }
+        native.ee().set_dynarec_enabled(true);
+        const auto result = native.ee().run_dynarec(
+            32u,
+            native.ram().data(),
+            native.ram().page_generation_data(),
+            native.ram().code_page_tracked_data());
+        const auto& a = exact.ee().state();
+        const auto& b = native.ee().state();
+        ok = expect(
+            result.retired == code.size() - 1u &&
+            a.pc == b.pc &&
+            a.fpu_acc == b.fpu_acc &&
+            a.fpr[4] == b.fpr[4] &&
+            a.fpr[5] == b.fpr[5] &&
+            a.fpr[7] == b.fpr[7] &&
+            a.fpr[8] == b.fpr[8] &&
+            a.fpr[9] == b.fpr[9] &&
+            a.fcr[31] == b.fcr[31],
+            "EE second-gen extended COP1 state diverged") && ok;
+    }
+
     // COP1 ADD.S/SUB.S/MUL.S normalize inputs and results exactly like
     // EeCpu: denormals become signed zero and exponent-255 values clamp to
     // signed max-finite before arithmetic.
