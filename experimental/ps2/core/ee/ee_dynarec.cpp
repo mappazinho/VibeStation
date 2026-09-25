@@ -1,4 +1,5 @@
 #include "core/ee/ee_dynarec.h"
+#include "core/ee/ee_dynarec_ir.h"
 
 #include "core/ee/ee_cpu.h"
 #include "core/memory/ee_ram.h"
@@ -1254,6 +1255,7 @@ struct CompileState {
     u32 code_page_count = 0;
     std::array<u32, kMaxBlockInstructions> words{};
     std::array<u32, kMaxBlockInstructions> pcs{};
+    std::array<EeDynarecIrInstruction, kMaxBlockInstructions> ir{};
     u32 count = 0;
     ControlKind control = ControlKind::None;
     u32 control_index = 0;
@@ -1268,13 +1270,14 @@ bool emit_body(
     u32 index,
     std::vector<std::pair<std::size_t, u32>>& exits) {
     Emitter& out = cs.out;
-    const u32 instruction = cs.words[index];
-    const u32 opcode = instruction >> 26;
-    const u32 rs = (instruction >> 21) & 31u;
-    const u32 rt = (instruction >> 16) & 31u;
-    const u32 rd = (instruction >> 11) & 31u;
-    const u32 sa = (instruction >> 6) & 31u;
-    const s16 imm = static_cast<s16>(instruction & 0xFFFFu);
+    const EeDynarecIrInstruction& ir = cs.ir[index];
+    const u32 instruction = ir.word;
+    const u32 opcode = ir.opcode;
+    const u32 rs = ir.rs;
+    const u32 rt = ir.rt;
+    const u32 rd = ir.rd;
+    const u32 sa = ir.sa;
+    const s16 imm = ir.immediate;
 
     if (instruction == 0u) return true;
 
@@ -1979,24 +1982,12 @@ bool emit_body(
     }
 
     if (is_load(instruction)) {
-        u32 width = 0u;
-        bool sign = false;
-        u32 alignment_mask = 0u;
-        switch (opcode) {
-        case 0x1Eu: width = 16u; alignment_mask = 0xFu; break; // LQ
-        case 0x20u: width = 1u; sign = true; break;
-        case 0x24u: width = 1u; break;
-        case 0x21u: width = 2u; sign = true; break;
-        case 0x25u: width = 2u; break;
-        case 0x23u:
-        case 0x30u: width = 4u; sign = true; break;
-        case 0x27u:
-        case 0x31u: width = 4u; break; // LWU / LWC1
-        case 0x34u:
-        case 0x37u: width = 8u; break;
-        case 0x36u: width = 16u; alignment_mask = 0xFu; break; // LQC2
-        default: return false;
-        }
+        const u32 width = ir.memory_width;
+        const u32 alignment_mask = ir.alignment_mask;
+        const bool sign =
+            opcode == 0x20u || opcode == 0x21u ||
+            opcode == 0x23u || opcode == 0x30u;
+        if (width == 0u) return false;
 
         std::vector<std::size_t> fail;
         emit_fastmem_address(
@@ -2076,20 +2067,9 @@ bool emit_body(
     }
 
     if (is_store(instruction)) {
-        u32 width = 0u;
-        u32 alignment_mask = 0u;
-        switch (opcode) {
-        case 0x1Fu: width = 16u; alignment_mask = 0xFu; break; // SQ
-        case 0x28u: width = 1u; break;
-        case 0x29u: width = 2u; break;
-        case 0x2Bu:
-        case 0x38u:
-        case 0x39u: width = 4u; break; // SW / SC / SWC1
-        case 0x3Cu:
-        case 0x3Fu: width = 8u; break;
-        case 0x3Eu: width = 16u; alignment_mask = 0xFu; break; // SQC2
-        default: return false;
-        }
+        const u32 width = ir.memory_width;
+        const u32 alignment_mask = ir.alignment_mask;
+        if (width == 0u) return false;
 
         std::vector<std::size_t> fail;
         emit_fastmem_address(
@@ -2300,6 +2280,8 @@ EeDynarec::Block* EeDynarec::lookup_or_compile(
     auto append = [&](u32 guest_pc, u32 instruction) {
         cs.pcs[cs.count] = guest_pc;
         cs.words[cs.count] = instruction;
+        cs.ir[cs.count] =
+            decode_ee_dynarec_ir(guest_pc, instruction);
         ++cs.count;
     };
     auto ensure_code_page = [&](u32 physical_address) {
@@ -2342,10 +2324,12 @@ EeDynarec::Block* EeDynarec::lookup_or_compile(
             }
             const u32 delay =
                 read_word(ram_data, delay_physical);
+            const EeDynarecIrInstruction delay_ir =
+                decode_ee_dynarec_ir(delay_pc, delay);
             if (!supported_noncontrol(delay) ||
-                is_mtc0(delay) ||
-                is_load(delay) ||
-                is_store(delay)) {
+                delay_ir.has(EeIrPreciseExit) ||
+                delay_ir.has(EeIrReadsMemory) ||
+                delay_ir.has(EeIrWritesMemory)) {
                 break;
             }
 
@@ -2475,11 +2459,13 @@ EeDynarec::Block* EeDynarec::lookup_or_compile(
     if (has_control) {
         const u32 branch_index = cs.count - 2u;
         const u32 delay_index = cs.count - 1u;
-        const u32 instruction = cs.words[branch_index];
-        const u32 delay = cs.words[delay_index];
-        const u32 branch_pc = cs.pcs[branch_index];
-        const u32 rs = (instruction >> 21) & 31u;
-        const u32 rt = (instruction >> 16) & 31u;
+        const EeDynarecIrInstruction& branch_ir =
+            cs.ir[branch_index];
+        const u32 instruction = branch_ir.word;
+        const u32 delay = cs.ir[delay_index].word;
+        const u32 branch_pc = branch_ir.pc;
+        const u32 rs = branch_ir.rs;
+        const u32 rt = branch_ir.rt;
 
         bool preserved_dynamic_target = false;
         bool preserved_link_branch_source = false;
