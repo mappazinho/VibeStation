@@ -203,6 +203,14 @@ enum class ControlKind {
     Bgez,
     Bltzal,
     Bgezal,
+    Beql,
+    Bnel,
+    Blezl,
+    Bgtzl,
+    Bltzl,
+    Bgezl,
+    Bltzall,
+    Bgezall,
 };
 
 ControlKind control_kind(u32 instruction) {
@@ -214,13 +222,21 @@ ControlKind control_kind(u32 instruction) {
     case 0x05u: return ControlKind::Bne;
     case 0x06u: return ControlKind::Blez;
     case 0x07u: return ControlKind::Bgtz;
+    case 0x14u: return ControlKind::Beql;
+    case 0x15u: return ControlKind::Bnel;
+    case 0x16u: return ControlKind::Blezl;
+    case 0x17u: return ControlKind::Bgtzl;
     case 0x01u: {
         const u32 rt = (instruction >> 16) & 31u;
         switch (rt) {
         case 0x00u: return ControlKind::Bltz;
         case 0x01u: return ControlKind::Bgez;
+        case 0x02u: return ControlKind::Bltzl;
+        case 0x03u: return ControlKind::Bgezl;
         case 0x10u: return ControlKind::Bltzal;
         case 0x11u: return ControlKind::Bgezal;
+        case 0x12u: return ControlKind::Bltzall;
+        case 0x13u: return ControlKind::Bgezall;
         default: return ControlKind::None;
         }
     }
@@ -264,7 +280,8 @@ bool writes_gpr(u32 instruction, u32 reg) {
     if (opcode == 0x03u) return reg == 31u;
     if (opcode == 0x01u) {
         const u32 variant = rt;
-        return (variant == 0x10u || variant == 0x11u) &&
+        return (variant == 0x10u || variant == 0x11u ||
+                variant == 0x12u || variant == 0x13u) &&
                reg == 31u;
     }
     if (is_store(instruction)) {
@@ -347,7 +364,10 @@ void score_registers(
         if (opcode == 0x04u || opcode == 0x05u) use(rt);
         if (opcode == 0x01u) {
             const u32 variant = rt;
-            if (variant == 0x10u || variant == 0x11u) use(31u, 2u);
+            if (variant == 0x10u || variant == 0x11u ||
+                variant == 0x12u || variant == 0x13u) {
+                use(31u, 2u);
+            }
         }
         return;
     }
@@ -1702,7 +1722,9 @@ EeDynarec::Block* EeDynarec::lookup_or_compile(
             const u32 rt = (instruction >> 16) & 31u;
             if (writes_gpr(delay, rs) ||
                 ((control == ControlKind::Beq ||
-                  control == ControlKind::Bne) &&
+                  control == ControlKind::Bne ||
+                  control == ControlKind::Beql ||
+                  control == ControlKind::Bnel) &&
                  writes_gpr(delay, rt))) {
                 break;
             }
@@ -1777,6 +1799,7 @@ EeDynarec::Block* EeDynarec::lookup_or_compile(
     u32 taken_pc = 0u;
     u32 fallthrough_pc = 0u;
     bool conditional = false;
+    bool likely = false;
 
     if (has_control) {
         const u32 branch_index = cs.count - 2u;
@@ -1796,7 +1819,9 @@ EeDynarec::Block* EeDynarec::lookup_or_compile(
             preserved_dynamic_target = true;
         }
         if (cs.control == ControlKind::Bltzal ||
-            cs.control == ControlKind::Bgezal) {
+            cs.control == ControlKind::Bgezal ||
+            cs.control == ControlKind::Bltzall ||
+            cs.control == ControlKind::Bgezall) {
             // Likewise BLTZAL/BGEZAL may test r31 while also writing r31.
             cs.out.load_guest(R10, rs);
             preserved_link_branch_source = true;
@@ -1819,7 +1844,9 @@ EeDynarec::Block* EeDynarec::lookup_or_compile(
             cs.out.store_guest(rd, RAX);
         } else if (
             cs.control == ControlKind::Bltzal ||
-            cs.control == ControlKind::Bgezal) {
+            cs.control == ControlKind::Bgezal ||
+            cs.control == ControlKind::Bltzall ||
+            cs.control == ControlKind::Bgezall) {
             cs.out.mov_r64_imm(
                 RAX,
                 static_cast<u64>(
@@ -1828,10 +1855,74 @@ EeDynarec::Block* EeDynarec::lookup_or_compile(
             cs.out.store_guest(31u, RAX);
         }
 
-        if (!emit_body(cs, delay_index, exits)) return nullptr;
-
         fallthrough_pc = branch_pc + 8u;
-        switch (cs.control) {
+
+        const bool is_likely =
+            cs.control == ControlKind::Beql ||
+            cs.control == ControlKind::Bnel ||
+            cs.control == ControlKind::Blezl ||
+            cs.control == ControlKind::Bgtzl ||
+            cs.control == ControlKind::Bltzl ||
+            cs.control == ControlKind::Bgezl ||
+            cs.control == ControlKind::Bltzall ||
+            cs.control == ControlKind::Bgezall;
+
+        if (is_likely) {
+            conditional = true;
+            likely = true;
+            taken_pc = branch_target(branch_pc, instruction);
+
+            if (preserved_link_branch_source) {
+                cs.out.mov_rr64(RAX, R10);
+            } else {
+                cs.out.load_guest(RAX, rs);
+            }
+            if (cs.control == ControlKind::Beql ||
+                cs.control == ControlKind::Bnel) {
+                cs.out.load_guest(RDX, rt);
+                cs.out.cmp_rr64(RAX, RDX);
+            } else {
+                cs.out.test_rr64(RAX, RAX);
+            }
+
+            u8 take_cc = 0x4u;
+            switch (cs.control) {
+            case ControlKind::Beql: take_cc = 0x4u; break;
+            case ControlKind::Bnel: take_cc = 0x5u; break;
+            case ControlKind::Blezl: take_cc = 0xEu; break;
+            case ControlKind::Bgtzl: take_cc = 0xFu; break;
+            case ControlKind::Bltzl:
+            case ControlKind::Bltzall: take_cc = 0xCu; break;
+            case ControlKind::Bgezl:
+            case ControlKind::Bgezall: take_cc = 0xDu; break;
+            default: break;
+            }
+
+            const std::size_t take = cs.out.jcc32(take_cc);
+
+            // Not taken: retire the branch but annul its delay slot.
+            emit_commit_sequential(
+                cs.out,
+                cs.count - 1u,
+                fallthrough_pc,
+                branch_pc,
+                instruction);
+
+            const std::size_t taken_label = cs.out.bytes.size();
+            cs.out.patch(take, taken_label);
+            if (!emit_body(cs, delay_index, exits)) return nullptr;
+            cs.out.mov_r32_imm(RCX, taken_pc);
+            emit_commit_dynamic_pc(
+                cs.out,
+                cs.count,
+                RCX,
+                branch_pc + 4u,
+                delay);
+        } else {
+            if (!emit_body(cs, delay_index, exits)) return nullptr;
+        }
+
+        if (!is_likely) switch (cs.control) {
         case ControlKind::J:
         case ControlKind::Jal:
             taken_pc =
@@ -1958,6 +2049,7 @@ EeDynarec::Block* EeDynarec::lookup_or_compile(
     cached.fastmem_stores = cs.fastmem_stores;
     cached.cached_register_uses = cs.out.register_cache_uses;
     cached.conditional_branch = conditional;
+    cached.branch_likely = likely;
     cached.control_flow = has_control;
     cached.ends_with_cop0_write = cs.ends_cop0_write;
     cached.function =
@@ -2072,7 +2164,11 @@ EeDynarec::RunResult EeDynarec::execute(
         ++register_cache_flushes_;
 
         result.retired += retired;
-        if (retired < block->instruction_count) {
+        const bool likely_annul =
+            block->branch_likely &&
+            retired + 1u == block->instruction_count &&
+            state.pc == block->fallthrough_pc;
+        if (retired < block->instruction_count && !likely_annul) {
             if (page_generations[block->code_page] !=
                 block->page_generation) {
                 result.reason = ExitReason::CodeInvalidated;
