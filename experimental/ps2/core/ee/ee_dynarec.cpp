@@ -135,6 +135,17 @@ bool is_cop1_bitwise_unary(u32 instruction) {
            funct == 0x07u;   // NEG.S
 }
 
+bool is_cop1_basic_arithmetic(u32 instruction) {
+    if ((instruction >> 26) != 0x11u ||
+        ((instruction >> 21) & 31u) != 0x10u) {
+        return false;
+    }
+    const u32 funct = instruction & 63u;
+    return funct == 0x00u || // ADD.S
+           funct == 0x01u || // SUB.S
+           funct == 0x02u;   // MUL.S
+}
+
 bool supported_special(u32 instruction) {
     const u32 funct = instruction & 63u;
     const u32 rs = (instruction >> 21) & 31u;
@@ -211,7 +222,8 @@ bool supported_noncontrol(u32 instruction) {
     }
     if (is_load(instruction) || is_store(instruction)) return true;
     if (is_cop1_move(instruction) ||
-        is_cop1_bitwise_unary(instruction)) return true;
+        is_cop1_bitwise_unary(instruction) ||
+        is_cop1_basic_arithmetic(instruction)) return true;
     if (is_mfc0(instruction)) return true;
     if (is_cop0_ei_di(instruction)) return true;
     if (is_mtc0(instruction)) {
@@ -642,6 +654,10 @@ struct Emitter {
         rex(true, -1, -1, reg);
         emit(0x81u); modrm(3u, 1u, reg); emit32(value);
     }
+    void or_r32_imm32(Reg reg, u32 value) {
+        rex(false, -1, -1, reg);
+        emit(0x81u); modrm(3u, 1u, reg); emit32(value);
+    }
     void xor_r64_imm32(Reg reg, u32 value) {
         rex(true, -1, -1, reg);
         emit(0x81u); modrm(3u, 6u, reg); emit32(value);
@@ -730,6 +746,25 @@ struct Emitter {
     }
     void movzx_eax_al() {
         emit(0x0Fu); emit(0xB6u); emit(0xC0u);
+    }
+
+    void movd_xmm_r32(u8 xmm, Reg src) {
+        emit(0x66u);
+        rex(false, xmm, -1, src);
+        emit(0x0Fu); emit(0x6Eu);
+        modrm(3u, xmm, src);
+    }
+    void movd_r32_xmm(Reg dst, u8 xmm) {
+        emit(0x66u);
+        rex(false, xmm, -1, dst);
+        emit(0x0Fu); emit(0x7Eu);
+        modrm(3u, xmm, dst);
+    }
+    void scalar_ss(u8 opcode, u8 dst_xmm, u8 src_xmm) {
+        emit(0xF3u);
+        rex(false, dst_xmm, -1, src_xmm);
+        emit(0x0Fu); emit(opcode);
+        modrm(3u, dst_xmm, src_xmm);
     }
 
     std::size_t jcc32(u8 cc) {
@@ -869,6 +904,30 @@ struct Emitter {
         emit(0xC3u);
     }
 };
+
+void emit_ps2_float_normalize(
+    Emitter& out,
+    Reg value,
+    Reg scratch) {
+    out.mov_rr32(scratch, value);
+    out.and_r32_imm32(scratch, 0x7F800000u);
+
+    out.cmp_r32_imm32(scratch, 0u);
+    const std::size_t not_denormal = out.jcc32(0x5u); // JNE
+    out.and_r32_imm32(value, 0x80000000u);
+    const std::size_t done_denormal = out.jmp32();
+
+    const std::size_t nonzero_exp = out.bytes.size();
+    out.patch(not_denormal, nonzero_exp);
+    out.cmp_r32_imm32(scratch, 0x7F800000u);
+    const std::size_t normal = out.jcc32(0x5u); // JNE
+    out.and_r32_imm32(value, 0x80000000u);
+    out.or_r32_imm32(value, 0x7F7FFFFFu);
+
+    const std::size_t done = out.bytes.size();
+    out.patch(normal, done);
+    out.patch(done_denormal, done);
+}
 
 void* allocate_page() {
 #ifdef _WIN32
@@ -1542,6 +1601,41 @@ bool emit_body(
         return true;
     default:
         break;
+    }
+
+    if (is_cop1_basic_arithmetic(instruction)) {
+        const u32 ft = rt;
+        const u32 fs = rd;
+        const u32 fd = (instruction >> 6) & 31u;
+        const u32 funct = instruction & 63u;
+
+        out.load32(
+            RAX, RBX,
+            static_cast<u32>(
+                offsetof(EeCpuState, fpr) + fs * sizeof(u32)));
+        emit_ps2_float_normalize(out, RAX, RCX);
+        out.movd_xmm_r32(0u, RAX);
+
+        out.load32(
+            RAX, RBX,
+            static_cast<u32>(
+                offsetof(EeCpuState, fpr) + ft * sizeof(u32)));
+        emit_ps2_float_normalize(out, RAX, RCX);
+        out.movd_xmm_r32(1u, RAX);
+
+        out.scalar_ss(
+            funct == 0x00u ? 0x58u : // ADDSS
+            funct == 0x01u ? 0x5Cu : // SUBSS
+                             0x59u,  // MULSS
+            0u, 1u);
+        out.movd_r32_xmm(RAX, 0u);
+        emit_ps2_float_normalize(out, RAX, RCX);
+        out.store32(
+            RBX,
+            static_cast<u32>(
+                offsetof(EeCpuState, fpr) + fd * sizeof(u32)),
+            RAX);
+        return true;
     }
 
     if (is_cop1_bitwise_unary(instruction)) {
