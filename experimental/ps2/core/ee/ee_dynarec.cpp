@@ -211,6 +211,10 @@ enum class ControlKind {
     Bgezl,
     Bltzall,
     Bgezall,
+    Bc1f,
+    Bc1t,
+    Bc1fl,
+    Bc1tl,
 };
 
 ControlKind control_kind(u32 instruction) {
@@ -243,6 +247,17 @@ ControlKind control_kind(u32 instruction) {
     case 0x00u:
         if ((instruction & 63u) == 0x08u) return ControlKind::Jr;
         if ((instruction & 63u) == 0x09u) return ControlKind::Jalr;
+        return ControlKind::None;
+    case 0x11u:
+        if (((instruction >> 21) & 31u) == 0x08u) {
+            switch ((instruction >> 16) & 3u) {
+            case 0u: return ControlKind::Bc1f;
+            case 1u: return ControlKind::Bc1t;
+            case 2u: return ControlKind::Bc1fl;
+            case 3u: return ControlKind::Bc1tl;
+            default: break;
+            }
+        }
         return ControlKind::None;
     default:
         return ControlKind::None;
@@ -1720,7 +1735,12 @@ EeDynarec::Block* EeDynarec::lookup_or_compile(
 
             const u32 rs = (instruction >> 21) & 31u;
             const u32 rt = (instruction >> 16) & 31u;
-            if (writes_gpr(delay, rs) ||
+            const bool cop1_branch =
+                control == ControlKind::Bc1f ||
+                control == ControlKind::Bc1t ||
+                control == ControlKind::Bc1fl ||
+                control == ControlKind::Bc1tl;
+            if ((!cop1_branch && writes_gpr(delay, rs)) ||
                 ((control == ControlKind::Beq ||
                   control == ControlKind::Bne ||
                   control == ControlKind::Beql ||
@@ -1865,24 +1885,39 @@ EeDynarec::Block* EeDynarec::lookup_or_compile(
             cs.control == ControlKind::Bltzl ||
             cs.control == ControlKind::Bgezl ||
             cs.control == ControlKind::Bltzall ||
-            cs.control == ControlKind::Bgezall;
+            cs.control == ControlKind::Bgezall ||
+            cs.control == ControlKind::Bc1fl ||
+            cs.control == ControlKind::Bc1tl;
 
         if (is_likely) {
             conditional = true;
             likely = true;
             taken_pc = branch_target(branch_pc, instruction);
 
-            if (preserved_link_branch_source) {
-                cs.out.mov_rr64(RAX, R10);
-            } else {
-                cs.out.load_guest(RAX, rs);
-            }
-            if (cs.control == ControlKind::Beql ||
-                cs.control == ControlKind::Bnel) {
-                cs.out.load_guest(RDX, rt);
-                cs.out.cmp_rr64(RAX, RDX);
-            } else {
+            const bool cop1_likely =
+                cs.control == ControlKind::Bc1fl ||
+                cs.control == ControlKind::Bc1tl;
+            if (cop1_likely) {
+                cs.out.load32(
+                    RAX, RBX,
+                    static_cast<u32>(
+                        offsetof(EeCpuState, fcr) +
+                        31u * sizeof(u32)));
+                cs.out.and_r32_imm32(RAX, 0x00800000u);
                 cs.out.test_rr64(RAX, RAX);
+            } else {
+                if (preserved_link_branch_source) {
+                    cs.out.mov_rr64(RAX, R10);
+                } else {
+                    cs.out.load_guest(RAX, rs);
+                }
+                if (cs.control == ControlKind::Beql ||
+                    cs.control == ControlKind::Bnel) {
+                    cs.out.load_guest(RDX, rt);
+                    cs.out.cmp_rr64(RAX, RDX);
+                } else {
+                    cs.out.test_rr64(RAX, RAX);
+                }
             }
 
             u8 take_cc = 0x4u;
@@ -1895,6 +1930,8 @@ EeDynarec::Block* EeDynarec::lookup_or_compile(
             case ControlKind::Bltzall: take_cc = 0xCu; break;
             case ControlKind::Bgezl:
             case ControlKind::Bgezall: take_cc = 0xDu; break;
+            case ControlKind::Bc1fl: take_cc = 0x4u; break; // condition false
+            case ControlKind::Bc1tl: take_cc = 0x5u; break; // condition true
             default: break;
             }
 
@@ -1949,20 +1986,35 @@ EeDynarec::Block* EeDynarec::lookup_or_compile(
         case ControlKind::Bltz:
         case ControlKind::Bgez:
         case ControlKind::Bltzal:
-        case ControlKind::Bgezal: {
+        case ControlKind::Bgezal:
+        case ControlKind::Bc1f:
+        case ControlKind::Bc1t: {
             conditional = true;
             taken_pc = branch_target(branch_pc, instruction);
-            if (preserved_link_branch_source) {
-                cs.out.mov_rr64(RAX, R10);
-            } else {
-                cs.out.load_guest(RAX, rs);
-            }
-            if (cs.control == ControlKind::Beq ||
-                cs.control == ControlKind::Bne) {
-                cs.out.load_guest(RDX, rt);
-                cs.out.cmp_rr64(RAX, RDX);
-            } else {
+            const bool cop1_branch =
+                cs.control == ControlKind::Bc1f ||
+                cs.control == ControlKind::Bc1t;
+            if (cop1_branch) {
+                cs.out.load32(
+                    RAX, RBX,
+                    static_cast<u32>(
+                        offsetof(EeCpuState, fcr) +
+                        31u * sizeof(u32)));
+                cs.out.and_r32_imm32(RAX, 0x00800000u);
                 cs.out.test_rr64(RAX, RAX);
+            } else {
+                if (preserved_link_branch_source) {
+                    cs.out.mov_rr64(RAX, R10);
+                } else {
+                    cs.out.load_guest(RAX, rs);
+                }
+                if (cs.control == ControlKind::Beq ||
+                    cs.control == ControlKind::Bne) {
+                    cs.out.load_guest(RDX, rt);
+                    cs.out.cmp_rr64(RAX, RDX);
+                } else {
+                    cs.out.test_rr64(RAX, RAX);
+                }
             }
 
             u8 take_cc = 0x4u; // JE
@@ -1975,6 +2027,8 @@ EeDynarec::Block* EeDynarec::lookup_or_compile(
             case ControlKind::Bltzal: take_cc = 0xCu; break; // JL
             case ControlKind::Bgez:
             case ControlKind::Bgezal: take_cc = 0xDu; break; // JGE
+            case ControlKind::Bc1f: take_cc = 0x4u; break;
+            case ControlKind::Bc1t: take_cc = 0x5u; break;
             default: break;
             }
 
