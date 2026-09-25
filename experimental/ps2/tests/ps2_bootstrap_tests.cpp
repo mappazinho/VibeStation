@@ -4380,6 +4380,63 @@ bool test_ee_second_gen_dynarec() {
         }
     }
 
+    // COP1 ADD.S/SUB.S/MUL.S normalize inputs and results exactly like
+    // EeCpu: denormals become signed zero and exponent-255 values clamp to
+    // signed max-finite before arithmetic.
+    {
+        const std::array<ps2::u32, 4> code = {
+            (0x11u << 26) | (0x10u << 21) |
+                (3u << 16) | (2u << 11) | (4u << 6) | 0x00u, // ADD.S
+            (0x11u << 26) | (0x10u << 21) |
+                (3u << 16) | (2u << 11) | (5u << 6) | 0x01u, // SUB.S
+            (0x11u << 26) | (0x10u << 21) |
+                (3u << 16) | (2u << 11) | (6u << 6) | 0x02u, // MUL.S
+            0x0000000Cu,
+        };
+        const std::array<std::array<ps2::u32, 2>, 3> inputs = {{
+            {{0x3FC00000u, 0xC0100000u}}, // 1.5, -2.25
+            {{0x7F800000u, 0x00000001u}}, // clamp +inf, flush denormal
+            {{0xFF800000u, 0x80000001u}}, // clamp -inf, flush -denormal
+        }};
+
+        for (const auto& input : inputs) {
+            ps2::Ps2System exact;
+            ps2::Ps2System native;
+            for (ps2::u32 i = 0u; i < code.size(); ++i) {
+                ok = expect(
+                    exact.bus().write32(pc + i * 4u, code[i]) &&
+                    native.bus().write32(pc + i * 4u, code[i]),
+                    "EE dynarec COP1 arithmetic code setup failed") && ok;
+            }
+            exact.ee().reset(pc);
+            native.ee().reset(pc);
+            exact.ee().state().fpr[2] = input[0];
+            exact.ee().state().fpr[3] = input[1];
+            native.ee().state().fpr[2] = input[0];
+            native.ee().state().fpr[3] = input[1];
+
+            std::string error;
+            for (ps2::u32 i = 0u; i < 3u; ++i) {
+                ok = expect(
+                    exact.ee().step(error),
+                    "EE COP1 arithmetic reference failed") && ok;
+            }
+            native.ee().set_dynarec_enabled(true);
+            const auto result = native.ee().run_dynarec(
+                16u,
+                native.ram().data(),
+                native.ram().page_generation_data(),
+                native.ram().code_page_tracked_data());
+            ok = expect(
+                result.retired == 3u &&
+                exact.ee().state().pc == native.ee().state().pc &&
+                exact.ee().state().fpr[4] == native.ee().state().fpr[4] &&
+                exact.ee().state().fpr[5] == native.ee().state().fpr[5] &&
+                exact.ee().state().fpr[6] == native.ee().state().fpr[6],
+                "EE second-gen normalized COP1 arithmetic diverged") && ok;
+        }
+    }
+
     // Bit-exact COP1 unary operations do not depend on host floating-point
     // denormal/NaN behavior and therefore remain inside the native block.
     {
