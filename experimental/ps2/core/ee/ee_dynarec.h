@@ -89,6 +89,7 @@ private:
         u32 taken_pc = 0;
         u32 fallthrough_pc = 0;
         u32 code_page = 0;
+        u32 compile_budget = 0;
         u32 fastmem_loads = 0;
         u32 fastmem_stores = 0;
         u32 cached_register_uses = 0;
