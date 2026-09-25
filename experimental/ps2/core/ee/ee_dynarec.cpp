@@ -1825,7 +1825,7 @@ EeDynarec::RunResult EeDynarec::execute(
             }
         } else {
             next = resolve_link(
-                *block, next_pc,
+                *block, next_pc, remaining,
                 block->sequential_link,
                 block->sequential_link_generation,
                 ram_data, page_generations,
