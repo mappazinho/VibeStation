@@ -1354,6 +1354,9 @@ void EeDynarec::clear() {
     register_cache_hits_ = 0;
     register_cache_flushes_ = 0;
     cache_flushes_ = 0;
+    dispatch_calls_ = 0;
+    deadline_exits_ = 0;
+    unsupported_exits_ = 0;
 }
 
 EeDynarec::Block* EeDynarec::lookup_or_compile(
@@ -1715,6 +1718,7 @@ EeDynarec::RunResult EeDynarec::execute(
     u32* page_generations,
     u8* code_page_tracked) {
     RunResult result{};
+    ++dispatch_calls_;
     if (maximum_instructions == 0u ||
         ram_data == nullptr ||
         page_generations == nullptr ||
@@ -1739,6 +1743,7 @@ EeDynarec::RunResult EeDynarec::execute(
         if (block->instruction_count == 0u ||
             block->instruction_count > remaining) {
             result.reason = ExitReason::Deadline;
+            ++deadline_exits_;
             return result;
         }
 
@@ -1783,6 +1788,7 @@ EeDynarec::RunResult EeDynarec::execute(
         }
         if (remaining == 0u) {
             result.reason = ExitReason::Deadline;
+            ++deadline_exits_;
             return result;
         }
 
@@ -1834,12 +1840,14 @@ EeDynarec::RunResult EeDynarec::execute(
 
         if (next == nullptr) {
             result.reason = ExitReason::Unsupported;
+            ++unsupported_exits_;
             return result;
         }
         block = next;
     }
 
     result.reason = ExitReason::Unsupported;
+    ++unsupported_exits_;
     return result;
 #endif
 }
