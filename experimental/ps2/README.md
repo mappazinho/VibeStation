@@ -164,10 +164,11 @@ PPM path after the trace budget:
 vibestation_ps2_bios_trace <bios-path> 215000000 <frame.ppm>
 ```
 
-The startup scene is still dark and approximate; this is an experimental GS
-renderer, not a fully accurate PS2. The later Sony/PlayStation 2 logo sequence
-and BIOS chime have not been verified. SPU2 audio synthesis/output is not yet
-implemented.
+The startup scene is still approximate; this is an experimental GS renderer,
+not a fully accurate PS2. SPU2 synthesis, headless PCM/WAV capture, and SDL
+audio playback are implemented for the BIOS path, but timing/mixing fidelity
+remains experimental and should still be validated alongside visual output
+after performance changes.
 
 The Release UI boot path skips redundant EE-to-VU0 state copies while VIF0
 DMA is idle, and uses longer, unsynchronized host frames only until the first
@@ -234,7 +235,12 @@ The experimental build currently contains:
 - a standalone SDL/OpenGL/ImGui VibeStation-style UI;
 - PS2 System, EE Debug, IOP Debug, Scheduler, Settings, and About panels.
 
-The previous IOP-RAM handoff halt is now removed: EE accesses in the `0x1C000000` physical window and IOP accesses to their low-RAM mirrors refer to the same 2 MiB backing store. The BIOS timing calibration path now sees Timer0's external HBlank source instead of the old placeholder /16 clock. CDVD is intentionally still a protocol scaffold rather than a disc engine: register-level bootstrap commands work, while real seek/read media commands remain unimplemented. The next fidelity milestones are IOP timers/INTC/DMAC, stronger SIF synchronization, full CDVD command/media timing, SPU2-facing IOP hardware, and replacing the current instruction-granularity 8:1 startup interleave with event/cycle scheduling. Large parts of the R5900 instruction set, GS rendering, SPU2, ELF loading, and corruption support also remain incomplete.
+The previous IOP-RAM handoff halt is now removed: EE accesses in the `0x1C000000` physical window and IOP accesses to their low-RAM mirrors refer to the same 2 MiB backing store. The BIOS timing calibration path now sees Timer0's external HBlank source instead of the old placeholder /16 clock. CDVD is intentionally still a protocol scaffold rather than a disc engine: register-level bootstrap commands work, while real seek/read media commands remain unimplemented. The next fidelity milestones are stronger IOP timer/INTC/DMAC coverage,
+stronger SIF synchronization, full CDVD command/media timing, more accurate
+SPU2 mixing/timing, and further replacement of instruction-granularity
+interleave with event/cycle scheduling. Large parts of the R5900/VU/GS
+behavior, ELF loading, game execution, and corruption support also remain
+incomplete.
 
 ## UI isolation
 
