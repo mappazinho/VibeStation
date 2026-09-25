@@ -1597,6 +1597,27 @@ int main(int argc, char** argv) {
         << " EE_DYNAREC_UNSUPPORTED_EXITS=" << dynarec.unsupported_exits()
         << '\n';
 
+    auto dynarec_unsupported = dynarec.unsupported_opcodes();
+    std::cout << "EE_DYNAREC_UNSUPPORTED_TOP";
+    for (ps2::u32 rank = 0u; rank < 8u; ++rank) {
+        ps2::u32 best_opcode = 0u;
+        ps2::u64 best_count = 0u;
+        for (ps2::u32 opcode = 0u;
+             opcode < dynarec_unsupported.size();
+             ++opcode) {
+            if (dynarec_unsupported[opcode] > best_count) {
+                best_opcode = opcode;
+                best_count = dynarec_unsupported[opcode];
+            }
+        }
+        if (best_count == 0u) break;
+        std::cout
+            << " 0x" << std::hex << best_opcode
+            << std::dec << ':' << best_count;
+        dynarec_unsupported[best_opcode] = 0u;
+    }
+    std::cout << '\n';
+
     auto fallback_opcodes = system.native_fallback_opcodes();
     std::cout << "EE_NATIVE_FALLBACK_TOP";
     for (ps2::u32 rank = 0u; rank < 8u; ++rank) {
