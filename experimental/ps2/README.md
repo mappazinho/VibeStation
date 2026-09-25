@@ -88,20 +88,35 @@ comparison only.
 
 A separate second-generation x64 backend is available with
 `--ee-dynarec`. It does not extend the original JIT. It builds
-multi-instruction RAM-resident basic blocks, keeps a small hot set of guest
-GPRs (plus HI/LO when used) in host registers for the lifetime of each block,
-uses guarded main-RAM fastmem, includes ordinary RAM stores with code-page
-generation barriers, and handles select-0 COP0 reads/writes. State-changing
-COP0 writes are explicit exits so the system layer can immediately resample
-interrupt/device state.
+multi-instruction RAM-resident basic blocks (up to 64 guest instructions),
+keeps a scored hot set of guest GPRs plus HI/LO in host registers for each
+block, uses dirty-register writeback, and performs guarded main-RAM fastmem.
+Ordinary RAM stores carry code-page generation barriers, including wide
+LQ/SQ and VU/FPU transfers, so self-modifying code exits before stale native
+instructions can run.
 
-Compiled successors are linked in the dynarec cache and followed inside one
-backend dispatch. The system still owns timing: video transitions, SIF
-completion, EE timers, COP0 Compare and the exact EE/IOP 8:1 boundary define
-the maximum retirement deadline passed to the backend. Deadline-capped block
-formation prevents a native block from crossing one of those boundaries.
-In dynarec mode repeated exact IOP sub-deadlines stay inside the existing
-quiet super-dispatch; the interpreter continues using its proven normal path.
+The native integer/control subset includes ordinary and likely MIPS branches,
+REGIMM link/likely variants, J/JAL/JR/JALR, delay-slot annul semantics,
+variable and immediate 32/64-bit shifts, conditional moves, SA helpers,
+MTSAB/MTSAH, and the common scalar integer operations. COP1 register/control
+moves and BC1F/BC1T/BC1FL/BC1TL remain inside native blocks. Select-0 COP0
+reads/writes are supported; MTC0 Count is isolated to preserve its exact
+Count-retirement ordering, while state-changing MTC0 operations plus EI/DI
+are precise exits so the system immediately resamples interrupts and devices.
+
+Compiled successor blocks are cached and followed inside one dynarec dispatch,
+avoiding a return through the main PS2 run loop at every basic block. The
+system still owns timing: video transitions, SIF completion, EE timers, COP0
+Compare and the exact EE/IOP 8:1 boundary define the maximum retirement
+deadline passed to the backend. Deadline-capped block formation prevents a
+native block from crossing one of those boundaries. In dynarec mode repeated
+exact IOP sub-deadlines stay inside the dynarec-only quiet super-dispatch; the
+default interpreter continues using its proven normal path.
+
+The trace reports native coverage, block/dispatch efficiency, link hit/miss
+counts, guard/deadline/COP0 exits, fastmem activity, register-cache use, cache
+flushes, and a top unsupported-opcode histogram. These counters are intended
+to drive later ISA expansion rather than adding speculative emitters.
 
 The two native modes are mutually exclusive:
 
