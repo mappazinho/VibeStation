@@ -4540,6 +4540,18 @@ bool test_ee_second_gen_dynarec() {
         ok = expect(
             exact.ee().state().gpr[2].lo == native.ee().state().gpr[2].lo,
             "EE second-gen JALR delay slot diverged") && ok;
+        if (exact.ee().state().gpr[3].lo != native.ee().state().gpr[3].lo) {
+            std::cerr
+                << "JALR_DIAG expected_r3=" << exact.ee().state().gpr[3].lo
+                << " native_r3=" << native.ee().state().gpr[3].lo
+                << " pc=0x" << std::hex << native.ee().state().pc
+                << std::dec
+                << " retired=" << result.retired
+                << " reason=" << static_cast<ps2::u32>(result.reason)
+                << " blocks=" << native.ee().dynarec().executed_blocks()
+                << " compiled=" << native.ee().dynarec().compiled_blocks()
+                << '\n';
+        }
         ok = expect(
             exact.ee().state().gpr[3].lo == native.ee().state().gpr[3].lo,
             "EE second-gen JALR successor block diverged") && ok;
