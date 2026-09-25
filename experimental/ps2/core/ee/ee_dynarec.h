@@ -106,12 +106,14 @@ private:
 
     Block* lookup_or_compile(
         u32 pc,
+        u32 compile_limit,
         u8* ram_data,
         u32* page_generations,
         u8* code_page_tracked);
     Block* resolve_link(
         Block& source,
         u32 target_pc,
+        u32 compile_limit,
         Block*& slot,
         u32& generation_slot,
         u8* ram_data,
