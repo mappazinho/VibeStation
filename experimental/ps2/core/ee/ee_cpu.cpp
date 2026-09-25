@@ -4305,11 +4305,15 @@ bool EeCpu::step_internal(
             state_.next_pc = static_cast<u32>(gpr_u64(rs));
             next_is_delay_slot_ = true;
             break;
-        case 0x09u:
+        case 0x09u: {
+            // JALR reads its target before writing the link register. This
+            // matters for the legal rd == rs form.
+            const u32 target = static_cast<u32>(gpr_u64(rs));
             write_gpr_word(rd, pc + 8u);
-            state_.next_pc = static_cast<u32>(gpr_u64(rs));
+            state_.next_pc = target;
             next_is_delay_slot_ = true;
             break;
+        }
         case 0x0Au:
             if (gpr_u64(rt) == 0u) write_gpr64(rd, gpr_u64(rs));
             break;
