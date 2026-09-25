@@ -1471,6 +1471,7 @@ void EeDynarec::clear() {
     dispatch_calls_ = 0;
     deadline_exits_ = 0;
     unsupported_exits_ = 0;
+    unsupported_opcodes_.fill(0u);
 }
 
 EeDynarec::Block* EeDynarec::lookup_or_compile(
@@ -1860,13 +1861,25 @@ EeDynarec::RunResult EeDynarec::execute(
     (void)state;
     return result;
 #else
+    auto record_unsupported = [&](u32 pc) {
+        bool valid = false;
+        const u32 physical = ram_physical(pc, valid);
+        if (!valid || physical > kRamSize - 4u) return;
+        const u32 instruction = read_word(ram_data, physical);
+        ++unsupported_opcodes_[instruction >> 26u];
+    };
+
     Block* block = lookup_or_compile(
         state.pc,
         maximum_instructions,
         ram_data,
         page_generations,
         code_page_tracked);
-    if (block == nullptr) return result;
+    if (block == nullptr) {
+        record_unsupported(state.pc);
+        ++unsupported_exits_;
+        return result;
+    }
 
     u32 remaining = maximum_instructions;
     while (block != nullptr) {
@@ -1892,9 +1905,6 @@ EeDynarec::RunResult EeDynarec::execute(
             code_page_tracked);
         ++executed_blocks_;
         executed_instructions_ += retired;
-        fastmem_loads_ += block->fastmem_loads;
-        fastmem_stores_ += block->fastmem_stores;
-        register_cache_hits_ += block->cached_register_uses;
         ++register_cache_flushes_;
 
         result.retired += retired;
@@ -1909,6 +1919,10 @@ EeDynarec::RunResult EeDynarec::execute(
             }
             return result;
         }
+
+        fastmem_loads_ += block->fastmem_loads;
+        fastmem_stores_ += block->fastmem_stores;
+        register_cache_hits_ += block->cached_register_uses;
 
         remaining -= retired;
         if (block->ends_with_cop0_write) {
@@ -1969,6 +1983,7 @@ EeDynarec::RunResult EeDynarec::execute(
         }
 
         if (next == nullptr) {
+            record_unsupported(next_pc);
             result.reason = ExitReason::Unsupported;
             ++unsupported_exits_;
             return result;
