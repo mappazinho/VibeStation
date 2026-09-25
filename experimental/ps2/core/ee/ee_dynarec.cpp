@@ -155,27 +155,6 @@ bool supported_noncontrol(u32 instruction) {
         const u32 rt = (instruction >> 16) & 31u;
         return rt == 0x18u || rt == 0x19u; // MTSAB / MTSAH
     }
-    if (opcode == 0x01u) {
-        const u32 variant = rt;
-        if (variant == 0x18u || variant == 0x19u) {
-            out.load_guest(RAX, rs, true);
-            out.and_r32_imm32(
-                RAX, variant == 0x18u ? 0xFu : 0x7u);
-            out.xor_r64_imm32(
-                RAX,
-                static_cast<u32>(imm) &
-                    (variant == 0x18u ? 0xFu : 0x7u));
-            if (variant == 0x19u) {
-                out.shift_imm32(RAX, 4u, 1u);
-            }
-            out.store32(
-                RBX,
-                static_cast<u32>(offsetof(EeCpuState, sa)),
-                RAX);
-            return true;
-        }
-    }
-
     switch (opcode) {
     case 0x09u: // ADDIU
     case 0x0Au: // SLTI
@@ -1237,6 +1216,27 @@ bool emit_body(
         }
         default:
             return false;
+        }
+    }
+
+    if (opcode == 0x01u) {
+        const u32 variant = rt;
+        if (variant == 0x18u || variant == 0x19u) {
+            out.load_guest(RAX, rs, true);
+            out.and_r32_imm32(
+                RAX, variant == 0x18u ? 0xFu : 0x7u);
+            out.xor_r64_imm32(
+                RAX,
+                static_cast<u32>(imm) &
+                    (variant == 0x18u ? 0xFu : 0x7u));
+            if (variant == 0x19u) {
+                out.shift_imm32(RAX, 4u, 1u);
+            }
+            out.store32(
+                RBX,
+                static_cast<u32>(offsetof(EeCpuState, sa)),
+                RAX);
+            return true;
         }
     }
 
