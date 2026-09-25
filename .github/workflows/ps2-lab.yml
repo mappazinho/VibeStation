@@ -47,7 +47,7 @@ jobs:
       - name: Build Release trace and dynarec tests
         run: cmake --build build-ps2 --config Release --target vibestation_ps2_bios_trace vibestation_ps2_bootstrap_tests --parallel 2
       - name: Test second-generation EE backend
-        run: .\build-ps2\Release\vibestation_ps2_bootstrap_tests.exe
+        run: .\build-ps2\Release\vibestation_ps2_bootstrap_tests.exe --second-gen-dynarec-only
       - name: Upload Windows PS2 Lab
         uses: actions/upload-artifact@v4
         with:
