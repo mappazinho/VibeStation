@@ -4751,6 +4751,46 @@ bool test_ee_second_gen_dynarec() {
             "EE second-gen fused JAL trace diverged") && ok;
     }
 
+    // If a fused static jump lands on an unsupported instruction, the
+    // generated trace still commits the architectural jump target after its
+    // delay slot instead of falling through from the delay-slot address.
+    {
+        constexpr ps2::u32 target = pc + 0x20u;
+        ps2::Ps2System exact;
+        ps2::Ps2System native;
+        const ps2::u32 jump =
+            (0x02u << 26) | ((target >> 2u) & 0x03FFFFFFu);
+        const ps2::u32 delay =
+            (0x09u << 26) | (2u << 16) | 2u;
+        for (auto* system : {&exact, &native}) {
+            ok = expect(
+                system->bus().write32(pc, jump) &&
+                system->bus().write32(pc + 4u, delay) &&
+                system->bus().write32(target, 0x0000000Cu),
+                "EE fused unsupported-target setup failed") && ok;
+            system->ee().reset(pc);
+        }
+        std::string error;
+        ok = expect(
+            exact.ee().step(error) && exact.ee().step(error),
+            "EE fused unsupported-target reference failed") && ok;
+
+        native.ee().set_dynarec_enabled(true);
+        const auto result = native.ee().run_dynarec(
+            16u,
+            native.ram().data(),
+            native.ram().page_generation_data(),
+            native.ram().code_page_tracked_data());
+        ok = expect(
+            result.retired == 2u &&
+            result.reason == ps2::EeDynarec::ExitReason::Unsupported &&
+            native.ee().state().pc == target &&
+            native.ee().state().next_pc == target + 4u &&
+            native.ee().state().pc == exact.ee().state().pc &&
+            native.ee().state().gpr[2].lo == 2u,
+            "EE fused unsupported target committed wrong PC") && ok;
+    }
+
     // A fastmem guard after a fused jump must expose the target PC and retire
     // only the JAL plus its delay slot. This pins noncontiguous guard-state
     // reconstruction.
