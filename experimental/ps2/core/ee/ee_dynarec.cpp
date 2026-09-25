@@ -3048,6 +3048,53 @@ EeDynarec::RunResult EeDynarec::execute(
         ++register_cache_flushes_;
 
         result.retired += retired;
+
+        SideExit* fused_side_exit = nullptr;
+        if (retired < block->instruction_count) {
+            for (u32 i = 0u; i < block->side_exit_count; ++i) {
+                SideExit& candidate = block->side_exits[i];
+                if (candidate.retired == retired &&
+                    candidate.target_pc == state.pc) {
+                    fused_side_exit = &candidate;
+                    break;
+                }
+            }
+        }
+
+        if (fused_side_exit != nullptr) {
+            if (!block_code_valid(*block)) {
+                result.reason = ExitReason::CodeInvalidated;
+                ++code_invalidation_exits_;
+                return result;
+            }
+
+            ++conditional_side_exits_;
+            remaining -= retired;
+            if (remaining == 0u) {
+                result.reason = ExitReason::Deadline;
+                ++deadline_exits_;
+                return result;
+            }
+
+            Block* next = resolve_link(
+                *block,
+                fused_side_exit->target_pc,
+                remaining,
+                fused_side_exit->link,
+                fused_side_exit->link_generation,
+                ram_data,
+                page_generations,
+                code_page_tracked);
+            if (next == nullptr) {
+                record_unsupported(fused_side_exit->target_pc);
+                result.reason = ExitReason::Unsupported;
+                ++unsupported_exits_;
+                return result;
+            }
+            block = next;
+            continue;
+        }
+
         const bool likely_annul =
             block->branch_likely &&
             retired + 1u == block->instruction_count &&
