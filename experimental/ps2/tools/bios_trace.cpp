@@ -1594,6 +1594,10 @@ int main(int argc, char** argv) {
         << " EE_DYNAREC_CACHE_FLUSHES=" << dynarec.cache_flushes()
         << " EE_DYNAREC_FUSED_STATIC_JUMPS="
         << dynarec.fused_static_jumps()
+        << " EE_DYNAREC_FUSED_CONDITIONAL_BRANCHES="
+        << dynarec.fused_conditional_branches()
+        << " EE_DYNAREC_CONDITIONAL_SIDE_EXITS="
+        << dynarec.conditional_side_exits()
         << " EE_DYNAREC_DISPATCH_CALLS=" << dynarec.dispatch_calls()
         << " EE_DYNAREC_DEADLINE_EXITS=" << dynarec.deadline_exits()
         << " EE_DYNAREC_UNSUPPORTED_EXITS=" << dynarec.unsupported_exits()
