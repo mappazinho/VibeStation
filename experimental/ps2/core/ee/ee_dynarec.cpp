@@ -1443,11 +1443,6 @@ EeDynarec::Block* EeDynarec::lookup_or_compile(
                  writes_gpr(delay, rt))) {
                 break;
             }
-            if (control == ControlKind::Jalr) {
-                const u32 rd = (instruction >> 11) & 31u;
-                if (rd == rs) break;
-            }
-
             cs.words[cs.count++] = instruction;
             cs.words[cs.count++] = delay;
             cs.control = control;
@@ -1522,6 +1517,21 @@ EeDynarec::Block* EeDynarec::lookup_or_compile(
         const u32 rs = (instruction >> 21) & 31u;
         const u32 rt = (instruction >> 16) & 31u;
 
+        bool preserved_dynamic_target = false;
+        bool preserved_link_branch_source = false;
+        if (cs.control == ControlKind::Jalr) {
+            // JALR may legally use rd == rs. Preserve the target before the
+            // link write so the architectural source value wins.
+            cs.out.load_guest(RCX, rs, true);
+            preserved_dynamic_target = true;
+        }
+        if (cs.control == ControlKind::Bltzal ||
+            cs.control == ControlKind::Bgezal) {
+            // Likewise BLTZAL/BGEZAL may test r31 while also writing r31.
+            cs.out.load_guest(RCX, rs);
+            preserved_link_branch_source = true;
+        }
+
         if (cs.control == ControlKind::Jal) {
             cs.out.mov_r64_imm(
                 RAX,
@@ -1564,7 +1574,9 @@ EeDynarec::Block* EeDynarec::lookup_or_compile(
             break;
         case ControlKind::Jr:
         case ControlKind::Jalr:
-            cs.out.load_guest(RCX, rs, true);
+            if (!preserved_dynamic_target) {
+                cs.out.load_guest(RCX, rs, true);
+            }
             emit_commit_dynamic_pc(
                 cs.out, cs.count, RCX,
                 branch_pc + 4u, delay);
@@ -1579,7 +1591,11 @@ EeDynarec::Block* EeDynarec::lookup_or_compile(
         case ControlKind::Bgezal: {
             conditional = true;
             taken_pc = branch_target(branch_pc, instruction);
-            cs.out.load_guest(RAX, rs);
+            if (preserved_link_branch_source) {
+                cs.out.mov_rr64(RAX, RCX);
+            } else {
+                cs.out.load_guest(RAX, rs);
+            }
             if (cs.control == ControlKind::Beq ||
                 cs.control == ControlKind::Bne) {
                 cs.out.load_guest(RDX, rt);
