@@ -1259,6 +1259,7 @@ struct CompileState {
     u32 count = 0;
     ControlKind control = ControlKind::None;
     u32 control_index = 0;
+    u32 trace_next_pc = 0;
     u32 fused_static_jumps = 0;
     bool ends_cop0_write = false;
     u32 fastmem_loads = 0;
@@ -2393,15 +2394,16 @@ EeDynarec::Block* EeDynarec::lookup_or_compile(
         }
 
         append(fetch_pc, instruction);
+        fetch_pc += 4u;
         if (is_mtc0(instruction) ||
             is_cop0_ei_di(instruction)) {
             cs.ends_cop0_write = true;
             break;
         }
-        fetch_pc += 4u;
     }
 
     if (cs.count == 0u) return nullptr;
+    cs.trace_next_pc = fetch_pc;
 
     std::array<u32, 32> scores{};
     bool uses_hi = false;
@@ -2693,7 +2695,7 @@ EeDynarec::Block* EeDynarec::lookup_or_compile(
         emit_commit_sequential(
             cs.out,
             cs.count,
-            cs.pcs[cs.count - 1u] + 4u,
+            cs.trace_next_pc,
             cs.pcs[cs.count - 1u],
             cs.words[cs.count - 1u]);
     }
@@ -2733,9 +2735,7 @@ EeDynarec::Block* EeDynarec::lookup_or_compile(
     cached.page_generation = generation;
     cached.instruction_count = cs.count;
     cached.sequential_pc =
-        has_control
-            ? 0u
-            : cs.pcs[cs.count - 1u] + 4u;
+        has_control ? 0u : cs.trace_next_pc;
     cached.taken_pc = taken_pc;
     cached.fallthrough_pc = fallthrough_pc;
     cached.code_page = page;
