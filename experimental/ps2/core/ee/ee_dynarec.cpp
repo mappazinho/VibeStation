@@ -1358,17 +1358,20 @@ void EeDynarec::clear() {
 
 EeDynarec::Block* EeDynarec::lookup_or_compile(
     u32 pc,
+    u32 compile_limit,
     u8* ram_data,
     u32* page_generations,
     u8* code_page_tracked) {
 #if !defined(VIBESTATION_EE_DYNAREC_X64)
     (void)pc;
+    (void)compile_limit;
     (void)ram_data;
     (void)page_generations;
     (void)code_page_tracked;
     return nullptr;
 #else
-    if (ram_data == nullptr ||
+    if (compile_limit == 0u ||
+        ram_data == nullptr ||
         page_generations == nullptr ||
         code_page_tracked == nullptr) {
         return nullptr;
@@ -1389,7 +1392,8 @@ EeDynarec::Block* EeDynarec::lookup_or_compile(
     Block& cached = blocks_[index];
     if (cached.function != nullptr &&
         cached.pc == pc &&
-        cached.page_generation == generation) {
+        cached.page_generation == generation &&
+        cached.instruction_count <= compile_limit) {
         return &cached;
     }
 
@@ -1400,7 +1404,9 @@ EeDynarec::Block* EeDynarec::lookup_or_compile(
     const u32 page_remaining =
         (kPageSize - (physical & (kPageSize - 1u))) / 4u;
     const u32 available =
-        std::min(kMaxBlockInstructions, page_remaining);
+        std::min(
+            std::min(kMaxBlockInstructions, page_remaining),
+            compile_limit);
 
     for (u32 i = 0u; i < available; ++i) {
         const u32 instruction =
@@ -1668,6 +1674,7 @@ EeDynarec::Block* EeDynarec::lookup_or_compile(
 EeDynarec::Block* EeDynarec::resolve_link(
     Block& source,
     u32 target_pc,
+    u32 compile_limit,
     Block*& slot,
     u32& generation_slot,
     u8* ram_data,
@@ -1691,6 +1698,7 @@ EeDynarec::Block* EeDynarec::resolve_link(
     ++link_misses_;
     slot = lookup_or_compile(
         target_pc,
+        compile_limit,
         ram_data,
         page_generations,
         code_page_tracked);
@@ -1720,6 +1728,7 @@ EeDynarec::RunResult EeDynarec::execute(
 #else
     Block* block = lookup_or_compile(
         state.pc,
+        maximum_instructions,
         ram_data,
         page_generations,
         code_page_tracked);
@@ -1782,14 +1791,14 @@ EeDynarec::RunResult EeDynarec::execute(
         if (block->conditional_branch) {
             if (next_pc == block->taken_pc) {
                 next = resolve_link(
-                    *block, next_pc,
+                    *block, next_pc, remaining,
                     block->taken_link,
                     block->taken_link_generation,
                     ram_data, page_generations,
                     code_page_tracked);
             } else if (next_pc == block->fallthrough_pc) {
                 next = resolve_link(
-                    *block, next_pc,
+                    *block, next_pc, remaining,
                     block->fallthrough_link,
                     block->fallthrough_link_generation,
                     ram_data, page_generations,
@@ -1799,7 +1808,7 @@ EeDynarec::RunResult EeDynarec::execute(
             if (block->taken_pc != 0u &&
                 next_pc == block->taken_pc) {
                 next = resolve_link(
-                    *block, next_pc,
+                    *block, next_pc, remaining,
                     block->taken_link,
                     block->taken_link_generation,
                     ram_data, page_generations,
@@ -1808,7 +1817,7 @@ EeDynarec::RunResult EeDynarec::execute(
                 // JR/JALR targets are dynamic. Cache the most recent target
                 // in the sequential link slot; a target change simply misses.
                 next = resolve_link(
-                    *block, next_pc,
+                    *block, next_pc, remaining,
                     block->sequential_link,
                     block->sequential_link_generation,
                     ram_data, page_generations,
