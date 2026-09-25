@@ -158,11 +158,10 @@ bool supported_noncontrol(u32 instruction) {
     if (is_load(instruction) || is_store(instruction)) return true;
     if (is_mfc0(instruction)) return true;
     if (is_mtc0(instruction)) {
-        const u32 rd = (instruction >> 11) & 31u;
-        // Count writes need instruction-local Count semantics and remain a
-        // precise interpreter exit for now. Other select-0 writes are safe
-        // when the block exits immediately afterward.
-        return rd != 9u;
+        // All select-0 MTC0 writes are native precise exits. Count is formed
+        // as a one-instruction block so its write precedes exactly one Count
+        // retirement increment, matching step_internal().
+        return true;
     }
     return false;
 }
@@ -1557,6 +1556,13 @@ EeDynarec::Block* EeDynarec::lookup_or_compile(
         }
 
         if (!supported_noncontrol(instruction)) break;
+        if (is_mtc0(instruction) &&
+            ((instruction >> 11) & 31u) == 9u &&
+            cs.count != 0u) {
+            // Prior instructions must retire before MTC0 Count overwrites
+            // Count. Compile the write as the next block instead.
+            break;
+        }
         cs.words[cs.count++] = instruction;
         if (is_mtc0(instruction)) {
             cs.ends_cop0_write = true;
