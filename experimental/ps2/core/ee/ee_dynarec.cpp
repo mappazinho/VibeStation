@@ -152,6 +152,10 @@ bool supported_special(u32 instruction) {
     case 0x14u: // DSLLV
     case 0x16u: // DSRLV
     case 0x17u: // DSRAV
+    case 0x18u: // MULT
+    case 0x19u: // MULTU
+    case 0x1Au: // DIV
+    case 0x1Bu: // DIVU
     case 0x28u: // MFSA
     case 0x29u: // MTSA
         return true;
@@ -671,6 +675,22 @@ struct Emitter {
         emit(0xD3u); modrm(3u, subop, reg);
     }
     void sign_extend_eax() { emit(0x48u); emit(0x98u); }
+    void movsxd_rr(Reg dst, Reg src) {
+        rex(true, dst, -1, src);
+        emit(0x63u);
+        modrm(3u, dst, src);
+    }
+    void mul_r32(Reg src, bool is_signed) {
+        rex(false, -1, -1, src);
+        emit(0xF7u);
+        modrm(3u, is_signed ? 5u : 4u, src);
+    }
+    void div_r32(Reg src, bool is_signed) {
+        rex(false, -1, -1, src);
+        emit(0xF7u);
+        modrm(3u, is_signed ? 7u : 6u, src);
+    }
+    void cdq() { emit(0x99u); }
 
     void cmp_rr64(Reg lhs, Reg rhs) {
         rex(true, rhs, -1, lhs); emit(0x39u); modrm(3u, rhs, lhs);
@@ -1227,6 +1247,125 @@ bool emit_body(
                 funct == 0x14u ? 4u :
                 funct == 0x16u ? 5u : 7u);
             out.store_guest(rd, RAX);
+            return true;
+        }
+        case 0x18u: // MULT
+        case 0x19u: { // MULTU
+            const bool signed_multiply = funct == 0x18u;
+            out.load_guest(RAX, rs, true);
+            out.load_guest(RCX, rt, true);
+            out.mul_r32(RCX, signed_multiply);
+            out.movsxd_rr(RAX, RAX);
+            out.movsxd_rr(RDX, RDX);
+
+            if (out.cache_lo) {
+                out.mov_rr64(R9, RAX);
+                out.lo_dirty = true;
+            } else {
+                out.store64(
+                    RBX,
+                    static_cast<u32>(offsetof(EeCpuState, lo)),
+                    RAX);
+            }
+            if (out.cache_hi) {
+                out.mov_rr64(R8, RDX);
+                out.hi_dirty = true;
+            } else {
+                out.store64(
+                    RBX,
+                    static_cast<u32>(offsetof(EeCpuState, hi)),
+                    RDX);
+            }
+            out.store_guest(rd, RAX);
+            return true;
+        }
+        case 0x1Au: // DIV
+        case 0x1Bu: { // DIVU
+            const bool signed_divide = funct == 0x1Au;
+            out.load_guest(RAX, rs, true);
+            out.load_guest(RCX, rt, true);
+
+            out.cmp_r32_imm32(RCX, 0u);
+            const std::size_t divisor_nonzero =
+                out.jcc32(0x5u); // JNE
+
+            // R5900 divide-by-zero result. HI receives sign_extend_32(lhs).
+            out.movsxd_rr(RDX, RAX);
+            if (signed_divide) {
+                out.cmp_r32_imm32(RAX, 0u);
+                const std::size_t lhs_nonnegative =
+                    out.jcc32(0xDu); // JGE
+                out.mov_r32_imm(RAX, 1u);
+                const std::size_t zero_done = out.jmp32();
+                const std::size_t nonnegative_label = out.bytes.size();
+                out.patch(lhs_nonnegative, nonnegative_label);
+                out.mov_r32_imm(RAX, 0xFFFFFFFFu);
+                const std::size_t zero_join = out.bytes.size();
+                out.patch(zero_done, zero_join);
+                out.movsxd_rr(RAX, RAX);
+            } else {
+                out.mov_r32_imm(RAX, 0xFFFFFFFFu);
+                out.movsxd_rr(RAX, RAX);
+            }
+            const std::size_t result_done_from_zero =
+                out.jmp32();
+
+            const std::size_t nonzero_label = out.bytes.size();
+            out.patch(divisor_nonzero, nonzero_label);
+
+            std::size_t result_done_from_overflow = 0u;
+            bool has_overflow_path = false;
+            if (signed_divide) {
+                out.cmp_r32_imm32(RAX, 0x80000000u);
+                const std::size_t normal_lhs =
+                    out.jcc32(0x5u); // JNE
+                out.cmp_r32_imm32(RCX, 0xFFFFFFFFu);
+                const std::size_t normal_rhs =
+                    out.jcc32(0x5u); // JNE
+
+                out.mov_r32_imm(RAX, 0x80000000u);
+                out.movsxd_rr(RAX, RAX);
+                out.mov_r32_imm(RDX, 0u);
+                result_done_from_overflow = out.jmp32();
+                has_overflow_path = true;
+
+                const std::size_t normal_label = out.bytes.size();
+                out.patch(normal_lhs, normal_label);
+                out.patch(normal_rhs, normal_label);
+                out.cdq();
+                out.div_r32(RCX, true);
+            } else {
+                out.mov_r32_imm(RDX, 0u);
+                out.div_r32(RCX, false);
+            }
+
+            out.movsxd_rr(RAX, RAX);
+            out.movsxd_rr(RDX, RDX);
+
+            const std::size_t result_join = out.bytes.size();
+            out.patch(result_done_from_zero, result_join);
+            if (has_overflow_path) {
+                out.patch(result_done_from_overflow, result_join);
+            }
+
+            if (out.cache_lo) {
+                out.mov_rr64(R9, RAX);
+                out.lo_dirty = true;
+            } else {
+                out.store64(
+                    RBX,
+                    static_cast<u32>(offsetof(EeCpuState, lo)),
+                    RAX);
+            }
+            if (out.cache_hi) {
+                out.mov_rr64(R8, RDX);
+                out.hi_dirty = true;
+            } else {
+                out.store64(
+                    RBX,
+                    static_cast<u32>(offsetof(EeCpuState, hi)),
+                    RDX);
+            }
             return true;
         }
         case 0x28u: // MFSA
@@ -1916,8 +2055,12 @@ EeDynarec::Block* EeDynarec::lookup_or_compile(
         score_registers(cs.words[i], scores);
         if ((cs.words[i] >> 26) == 0u) {
             const u32 funct = cs.words[i] & 63u;
-            uses_hi = uses_hi || funct == 0x10u || funct == 0x11u;
-            uses_lo = uses_lo || funct == 0x12u || funct == 0x13u;
+            uses_hi =
+                uses_hi || funct == 0x10u || funct == 0x11u ||
+                (funct >= 0x18u && funct <= 0x1Bu);
+            uses_lo =
+                uses_lo || funct == 0x12u || funct == 0x13u ||
+                (funct >= 0x18u && funct <= 0x1Bu);
         }
     }
 
