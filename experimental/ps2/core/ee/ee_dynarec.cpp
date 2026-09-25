@@ -146,6 +146,50 @@ bool is_cop1_basic_arithmetic(u32 instruction) {
            funct == 0x02u;   // MUL.S
 }
 
+bool is_cop1_acc_arithmetic(u32 instruction) {
+    if ((instruction >> 26) != 0x11u ||
+        ((instruction >> 21) & 31u) != 0x10u) {
+        return false;
+    }
+    switch (instruction & 63u) {
+    case 0x18u: // ADDA.S
+    case 0x19u: // SUBA.S
+    case 0x1Au: // MULA.S
+    case 0x1Cu: // MADD.S
+    case 0x1Du: // MSUB.S
+    case 0x1Eu: // MADDA.S
+    case 0x1Fu: // MSUBA.S
+        return true;
+    default:
+        return false;
+    }
+}
+
+bool is_cop1_minmax(u32 instruction) {
+    if ((instruction >> 26) != 0x11u ||
+        ((instruction >> 21) & 31u) != 0x10u) {
+        return false;
+    }
+    const u32 funct = instruction & 63u;
+    return funct == 0x28u || funct == 0x29u;
+}
+
+bool is_cop1_compare(u32 instruction) {
+    if ((instruction >> 26) != 0x11u ||
+        ((instruction >> 21) & 31u) != 0x10u) {
+        return false;
+    }
+    const u32 funct = instruction & 63u;
+    return funct == 0x30u || funct == 0x32u ||
+           funct == 0x34u || funct == 0x36u;
+}
+
+bool is_cop1_cvt_s_w(u32 instruction) {
+    return (instruction >> 26) == 0x11u &&
+           ((instruction >> 21) & 31u) == 0x14u &&
+           (instruction & 63u) == 0x20u;
+}
+
 bool supported_special(u32 instruction) {
     const u32 funct = instruction & 63u;
     const u32 rs = (instruction >> 21) & 31u;
@@ -223,7 +267,11 @@ bool supported_noncontrol(u32 instruction) {
     if (is_load(instruction) || is_store(instruction)) return true;
     if (is_cop1_move(instruction) ||
         is_cop1_bitwise_unary(instruction) ||
-        is_cop1_basic_arithmetic(instruction)) return true;
+        is_cop1_basic_arithmetic(instruction) ||
+        is_cop1_acc_arithmetic(instruction) ||
+        is_cop1_minmax(instruction) ||
+        is_cop1_compare(instruction) ||
+        is_cop1_cvt_s_w(instruction)) return true;
     if (is_mfc0(instruction)) return true;
     if (is_cop0_ei_di(instruction)) return true;
     if (is_mtc0(instruction)) {
@@ -765,6 +813,17 @@ struct Emitter {
         rex(false, dst_xmm, -1, src_xmm);
         emit(0x0Fu); emit(opcode);
         modrm(3u, dst_xmm, src_xmm);
+    }
+    void cvtsi2ss_xmm_r32(u8 xmm, Reg src) {
+        emit(0xF3u);
+        rex(false, xmm, -1, src);
+        emit(0x0Fu); emit(0x2Au);
+        modrm(3u, xmm, src);
+    }
+    void ucomiss(u8 lhs_xmm, u8 rhs_xmm) {
+        rex(false, lhs_xmm, -1, rhs_xmm);
+        emit(0x0Fu); emit(0x2Eu);
+        modrm(3u, lhs_xmm, rhs_xmm);
     }
 
     std::size_t jcc32(u8 cc) {
@@ -1601,6 +1660,155 @@ bool emit_body(
         return true;
     default:
         break;
+    }
+
+    if (is_cop1_cvt_s_w(instruction)) {
+        const u32 fs = rd;
+        const u32 fd = (instruction >> 6) & 31u;
+        out.load32(
+            RAX, RBX,
+            static_cast<u32>(
+                offsetof(EeCpuState, fpr) + fs * sizeof(u32)));
+        out.cvtsi2ss_xmm_r32(0u, RAX);
+        out.movd_r32_xmm(RAX, 0u);
+        emit_ps2_float_normalize(out, RAX, RCX);
+        out.store32(
+            RBX,
+            static_cast<u32>(
+                offsetof(EeCpuState, fpr) + fd * sizeof(u32)),
+            RAX);
+        return true;
+    }
+
+    if (is_cop1_acc_arithmetic(instruction)) {
+        const u32 ft = rt;
+        const u32 fs = rd;
+        const u32 fd = (instruction >> 6) & 31u;
+        const u32 funct = instruction & 63u;
+        auto load_normalized = [&](u32 reg, u8 xmm) {
+            out.load32(
+                RAX, RBX,
+                static_cast<u32>(
+                    offsetof(EeCpuState, fpr) + reg * sizeof(u32)));
+            emit_ps2_float_normalize(out, RAX, RCX);
+            out.movd_xmm_r32(xmm, RAX);
+        };
+        auto store_normalized = [&](u8 xmm, u32 offset) {
+            out.movd_r32_xmm(RAX, xmm);
+            emit_ps2_float_normalize(out, RAX, RCX);
+            out.store32(RBX, offset, RAX);
+        };
+
+        load_normalized(fs, 0u);
+        load_normalized(ft, 1u);
+
+        if (funct == 0x18u || funct == 0x19u || funct == 0x1Au) {
+            out.scalar_ss(
+                funct == 0x18u ? 0x58u :
+                funct == 0x19u ? 0x5Cu :
+                                 0x59u,
+                0u, 1u);
+            store_normalized(
+                0u,
+                static_cast<u32>(offsetof(EeCpuState, fpu_acc)));
+            return true;
+        }
+
+        // MADD/MSUB variants evaluate the product first, matching
+        // acc +/- (a*b) rather than a fused host operation.
+        out.scalar_ss(0x59u, 0u, 1u); // MULSS product
+        out.load32(
+            RAX, RBX,
+            static_cast<u32>(offsetof(EeCpuState, fpu_acc)));
+        emit_ps2_float_normalize(out, RAX, RCX);
+        out.movd_xmm_r32(1u, RAX); // XMM1 = ACC
+        out.scalar_ss(
+            (funct == 0x1Cu || funct == 0x1Eu) ? 0x58u : 0x5Cu,
+            1u, 0u);
+
+        const bool write_acc =
+            funct == 0x1Eu || funct == 0x1Fu;
+        store_normalized(
+            1u,
+            write_acc
+                ? static_cast<u32>(offsetof(EeCpuState, fpu_acc))
+                : static_cast<u32>(
+                    offsetof(EeCpuState, fpr) + fd * sizeof(u32)));
+        return true;
+    }
+
+    if (is_cop1_minmax(instruction)) {
+        const u32 ft = rt;
+        const u32 fs = rd;
+        const u32 fd = (instruction >> 6) & 31u;
+        const u32 funct = instruction & 63u;
+        auto load_normalized = [&](u32 reg, u8 xmm) {
+            out.load32(
+                RAX, RBX,
+                static_cast<u32>(
+                    offsetof(EeCpuState, fpr) + reg * sizeof(u32)));
+            emit_ps2_float_normalize(out, RAX, RCX);
+            out.movd_xmm_r32(xmm, RAX);
+        };
+        load_normalized(fs, 0u);
+        load_normalized(ft, 1u);
+        out.ucomiss(0u, 1u);
+        const std::size_t choose_fs =
+            out.jcc32(funct == 0x28u ? 0x3u : 0x6u); // JAE / JBE
+        out.load32(
+            RAX, RBX,
+            static_cast<u32>(
+                offsetof(EeCpuState, fpr) + ft * sizeof(u32)));
+        const std::size_t selected = out.jmp32();
+        const std::size_t fs_label = out.bytes.size();
+        out.patch(choose_fs, fs_label);
+        out.load32(
+            RAX, RBX,
+            static_cast<u32>(
+                offsetof(EeCpuState, fpr) + fs * sizeof(u32)));
+        const std::size_t selected_label = out.bytes.size();
+        out.patch(selected, selected_label);
+        out.store32(
+            RBX,
+            static_cast<u32>(
+                offsetof(EeCpuState, fpr) + fd * sizeof(u32)),
+            RAX);
+        return true;
+    }
+
+    if (is_cop1_compare(instruction)) {
+        constexpr u32 kCond = 0x00800000u;
+        const u32 funct = instruction & 63u;
+        const u32 fcr31 = static_cast<u32>(
+            offsetof(EeCpuState, fcr) + 31u * sizeof(u32));
+        emit_and_state32(out, fcr31, ~kCond);
+        if (funct == 0x30u) { // C.F.S
+            return true;
+        }
+
+        const u32 ft = rt;
+        const u32 fs = rd;
+        auto load_normalized = [&](u32 reg, u8 xmm) {
+            out.load32(
+                RAX, RBX,
+                static_cast<u32>(
+                    offsetof(EeCpuState, fpr) + reg * sizeof(u32)));
+            emit_ps2_float_normalize(out, RAX, RCX);
+            out.movd_xmm_r32(xmm, RAX);
+        };
+        load_normalized(fs, 0u);
+        load_normalized(ft, 1u);
+        out.ucomiss(0u, 1u);
+
+        // Skip setting the condition bit when the requested predicate fails.
+        const std::size_t false_jump =
+            out.jcc32(
+                funct == 0x32u ? 0x5u : // EQ: JNE
+                funct == 0x34u ? 0x3u : // LT: JAE
+                                 0x7u);  // LE: JA
+        emit_or_state32(out, fcr31, kCond);
+        out.patch(false_jump, out.bytes.size());
+        return true;
     }
 
     if (is_cop1_basic_arithmetic(instruction)) {
