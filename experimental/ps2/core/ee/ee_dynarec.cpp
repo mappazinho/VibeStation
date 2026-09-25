@@ -1092,9 +1092,11 @@ struct CompileState {
     u32 block_pc = 0;
     u32 code_page = 0;
     std::array<u32, kMaxBlockInstructions> words{};
+    std::array<u32, kMaxBlockInstructions> pcs{};
     u32 count = 0;
     ControlKind control = ControlKind::None;
     u32 control_index = 0;
+    u32 fused_static_jumps = 0;
     bool ends_cop0_write = false;
     u32 fastmem_loads = 0;
     u32 fastmem_stores = 0;
@@ -1114,6 +1116,22 @@ bool emit_body(
     const s16 imm = static_cast<s16>(instruction & 0xFFFFu);
 
     if (instruction == 0u) return true;
+
+    // Static J/JAL instructions may be fused into a same-page native trace.
+    // The block builder has already placed their architecturally executed
+    // delay slot immediately after them and redirected the following trace PC.
+    if (opcode == 0x02u) { // J
+        return true;
+    }
+    if (opcode == 0x03u) { // JAL
+        out.mov_r64_imm(
+            RAX,
+            static_cast<u64>(
+                static_cast<s64>(
+                    static_cast<s32>(cs.pcs[index] + 8u))));
+        out.store_guest(31u, RAX);
+        return true;
+    }
 
     if (opcode == 0u) {
         const u32 funct = instruction & 63u;
@@ -1554,8 +1572,7 @@ bool emit_body(
 
         const u32 retired = index;
         const u32 last_pc =
-            retired == 0u ? cs.block_pc :
-            cs.block_pc + (retired - 1u) * 4u;
+            retired == 0u ? cs.block_pc : cs.pcs[retired - 1u];
         const u32 last_op =
             retired == 0u ? 0u : cs.words[retired - 1u];
         if (retired == 0u) {
@@ -1563,7 +1580,7 @@ bool emit_body(
         } else {
             emit_commit_sequential(
                 out, retired,
-                cs.block_pc + retired * 4u,
+                cs.pcs[index],
                 last_pc, last_op);
         }
         const std::size_t continue_label = out.bytes.size();
@@ -1651,8 +1668,8 @@ bool emit_body(
         } else {
             emit_commit_sequential(
                 out, prior,
-                cs.block_pc + prior * 4u,
-                cs.block_pc + (prior - 1u) * 4u,
+                cs.pcs[index],
+                cs.pcs[prior - 1u],
                 cs.words[prior - 1u]);
         }
 
@@ -1661,8 +1678,8 @@ bool emit_body(
             out.patch(jump, selfmod_label);
         emit_commit_sequential(
             out, index + 1u,
-            cs.block_pc + (index + 1u) * 4u,
-            cs.block_pc + index * 4u,
+            cs.pcs[index] + 4u,
+            cs.pcs[index],
             instruction);
 
         const std::size_t continue_label = out.bytes.size();
