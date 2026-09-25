@@ -16,6 +16,9 @@
 #if defined(_M_X64) || defined(__x86_64__)
 #define VIBESTATION_EE_DYNAREC_X64 1
 #ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
 #include <Windows.h>
 #else
 #include <sys/mman.h>
@@ -33,7 +36,7 @@ constexpr std::size_t kMaxCodePages = 1024u;
 constexpr std::size_t kBlockCacheEntries = 65536u;
 
 u32 compile_budget_for_limit(u32 limit) {
-    limit = std::min(limit, kMaxBlockInstructions);
+    limit = (std::min)(limit, kMaxBlockInstructions);
     if (limit <= 16u) return limit;
     if (limit < 32u) return 16u;
     if (limit < 64u) return 32u;
@@ -2352,7 +2355,7 @@ EeDynarec::Block* EeDynarec::lookup_or_compile(
     cs.code_page_count = 1u;
 
     const u32 available =
-        std::min(kMaxBlockInstructions, compile_budget);
+        (std::min)(kMaxBlockInstructions, compile_budget);
     u32 fetch_pc = pc;
 
     auto already_in_trace = [&](u32 candidate) {
