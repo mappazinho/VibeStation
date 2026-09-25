@@ -93,6 +93,7 @@ private:
         u32 fastmem_stores = 0;
         u32 cached_register_uses = 0;
         bool conditional_branch = false;
+        bool branch_likely = false;
         bool control_flow = false;
         bool ends_with_cop0_write = false;
         NativeFunction function = nullptr;
