@@ -73,6 +73,12 @@ public:
     [[nodiscard]] u64 fused_static_jumps() const {
         return fused_static_jumps_;
     }
+    [[nodiscard]] u64 fused_conditional_branches() const {
+        return fused_conditional_branches_;
+    }
+    [[nodiscard]] u64 conditional_side_exits() const {
+        return conditional_side_exits_;
+    }
     [[nodiscard]] u64 dispatch_calls() const { return dispatch_calls_; }
     [[nodiscard]] u64 deadline_exits() const { return deadline_exits_; }
     [[nodiscard]] u64 unsupported_exits() const { return unsupported_exits_; }
@@ -83,6 +89,13 @@ public:
 private:
     using NativeFunction =
         u32 (*)(EeCpuState*, u8*, u32*, u8*);
+
+    struct SideExit {
+        u32 retired = 0;
+        u32 target_pc = 0;
+        Block* link = nullptr;
+        u32 link_generation = 0;
+    };
 
     struct Block {
         u32 pc = 0;
@@ -96,6 +109,8 @@ private:
         std::array<u32, 4> source_pages{};
         std::array<u32, 4> source_generations{};
         u8 source_page_count = 0;
+        std::array<SideExit, 8> side_exits{};
+        u8 side_exit_count = 0;
         u32 fastmem_loads = 0;
         u32 fastmem_stores = 0;
         u32 cached_register_uses = 0;
@@ -152,6 +167,8 @@ private:
     u64 register_cache_flushes_ = 0;
     u64 cache_flushes_ = 0;
     u64 fused_static_jumps_ = 0;
+    u64 fused_conditional_branches_ = 0;
+    u64 conditional_side_exits_ = 0;
     u64 dispatch_calls_ = 0;
     u64 deadline_exits_ = 0;
     u64 unsupported_exits_ = 0;
