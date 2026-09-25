@@ -1,6 +1,7 @@
 #pragma once
 
 #include "common/types.h"
+#include "core/ee/ee_dynarec.h"
 #include "core/ee/ee_jit.h"
 
 #include <array>
@@ -90,6 +91,11 @@ public:
         u32 maximum_instructions,
         const u8* ram_data = nullptr,
         u32* page_generations = nullptr);
+    EeDynarec::RunResult run_dynarec(
+        u32 maximum_instructions,
+        u8* ram_data,
+        u32* page_generations,
+        u8* code_page_tracked);
     u64 run(u64 instruction_budget, std::string& error);
     // Retire verified instructions from the OSDSYS eight-instruction idle
     // loop. The current PC may be at any phase of the loop. The caller is
@@ -115,10 +121,21 @@ public:
     [[nodiscard]] bool halted() const { return halted_; }
     [[nodiscard]] const std::string& halt_reason() const { return halt_reason_; }
     void clear_halt();
-    void set_jit_enabled(bool enabled) { jit_enabled_ = enabled; }
+    void set_jit_enabled(bool enabled) {
+        jit_enabled_ = enabled;
+        if (enabled) dynarec_enabled_ = false;
+    }
     void clear_jit_cache() { jit_.clear(); }
     [[nodiscard]] bool jit_enabled() const { return jit_enabled_; }
     [[nodiscard]] const EeJit& jit() const { return jit_; }
+
+    void set_dynarec_enabled(bool enabled) {
+        dynarec_enabled_ = enabled;
+        if (enabled) jit_enabled_ = false;
+    }
+    void clear_dynarec_cache() { dynarec_.clear(); }
+    [[nodiscard]] bool dynarec_enabled() const { return dynarec_enabled_; }
+    [[nodiscard]] const EeDynarec& dynarec() const { return dynarec_; }
 
     // VU0 macro mode (EE COP2) and VIF0 micro mode share one architectural
     // register file. These helpers bridge the bootstrap interpreter state.
@@ -176,7 +193,9 @@ private:
     bool memory_exception_pending_ = false;
     std::string halt_reason_;
     EeJit jit_{};
+    EeDynarec dynarec_{};
     bool jit_enabled_ = false;
+    bool dynarec_enabled_ = false;
 };
 
 } // namespace ps2
