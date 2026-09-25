@@ -4664,6 +4664,123 @@ bool test_ee_second_gen_dynarec() {
             "EE second-gen fused trace guard state diverged") && ok;
     }
 
+    // Static JAL fusion may cross a guest 4 KiB code boundary. Both source
+    // pages are generation-tracked, and changing the target page must replace
+    // the stale trace instead of executing old native code.
+    {
+        constexpr ps2::u32 cross_pc = 0x00007FF8u;
+        constexpr ps2::u32 target = 0x00009000u;
+        const ps2::u32 jal =
+            (0x03u << 26) | ((target >> 2u) & 0x03FFFFFFu);
+        const ps2::u32 delay =
+            (0x09u << 26) | (2u << 16) | 2u;
+        const ps2::u32 target_a =
+            (0x09u << 26) | (3u << 16) | 3u;
+        const ps2::u32 target_b =
+            (0x09u << 26) | (4u << 16) | 4u;
+        const ps2::u32 syscall = 0x0000000Cu;
+
+        ps2::Ps2System exact;
+        ps2::Ps2System native;
+        for (auto* system : {&exact, &native}) {
+            ok = expect(
+                system->bus().write32(cross_pc, jal) &&
+                system->bus().write32(cross_pc + 4u, delay) &&
+                system->bus().write32(target, target_a) &&
+                system->bus().write32(target + 4u, target_b) &&
+                system->bus().write32(target + 8u, syscall),
+                "EE dynarec cross-page trace setup failed") && ok;
+            system->ee().reset(cross_pc);
+        }
+
+        std::string error;
+        for (ps2::u32 i = 0u; i < 4u; ++i) {
+            ok = expect(
+                exact.ee().step(error),
+                "EE cross-page trace reference step failed") && ok;
+        }
+
+        native.ee().set_dynarec_enabled(true);
+        auto result = native.ee().run_dynarec(
+            32u,
+            native.ram().data(),
+            native.ram().page_generation_data(),
+            native.ram().code_page_tracked_data());
+        ok = expect(
+            result.retired == 4u &&
+            native.ee().state().pc == exact.ee().state().pc &&
+            native.ee().state().gpr[31].lo ==
+                exact.ee().state().gpr[31].lo &&
+            native.ee().state().gpr[2].lo ==
+                exact.ee().state().gpr[2].lo &&
+            native.ee().state().gpr[3].lo ==
+                exact.ee().state().gpr[3].lo &&
+            native.ee().state().gpr[4].lo ==
+                exact.ee().state().gpr[4].lo &&
+            native.ee().dynarec().executed_blocks() == 1u,
+            "EE second-gen cross-page fused JAL diverged") && ok;
+
+        const ps2::u64 compiles_before_change =
+            native.ee().dynarec().compiled_blocks();
+        const ps2::u32 changed_target =
+            (0x09u << 26) | (3u << 16) | 7u;
+        ok = expect(
+            native.bus().write32(target, changed_target),
+            "EE cross-page target rewrite failed") && ok;
+        native.ee().reset(cross_pc);
+        native.ee().set_dynarec_enabled(true);
+        result = native.ee().run_dynarec(
+            32u,
+            native.ram().data(),
+            native.ram().page_generation_data(),
+            native.ram().code_page_tracked_data());
+        ok = expect(
+            result.retired == 4u &&
+            native.ee().state().gpr[3].lo == 7u &&
+            native.ee().dynarec().compiled_blocks() >
+                compiles_before_change,
+            "EE cross-page target generation did not invalidate trace") && ok;
+    }
+
+    // A raw fastmem store into any source page of a multi-page trace must
+    // invalidate and exit immediately, not merely stores into the entry page.
+    {
+        constexpr ps2::u32 cross_pc = 0x00007FF8u;
+        constexpr ps2::u32 target = 0x00009000u;
+        const ps2::u32 code[] = {
+            (0x02u << 26) | ((target >> 2u) & 0x03FFFFFFu), // J target
+            0u,                                             // delay
+            (0x2Bu << 26) | (1u << 21) | (2u << 16),       // target: SW
+            (0x09u << 26) | (3u << 16) | 3u,               // must not run
+            0x0000000Cu,
+        };
+        ps2::Ps2System native;
+        ok = expect(
+            native.bus().write32(cross_pc, code[0]) &&
+            native.bus().write32(cross_pc + 4u, code[1]) &&
+            native.bus().write32(target, code[2]) &&
+            native.bus().write32(target + 4u, code[3]) &&
+            native.bus().write32(target + 8u, code[4]),
+            "EE cross-page selfmod setup failed") && ok;
+        native.ee().reset(cross_pc);
+        native.ee().state().gpr[1].lo = target + 8u;
+        native.ee().state().gpr[2].lo = 0u;
+        native.ee().set_dynarec_enabled(true);
+        const auto result = native.ee().run_dynarec(
+            32u,
+            native.ram().data(),
+            native.ram().page_generation_data(),
+            native.ram().code_page_tracked_data());
+        ok = expect(
+            result.retired == 3u &&
+            result.reason == ps2::EeDynarec::ExitReason::CodeInvalidated &&
+            native.ee().state().pc == target + 4u &&
+            native.ee().state().next_pc == target + 8u &&
+            native.ee().state().gpr[3].lo == 0u &&
+            native.ee().dynarec().code_invalidation_exits() != 0u,
+            "EE multi-page trace store did not invalidate target page") && ok;
+    }
+
     // Event-deadline variants for one PC must coexist. A short 8:1
     // deadline must not permanently poison the same PC with a tiny block.
     {
