@@ -70,6 +70,9 @@ public:
         return register_cache_flushes_;
     }
     [[nodiscard]] u64 cache_flushes() const { return cache_flushes_; }
+    [[nodiscard]] u64 dispatch_calls() const { return dispatch_calls_; }
+    [[nodiscard]] u64 deadline_exits() const { return deadline_exits_; }
+    [[nodiscard]] u64 unsupported_exits() const { return unsupported_exits_; }
 
 private:
     using NativeFunction =
@@ -137,6 +140,9 @@ private:
     u64 register_cache_hits_ = 0;
     u64 register_cache_flushes_ = 0;
     u64 cache_flushes_ = 0;
+    u64 dispatch_calls_ = 0;
+    u64 deadline_exits_ = 0;
+    u64 unsupported_exits_ = 0;
 };
 
 } // namespace ps2
