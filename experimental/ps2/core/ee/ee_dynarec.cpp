@@ -2277,6 +2277,8 @@ void EeDynarec::clear() {
     register_cache_flushes_ = 0;
     cache_flushes_ = 0;
     fused_static_jumps_ = 0;
+    fused_conditional_branches_ = 0;
+    conditional_side_exits_ = 0;
     dispatch_calls_ = 0;
     deadline_exits_ = 0;
     unsupported_exits_ = 0;
@@ -2894,6 +2896,14 @@ EeDynarec::Block* EeDynarec::lookup_or_compile(
         cached.source_generations[i] =
             page_generations[cs.code_pages[i]];
     }
+    cached.side_exit_count =
+        static_cast<u8>(cs.fused_conditional_count);
+    for (u32 i = 0u; i < cs.fused_conditional_count; ++i) {
+        cached.side_exits[i].retired =
+            cs.fused_conditionals[i].delay_index + 1u;
+        cached.side_exits[i].target_pc =
+            cs.fused_conditionals[i].side_exit_pc;
+    }
     cached.fastmem_loads = cs.fastmem_loads;
     cached.fastmem_stores = cs.fastmem_stores;
     cached.cached_register_uses = cs.out.register_cache_uses;
@@ -2906,6 +2916,7 @@ EeDynarec::Block* EeDynarec::lookup_or_compile(
     cached.code_page_owner = code_page.address;
 
     fused_static_jumps_ += cs.fused_static_jumps;
+    fused_conditional_branches_ += cs.fused_conditional_count;
     ++compiled_blocks_;
     return &cached;
 #endif
