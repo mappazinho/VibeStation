@@ -1107,7 +1107,8 @@ void emit_fastmem_address(
 
 void emit_store_generation_barrier(
     Emitter& out,
-    u32 code_page,
+    const std::array<u32, 4>& code_pages,
+    u32 code_page_count,
     std::vector<std::size_t>& selfmod_jumps,
     u8 generation_increment = 1u) {
     out.mov_rr32(RCX, RAX);
@@ -1119,8 +1120,10 @@ void emit_store_generation_barrier(
 
     out.add_mem32_index_imm8(
         R10, RCX, 2u, generation_increment);
-    out.cmp_r32_imm32(RCX, code_page);
-    selfmod_jumps.push_back(out.jcc32(0x4u)); // JE
+    for (u32 i = 0u; i < code_page_count; ++i) {
+        out.cmp_r32_imm32(RCX, code_pages[i]);
+        selfmod_jumps.push_back(out.jcc32(0x4u)); // JE
+    }
 
     out.patch(untracked, out.bytes.size());
 }
@@ -1129,6 +1132,8 @@ struct CompileState {
     Emitter out;
     u32 block_pc = 0;
     u32 code_page = 0;
+    std::array<u32, 4> code_pages{};
+    u32 code_page_count = 0;
     std::array<u32, kMaxBlockInstructions> words{};
     std::array<u32, kMaxBlockInstructions> pcs{};
     u32 count = 0;
@@ -1833,7 +1838,8 @@ bool emit_body(
         std::vector<std::size_t> selfmod;
         emit_store_generation_barrier(
             out,
-            cs.code_page,
+            cs.code_pages,
+            cs.code_page_count,
             selfmod,
             (opcode == 0x1Fu || opcode == 0x3Eu) ? 2u : 1u);
 
