@@ -73,6 +73,9 @@ public:
     [[nodiscard]] u64 dispatch_calls() const { return dispatch_calls_; }
     [[nodiscard]] u64 deadline_exits() const { return deadline_exits_; }
     [[nodiscard]] u64 unsupported_exits() const { return unsupported_exits_; }
+    [[nodiscard]] const std::array<u64, 64>& unsupported_opcodes() const {
+        return unsupported_opcodes_;
+    }
 
 private:
     using NativeFunction =
@@ -143,6 +146,7 @@ private:
     u64 dispatch_calls_ = 0;
     u64 deadline_exits_ = 0;
     u64 unsupported_exits_ = 0;
+    std::array<u64, 64> unsupported_opcodes_{};
 };
 
 } // namespace ps2
