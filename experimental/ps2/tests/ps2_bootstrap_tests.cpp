@@ -5698,6 +5698,108 @@ bool test_ee_second_gen_dynarec() {
             "EE second-gen MTC0 Count precise exit diverged") && ok;
     }
 
+    // Safe conditional branches stay inside one native trace along the
+    // predicted direction. Backward branches are treated as loop back-edges,
+    // and the final not-taken iteration leaves through a precise side exit.
+    {
+        const std::array<ps2::u32, 8> code = {
+            (0x09u << 26) | (1u << 16) | 4u, // ADDIU r1,r0,4
+            (0x09u << 26) | (2u << 16) | 0u, // ADDIU r2,r0,0
+            (0x09u << 26) | (2u << 21) | (2u << 16) | 1u, // r2++
+            (0x09u << 26) | (1u << 21) | (1u << 16) | 0xFFFFu, // r1--
+            (0x07u << 26) | (1u << 21) | 0xFFFDu, // BGTZ r1,pc+8
+            0u,                                    // delay slot
+            (0x09u << 26) | (2u << 21) | (3u << 16), // r3=r2
+            0x0000000Cu,                           // SYSCALL boundary
+        };
+        ps2::Ps2System exact;
+        ps2::Ps2System native;
+        for (ps2::u32 i = 0u; i < code.size(); ++i) {
+            ok = expect(
+                exact.bus().write32(pc + i * 4u, code[i]) &&
+                native.bus().write32(pc + i * 4u, code[i]),
+                "EE conditional-trace loop setup failed") && ok;
+        }
+        exact.ee().reset(pc);
+        native.ee().reset(pc);
+        std::string error;
+        for (ps2::u32 i = 0u; i < 19u; ++i) {
+            ok = expect(
+                exact.ee().step(error),
+                "EE conditional-trace loop reference failed") && ok;
+        }
+
+        native.ee().set_dynarec_enabled(true);
+        const auto result = native.ee().run_dynarec(
+            64u,
+            native.ram().data(),
+            native.ram().page_generation_data(),
+            native.ram().code_page_tracked_data());
+        const auto& a = exact.ee().state();
+        const auto& b = native.ee().state();
+        ok = expect(
+            result.retired == 19u &&
+            a.pc == b.pc &&
+            a.next_pc == b.next_pc &&
+            a.instructions_executed == b.instructions_executed &&
+            a.cop0[9] == b.cop0[9] &&
+            a.gpr[1].lo == b.gpr[1].lo &&
+            a.gpr[2].lo == b.gpr[2].lo &&
+            a.gpr[3].lo == b.gpr[3].lo &&
+            native.ee().dynarec().fused_conditional_branches() != 0u &&
+            native.ee().dynarec().conditional_side_exits() != 0u,
+            "EE fused backward conditional trace diverged") && ok;
+    }
+
+    // Forward branches are predicted fallthrough. Force this one taken so
+    // the generated alternate edge must commit branch+delay state, relink
+    // the target and continue under the same dynarec deadline.
+    {
+        const std::array<ps2::u32, 7> code = {
+            (0x09u << 26) | (1u << 16) | 1u, // ADDIU r1,r0,1
+            (0x04u << 26) | (1u << 21) | (1u << 16) | 3u, // BEQ -> pc+20
+            (0x09u << 26) | (2u << 16) | 2u, // delay slot
+            (0x09u << 26) | (3u << 16) | 3u, // predicted fallthrough
+            0u,
+            (0x09u << 26) | (4u << 16) | 4u, // taken target
+            0x0000000Cu,
+        };
+        ps2::Ps2System exact;
+        ps2::Ps2System native;
+        for (ps2::u32 i = 0u; i < code.size(); ++i) {
+            ok = expect(
+                exact.bus().write32(pc + i * 4u, code[i]) &&
+                native.bus().write32(pc + i * 4u, code[i]),
+                "EE conditional side-exit setup failed") && ok;
+        }
+        exact.ee().reset(pc);
+        native.ee().reset(pc);
+        std::string error;
+        for (ps2::u32 i = 0u; i < 4u; ++i) {
+            ok = expect(
+                exact.ee().step(error),
+                "EE conditional side-exit reference failed") && ok;
+        }
+
+        native.ee().set_dynarec_enabled(true);
+        const auto result = native.ee().run_dynarec(
+            32u,
+            native.ram().data(),
+            native.ram().page_generation_data(),
+            native.ram().code_page_tracked_data());
+        const auto& a = exact.ee().state();
+        const auto& b = native.ee().state();
+        ok = expect(
+            result.retired == 4u &&
+            a.pc == b.pc &&
+            a.next_pc == b.next_pc &&
+            a.gpr[2].lo == b.gpr[2].lo &&
+            b.gpr[3].lo == 0u &&
+            a.gpr[4].lo == b.gpr[4].lo &&
+            native.ee().dynarec().conditional_side_exits() != 0u,
+            "EE fused forward conditional side exit diverged") && ok;
+    }
+
     // A block larger than the current event deadline must not partially run.
     {
         const std::array<ps2::u32, 4> code = {
