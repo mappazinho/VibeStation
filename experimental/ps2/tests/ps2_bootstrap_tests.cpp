@@ -4166,6 +4166,63 @@ bool test_ee_second_gen_dynarec() {
             "EE second-gen register cache was not exercised") && ok;
     }
 
+    // Broader register-only R5900 coverage remains fully native.
+    {
+        const std::array<ps2::u32, 12> code = {
+            (0x09u << 26) | (1u << 16) | 5u, // ADDIU r1,r0,5
+            (0x09u << 26) | (2u << 16) | 3u, // ADDIU r2,r0,3
+            (2u << 21) | (1u << 16) | (3u << 11) | 0x04u, // SLLV
+            (2u << 21) | (3u << 16) | (4u << 11) | 0x16u, // DSRLV
+            (4u << 21) | (0u << 16) | (5u << 11) | 0x0Au, // MOVZ
+            (1u << 21) | (2u << 16) | (6u << 11) | 0x0Bu, // MOVN
+            (1u << 21) | 0x29u,                            // MTSA r1
+            (7u << 11) | 0x28u,                            // MFSA r7
+            (0x01u << 26) | (2u << 21) | (0x18u << 16) | 2u, // MTSAB
+            (0x01u << 26) | (2u << 21) | (0x19u << 16) | 1u, // MTSAH
+            0x0000000Fu,                                   // SYNC
+            0x0000000Cu,                                   // SYSCALL boundary
+        };
+        ps2::Ps2System exact;
+        ps2::Ps2System native;
+        for (ps2::u32 i = 0u; i < code.size(); ++i) {
+            ok = expect(
+                exact.bus().write32(pc + i * 4u, code[i]) &&
+                native.bus().write32(pc + i * 4u, code[i]),
+                "EE dynarec extended integer code setup failed") && ok;
+        }
+        exact.ee().reset(pc);
+        native.ee().reset(pc);
+        std::string error;
+        for (ps2::u32 i = 0u; i + 1u < code.size(); ++i) {
+            ok = expect(
+                exact.ee().step_predecoded(code[i], error),
+                "EE dynarec extended integer reference failed") && ok;
+        }
+        native.ee().set_dynarec_enabled(true);
+        const auto result = native.ee().run_dynarec(
+            64u,
+            native.ram().data(),
+            native.ram().page_generation_data(),
+            native.ram().code_page_tracked_data());
+        const auto& a = exact.ee().state();
+        const auto& b = native.ee().state();
+        ok = expect(
+            result.retired == code.size() - 1u &&
+            a.pc == b.pc &&
+            a.next_pc == b.next_pc &&
+            a.instructions_executed == b.instructions_executed &&
+            a.cop0[9] == b.cop0[9] &&
+            a.sa == b.sa &&
+            a.gpr[1].lo == b.gpr[1].lo &&
+            a.gpr[2].lo == b.gpr[2].lo &&
+            a.gpr[3].lo == b.gpr[3].lo &&
+            a.gpr[4].lo == b.gpr[4].lo &&
+            a.gpr[5].lo == b.gpr[5].lo &&
+            a.gpr[6].lo == b.gpr[6].lo &&
+            a.gpr[7].lo == b.gpr[7].lo,
+            "EE second-gen extended integer block diverged") && ok;
+    }
+
     // Direct successor linking across a taken branch.
     {
         const std::array<ps2::u32, 6> code = {
