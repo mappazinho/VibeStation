@@ -4032,6 +4032,32 @@ u32 EeCpu::run_native_block(
     return retired;
 }
 
+EeDynarec::RunResult EeCpu::run_dynarec(
+    u32 maximum_instructions,
+    u8* ram_data,
+    u32* page_generations,
+    u8* code_page_tracked) {
+    if (!dynarec_enabled_ ||
+        halted_ ||
+        next_is_delay_slot_ ||
+        maximum_instructions == 0u) {
+        return {};
+    }
+
+    EeDynarec::RunResult result = dynarec_.execute(
+        state_,
+        maximum_instructions,
+        ram_data,
+        page_generations,
+        code_page_tracked);
+    if (result.retired != 0u) {
+        state_.gpr[0] = {};
+        current_is_delay_slot_ = false;
+        next_is_delay_slot_ = false;
+    }
+    return result;
+}
+
 bool EeCpu::step_internal(
     std::string& error,
     bool quiet,
