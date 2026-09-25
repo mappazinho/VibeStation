@@ -1787,26 +1787,82 @@ EeDynarec::Block* EeDynarec::lookup_or_compile(
     cs.block_pc = pc;
     cs.code_page = page;
 
-    const u32 page_remaining =
-        (kPageSize - (physical & (kPageSize - 1u))) / 4u;
     const u32 available =
-        std::min(
-            std::min(kMaxBlockInstructions, page_remaining),
-            compile_budget);
+        std::min(kMaxBlockInstructions, compile_budget);
+    u32 fetch_pc = pc;
 
-    for (u32 i = 0u; i < available; ++i) {
+    auto already_in_trace = [&](u32 candidate) {
+        for (u32 i = 0u; i < cs.count; ++i) {
+            if (cs.pcs[i] == candidate) return true;
+        }
+        return false;
+    };
+    auto append = [&](u32 guest_pc, u32 instruction) {
+        cs.pcs[cs.count] = guest_pc;
+        cs.words[cs.count] = instruction;
+        ++cs.count;
+    };
+
+    while (cs.count < available) {
+        bool fetch_valid = false;
+        const u32 fetch_physical =
+            ram_physical(fetch_pc, fetch_valid);
+        if (!fetch_valid || (fetch_physical & 3u) != 0u ||
+            fetch_physical / kPageSize != page ||
+            already_in_trace(fetch_pc)) {
+            break;
+        }
+
         const u32 instruction =
-            read_word(ram_data, physical + i * 4u);
-        const ControlKind control = control_kind(instruction);
+            read_word(ram_data, fetch_physical);
+        const ControlKind control =
+            control_kind(instruction);
         if (control != ControlKind::None) {
-            if (i + 1u >= available) break;
+            if (cs.count + 2u > available) break;
+
+            const u32 delay_pc = fetch_pc + 4u;
+            bool delay_valid = false;
+            const u32 delay_physical =
+                ram_physical(delay_pc, delay_valid);
+            if (!delay_valid ||
+                delay_physical / kPageSize != page) {
+                break;
+            }
             const u32 delay =
-                read_word(ram_data, physical + (i + 1u) * 4u);
+                read_word(ram_data, delay_physical);
             if (!supported_noncontrol(delay) ||
                 is_mtc0(delay) ||
                 is_load(delay) ||
                 is_store(delay)) {
                 break;
+            }
+
+            // Static same-page J/JAL edges can be fused directly into this
+            // native trace. Their delay slot is emitted immediately after the
+            // jump and the next generated instruction comes from the target,
+            // so no C++ block dispatch or architectural-state flush occurs at
+            // this edge.
+            if (control == ControlKind::J ||
+                control == ControlKind::Jal) {
+                const u32 target =
+                    ((fetch_pc + 4u) & 0xF0000000u) |
+                    ((instruction & 0x03FFFFFFu) << 2u);
+                bool target_valid = false;
+                const u32 target_physical =
+                    ram_physical(target, target_valid);
+                const bool creates_cycle =
+                    target == fetch_pc ||
+                    target == delay_pc ||
+                    already_in_trace(target);
+                if (target_valid &&
+                    target_physical / kPageSize == page &&
+                    !creates_cycle) {
+                    append(fetch_pc, instruction);
+                    append(delay_pc, delay);
+                    ++cs.fused_static_jumps;
+                    fetch_pc = target;
+                    continue;
+                }
             }
 
             const u32 rs = (instruction >> 21) & 31u;
@@ -1824,10 +1880,11 @@ EeDynarec::Block* EeDynarec::lookup_or_compile(
                  writes_gpr(delay, rt))) {
                 break;
             }
-            cs.words[cs.count++] = instruction;
-            cs.words[cs.count++] = delay;
+
+            cs.control_index = cs.count;
+            append(fetch_pc, instruction);
+            append(delay_pc, delay);
             cs.control = control;
-            cs.control_index = i;
             break;
         }
 
@@ -1839,11 +1896,14 @@ EeDynarec::Block* EeDynarec::lookup_or_compile(
             // Count. Compile the write as the next block instead.
             break;
         }
-        cs.words[cs.count++] = instruction;
-        if (is_mtc0(instruction) || is_cop0_ei_di(instruction)) {
+
+        append(fetch_pc, instruction);
+        if (is_mtc0(instruction) ||
+            is_cop0_ei_di(instruction)) {
             cs.ends_cop0_write = true;
             break;
         }
+        fetch_pc += 4u;
     }
 
     if (cs.count == 0u) return nullptr;
