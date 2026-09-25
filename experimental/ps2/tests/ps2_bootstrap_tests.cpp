@@ -4675,6 +4675,44 @@ bool test_ee_second_gen_dynarec() {
             "EE second-gen MTC0 Status did not exit precisely") && ok;
     }
 
+    // MTC0 Count is isolated so the write occurs after any native prefix but
+    // before exactly one retirement increment for the Count-writing opcode.
+    {
+        const std::array<ps2::u32, 3> code = {
+            (0x09u << 26) | (2u << 16) | 0x1234u,
+            (0x10u << 26) | (4u << 21) | (2u << 16) | (9u << 11),
+            (0x09u << 26) | (3u << 16) | 3u,
+        };
+        ps2::Ps2System exact;
+        ps2::Ps2System native;
+        for (ps2::u32 i = 0u; i < code.size(); ++i) {
+            ok = expect(
+                exact.bus().write32(pc + i * 4u, code[i]) &&
+                native.bus().write32(pc + i * 4u, code[i]),
+                "EE dynarec Count code setup failed") && ok;
+        }
+        exact.ee().reset(pc);
+        native.ee().reset(pc);
+        std::string error;
+        ok = expect(
+            exact.ee().step(error) && exact.ee().step(error),
+            "EE dynarec Count reference step failed") && ok;
+        native.ee().set_dynarec_enabled(true);
+        const auto result = native.ee().run_dynarec(
+            32u,
+            native.ram().data(),
+            native.ram().page_generation_data(),
+            native.ram().code_page_tracked_data());
+        ok = expect(
+            result.retired == 2u &&
+            result.reason == ps2::EeDynarec::ExitReason::Cop0Write &&
+            native.ee().state().pc == exact.ee().state().pc &&
+            native.ee().state().cop0[9] == exact.ee().state().cop0[9] &&
+            native.ee().state().gpr[2].lo == exact.ee().state().gpr[2].lo &&
+            native.ee().state().gpr[3].lo == 0u,
+            "EE second-gen MTC0 Count precise exit diverged") && ok;
+    }
+
     // A block larger than the current event deadline must not partially run.
     {
         const std::array<ps2::u32, 4> code = {
