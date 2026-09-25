@@ -337,26 +337,7 @@ bool writes_gpr(u32 instruction, u32 reg) {
         return (opcode == 0x38u || opcode == 0x3Cu) && rt == reg;
     }
     if (opcode == 0x31u || opcode == 0x36u) return false;
-    if (is_cop1_bitwise_unary(instruction)) {
-        const u32 fs = rd;
-        const u32 fd = (instruction >> 6) & 31u;
-        const u32 funct = instruction & 63u;
-        out.load32(
-            RAX, RBX,
-            static_cast<u32>(
-                offsetof(EeCpuState, fpr) + fs * sizeof(u32)));
-        if (funct == 0x05u) { // ABS.S
-            out.and_r32_imm32(RAX, 0x7FFFFFFFu);
-        } else if (funct == 0x07u) { // NEG.S
-            out.xor_r32_imm32(RAX, 0x80000000u);
-        }
-        out.store32(
-            RBX,
-            static_cast<u32>(
-                offsetof(EeCpuState, fpr) + fd * sizeof(u32)),
-            RAX);
-        return true;
-    }
+    if (is_cop1_bitwise_unary(instruction)) return false;
 
     if (is_cop1_move(instruction)) {
         const u32 cop_rs = (instruction >> 21) & 31u;
@@ -1556,6 +1537,27 @@ bool emit_body(
         return true;
     default:
         break;
+    }
+
+    if (is_cop1_bitwise_unary(instruction)) {
+        const u32 fs = rd;
+        const u32 fd = (instruction >> 6) & 31u;
+        const u32 funct = instruction & 63u;
+        out.load32(
+            RAX, RBX,
+            static_cast<u32>(
+                offsetof(EeCpuState, fpr) + fs * sizeof(u32)));
+        if (funct == 0x05u) { // ABS.S
+            out.and_r32_imm32(RAX, 0x7FFFFFFFu);
+        } else if (funct == 0x07u) { // NEG.S
+            out.xor_r32_imm32(RAX, 0x80000000u);
+        }
+        out.store32(
+            RBX,
+            static_cast<u32>(
+                offsetof(EeCpuState, fpr) + fd * sizeof(u32)),
+            RAX);
+        return true;
     }
 
     if (is_cop1_move(instruction)) {
