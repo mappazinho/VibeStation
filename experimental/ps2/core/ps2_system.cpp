@@ -1367,8 +1367,12 @@ u64 Ps2System::run_ee(u64 instruction_budget,std::string& error){
                 continue;
             }
         }
-        const u64 quiet_batch = try_run_quiet_ee_batch(
-            instruction_budget - executed, error);
+        const u64 quiet_batch =
+            ee_.dynarec_enabled()
+                ? try_run_quiet_ee_superbatch(
+                    instruction_budget - executed, error)
+                : try_run_quiet_ee_batch(
+                    instruction_budget - executed, error);
         if (quiet_batch != 0u) {
             executed += quiet_batch;
             if (!error.empty()) break;
