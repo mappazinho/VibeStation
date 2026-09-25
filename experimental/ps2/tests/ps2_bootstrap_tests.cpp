@@ -4223,6 +4223,163 @@ bool test_ee_second_gen_dynarec() {
             "EE second-gen extended integer block diverged") && ok;
     }
 
+    // MULT/MULTU/DIV/DIVU use the R5900's 32-bit HI/LO semantics,
+    // including defined divide-by-zero and signed overflow results.
+    {
+        const std::array<ps2::u32, 7> signed_code = {
+            (1u << 21) | (2u << 16) | (3u << 11) | 0x18u, // MULT r3,r1,r2
+            (4u << 11) | 0x12u,                            // MFLO r4
+            (5u << 11) | 0x10u,                            // MFHI r5
+            (1u << 21) | (2u << 16) | 0x1Au,              // DIV r1,r2
+            (6u << 11) | 0x12u,                            // MFLO r6
+            (7u << 11) | 0x10u,                            // MFHI r7
+            0x0000000Cu,
+        };
+        ps2::Ps2System exact;
+        ps2::Ps2System native;
+        for (ps2::u32 i = 0u; i < signed_code.size(); ++i) {
+            ok = expect(
+                exact.bus().write32(pc + i * 4u, signed_code[i]) &&
+                native.bus().write32(pc + i * 4u, signed_code[i]),
+                "EE dynarec mul/div code setup failed") && ok;
+        }
+        exact.ee().reset(pc);
+        native.ee().reset(pc);
+        exact.ee().state().gpr[1].lo =
+            static_cast<ps2::u64>(static_cast<ps2::s64>(-7));
+        native.ee().state().gpr[1].lo =
+            static_cast<ps2::u64>(static_cast<ps2::s64>(-7));
+        exact.ee().state().gpr[2].lo = 3u;
+        native.ee().state().gpr[2].lo = 3u;
+        std::string error;
+        for (ps2::u32 i = 0u; i + 1u < signed_code.size(); ++i) {
+            ok = expect(
+                exact.ee().step(error),
+                "EE mul/div reference step failed") && ok;
+        }
+        native.ee().set_dynarec_enabled(true);
+        const auto result = native.ee().run_dynarec(
+            32u,
+            native.ram().data(),
+            native.ram().page_generation_data(),
+            native.ram().code_page_tracked_data());
+        const auto& a = exact.ee().state();
+        const auto& b = native.ee().state();
+        ok = expect(
+            result.retired == signed_code.size() - 1u &&
+            a.pc == b.pc &&
+            a.lo == b.lo &&
+            a.hi == b.hi &&
+            a.gpr[3].lo == b.gpr[3].lo &&
+            a.gpr[4].lo == b.gpr[4].lo &&
+            a.gpr[5].lo == b.gpr[5].lo &&
+            a.gpr[6].lo == b.gpr[6].lo &&
+            a.gpr[7].lo == b.gpr[7].lo,
+            "EE second-gen signed multiply/divide diverged") && ok;
+
+        const std::array<ps2::u32, 6> unsigned_code = {
+            (1u << 21) | (2u << 16) | (3u << 11) | 0x19u, // MULTU
+            (4u << 11) | 0x12u,
+            (5u << 11) | 0x10u,
+            (1u << 21) | (2u << 16) | 0x1Bu,              // DIVU
+            (6u << 11) | 0x12u,
+            0x0000000Cu,
+        };
+        ps2::Ps2System exact_u;
+        ps2::Ps2System native_u;
+        for (ps2::u32 i = 0u; i < unsigned_code.size(); ++i) {
+            ok = expect(
+                exact_u.bus().write32(pc + i * 4u, unsigned_code[i]) &&
+                native_u.bus().write32(pc + i * 4u, unsigned_code[i]),
+                "EE dynarec unsigned mul/div setup failed") && ok;
+        }
+        exact_u.ee().reset(pc);
+        native_u.ee().reset(pc);
+        exact_u.ee().state().gpr[1].lo = 0xFFFFFFFFu;
+        native_u.ee().state().gpr[1].lo = 0xFFFFFFFFu;
+        exact_u.ee().state().gpr[2].lo = 2u;
+        native_u.ee().state().gpr[2].lo = 2u;
+        for (ps2::u32 i = 0u; i + 1u < unsigned_code.size(); ++i) {
+            ok = expect(
+                exact_u.ee().step(error),
+                "EE unsigned mul/div reference failed") && ok;
+        }
+        native_u.ee().set_dynarec_enabled(true);
+        const auto result_u = native_u.ee().run_dynarec(
+            32u,
+            native_u.ram().data(),
+            native_u.ram().page_generation_data(),
+            native_u.ram().code_page_tracked_data());
+        ok = expect(
+            result_u.retired == unsigned_code.size() - 1u &&
+            exact_u.ee().state().lo == native_u.ee().state().lo &&
+            exact_u.ee().state().hi == native_u.ee().state().hi &&
+            exact_u.ee().state().gpr[3].lo ==
+                native_u.ee().state().gpr[3].lo &&
+            exact_u.ee().state().gpr[4].lo ==
+                native_u.ee().state().gpr[4].lo &&
+            exact_u.ee().state().gpr[5].lo ==
+                native_u.ee().state().gpr[5].lo &&
+            exact_u.ee().state().gpr[6].lo ==
+                native_u.ee().state().gpr[6].lo,
+            "EE second-gen unsigned multiply/divide diverged") && ok;
+
+        struct DivEdge {
+            ps2::u32 funct;
+            ps2::u64 lhs;
+            ps2::u64 rhs;
+        };
+        const std::array<DivEdge, 4> edges = {{
+            {0x1Au, 7u, 0u},
+            {0x1Au, static_cast<ps2::u64>(
+                        static_cast<ps2::s64>(-7)), 0u},
+            {0x1Au, 0x80000000u, 0xFFFFFFFFu},
+            {0x1Bu, 0x89ABCDEFu, 0u},
+        }};
+        for (const auto& edge : edges) {
+            const std::array<ps2::u32, 4> code = {
+                (1u << 21) | (2u << 16) | edge.funct,
+                (3u << 11) | 0x12u, // MFLO
+                (4u << 11) | 0x10u, // MFHI
+                0x0000000Cu,
+            };
+            ps2::Ps2System exact_edge;
+            ps2::Ps2System native_edge;
+            for (ps2::u32 i = 0u; i < code.size(); ++i) {
+                ok = expect(
+                    exact_edge.bus().write32(pc + i * 4u, code[i]) &&
+                    native_edge.bus().write32(pc + i * 4u, code[i]),
+                    "EE dynarec divide-edge code setup failed") && ok;
+            }
+            exact_edge.ee().reset(pc);
+            native_edge.ee().reset(pc);
+            exact_edge.ee().state().gpr[1].lo = edge.lhs;
+            native_edge.ee().state().gpr[1].lo = edge.lhs;
+            exact_edge.ee().state().gpr[2].lo = edge.rhs;
+            native_edge.ee().state().gpr[2].lo = edge.rhs;
+            for (ps2::u32 i = 0u; i < 3u; ++i) {
+                ok = expect(
+                    exact_edge.ee().step(error),
+                    "EE divide-edge reference failed") && ok;
+            }
+            native_edge.ee().set_dynarec_enabled(true);
+            const auto edge_result = native_edge.ee().run_dynarec(
+                16u,
+                native_edge.ram().data(),
+                native_edge.ram().page_generation_data(),
+                native_edge.ram().code_page_tracked_data());
+            ok = expect(
+                edge_result.retired == 3u &&
+                exact_edge.ee().state().lo == native_edge.ee().state().lo &&
+                exact_edge.ee().state().hi == native_edge.ee().state().hi &&
+                exact_edge.ee().state().gpr[3].lo ==
+                    native_edge.ee().state().gpr[3].lo &&
+                exact_edge.ee().state().gpr[4].lo ==
+                    native_edge.ee().state().gpr[4].lo,
+                "EE second-gen divide edge semantics diverged") && ok;
+        }
+    }
+
     // COP1 register/control transfers stay native around FPU-heavy code.
     {
         const std::array<ps2::u32, 7> code = {
