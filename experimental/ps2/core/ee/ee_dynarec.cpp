@@ -1304,6 +1304,49 @@ struct CompileState {
     u32 fastmem_stores = 0;
 };
 
+bool emit_fused_conditional_side_exit(
+    CompileState& cs,
+    const FusedConditionalEdge& edge) {
+    Emitter& out = cs.out;
+    const EeDynarecIrInstruction& branch =
+        cs.ir[edge.branch_index];
+
+    out.load_guest(RAX, branch.rs);
+    if (edge.control == ControlKind::Beq ||
+        edge.control == ControlKind::Bne) {
+        out.load_guest(RDX, branch.rt);
+        out.cmp_rr64(RAX, RDX);
+    } else {
+        out.test_rr64(RAX, RAX);
+    }
+
+    const std::size_t take =
+        out.jcc32(branch_take_cc(edge.control));
+    const u32 retired = edge.delay_index + 1u;
+    const u32 last_pc = cs.pcs[edge.delay_index];
+    const u32 last_instruction = cs.words[edge.delay_index];
+
+    if (edge.predicted_taken) {
+        // The taken edge is the hot path. A false condition falls into the
+        // precise fallthrough side exit; a true condition skips over it.
+        out.mov_r32_imm(RCX, edge.side_exit_pc);
+        emit_commit_dynamic_pc(
+            out, retired, RCX, last_pc, last_instruction);
+        out.patch(take, out.bytes.size());
+    } else {
+        // Fallthrough is hot. A taken branch jumps into the side exit while
+        // the predicted not-taken path skips around the return sequence.
+        const std::size_t hot = out.jmp32();
+        const std::size_t side = out.bytes.size();
+        out.patch(take, side);
+        out.mov_r32_imm(RCX, edge.side_exit_pc);
+        emit_commit_dynamic_pc(
+            out, retired, RCX, last_pc, last_instruction);
+        out.patch(hot, out.bytes.size());
+    }
+    return true;
+}
+
 bool emit_body(
     CompileState& cs,
     u32 index,
@@ -2530,7 +2573,31 @@ EeDynarec::Block* EeDynarec::lookup_or_compile(
         has_control ? cs.count - 2u : cs.count;
 
     for (u32 i = 0u; i < body_count; ++i) {
-        if (!emit_body(cs, i, exits)) return nullptr;
+        bool fused_branch = false;
+        const FusedConditionalEdge* delay_edge = nullptr;
+        for (u32 edge_index = 0u;
+             edge_index < cs.fused_conditional_count;
+             ++edge_index) {
+            const auto& edge =
+                cs.fused_conditionals[edge_index];
+            if (edge.branch_index == i) {
+                fused_branch = true;
+                break;
+            }
+            if (edge.delay_index == i) {
+                delay_edge = &edge;
+            }
+        }
+
+        if (!fused_branch &&
+            !emit_body(cs, i, exits)) {
+            return nullptr;
+        }
+        if (delay_edge != nullptr &&
+            !emit_fused_conditional_side_exit(
+                cs, *delay_edge)) {
+            return nullptr;
+        }
     }
 
     u32 taken_pc = 0u;
