@@ -363,6 +363,32 @@ bool is_control(u32 instruction) {
     return control_kind(instruction) != ControlKind::None;
 }
 
+bool is_fusable_conditional(ControlKind control) {
+    switch (control) {
+    case ControlKind::Beq:
+    case ControlKind::Bne:
+    case ControlKind::Blez:
+    case ControlKind::Bgtz:
+    case ControlKind::Bltz:
+    case ControlKind::Bgez:
+        return true;
+    default:
+        return false;
+    }
+}
+
+u8 branch_take_cc(ControlKind control) {
+    switch (control) {
+    case ControlKind::Beq: return 0x4u;  // JE
+    case ControlKind::Bne: return 0x5u;  // JNE
+    case ControlKind::Blez: return 0xEu; // JLE
+    case ControlKind::Bgtz: return 0xFu; // JG
+    case ControlKind::Bltz: return 0xCu; // JL
+    case ControlKind::Bgez: return 0xDu; // JGE
+    default: return 0x4u;
+    }
+}
+
 u32 branch_target(u32 pc, u32 instruction) {
     const s16 imm = static_cast<s16>(instruction & 0xFFFFu);
     return pc + 4u +
