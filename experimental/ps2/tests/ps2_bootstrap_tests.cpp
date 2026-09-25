@@ -4529,12 +4529,20 @@ bool test_ee_second_gen_dynarec() {
             native.ram().page_generation_data(),
             native.ram().code_page_tracked_data());
         ok = expect(
-            result.retired == 3u &&
-            exact.ee().state().pc == native.ee().state().pc &&
-            exact.ee().state().gpr[31].lo == native.ee().state().gpr[31].lo &&
-            exact.ee().state().gpr[2].lo == native.ee().state().gpr[2].lo &&
+            result.retired == 3u,
+            "EE second-gen JALR retired-count diverged") && ok;
+        ok = expect(
+            exact.ee().state().pc == native.ee().state().pc,
+            "EE second-gen JALR target PC diverged") && ok;
+        ok = expect(
+            exact.ee().state().gpr[31].lo == native.ee().state().gpr[31].lo,
+            "EE second-gen JALR link register diverged") && ok;
+        ok = expect(
+            exact.ee().state().gpr[2].lo == native.ee().state().gpr[2].lo,
+            "EE second-gen JALR delay slot diverged") && ok;
+        ok = expect(
             exact.ee().state().gpr[3].lo == native.ee().state().gpr[3].lo,
-            "EE second-gen JALR rd=rs source ordering diverged") && ok;
+            "EE second-gen JALR successor block diverged") && ok;
 
         const std::array<ps2::u32, 4> regimm_code = {
             (0x01u << 26) | (31u << 21) | (0x10u << 16) | 1u, // BLTZAL r31
