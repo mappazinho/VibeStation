@@ -115,10 +115,21 @@ bool supported_special(u32 instruction) {
     case 0x3Eu: // DSRL32
     case 0x3Fu: // DSRA32
         return rs == 0u;
+    case 0x04u: // SLLV
+    case 0x06u: // SRLV
+    case 0x07u: // SRAV
+    case 0x0Au: // MOVZ
+    case 0x0Bu: // MOVN
+    case 0x0Fu: // SYNC
     case 0x10u: // MFHI
     case 0x11u: // MTHI
     case 0x12u: // MFLO
     case 0x13u: // MTLO
+    case 0x14u: // DSLLV
+    case 0x16u: // DSRLV
+    case 0x17u: // DSRAV
+    case 0x28u: // MFSA
+    case 0x29u: // MTSA
         return true;
     case 0x21u: // ADDU
     case 0x23u: // SUBU
@@ -140,6 +151,31 @@ bool supported_noncontrol(u32 instruction) {
     if (instruction == 0u) return true;
     const u32 opcode = instruction >> 26;
     if (opcode == 0u) return supported_special(instruction);
+    if (opcode == 0x01u) {
+        const u32 rt = (instruction >> 16) & 31u;
+        return rt == 0x18u || rt == 0x19u; // MTSAB / MTSAH
+    }
+    if (opcode == 0x01u) {
+        const u32 variant = rt;
+        if (variant == 0x18u || variant == 0x19u) {
+            out.load_guest(RAX, rs, true);
+            out.and_r32_imm32(
+                RAX, variant == 0x18u ? 0xFu : 0x7u);
+            out.xor_r64_imm32(
+                RAX,
+                static_cast<u32>(imm) &
+                    (variant == 0x18u ? 0xFu : 0x7u));
+            if (variant == 0x19u) {
+                out.shift_imm32(RAX, 4u, 1u);
+            }
+            out.store32(
+                RBX,
+                static_cast<u32>(offsetof(EeCpuState, sa)),
+                RAX);
+            return true;
+        }
+    }
+
     switch (opcode) {
     case 0x09u: // ADDIU
     case 0x0Au: // SLTI
@@ -574,6 +610,14 @@ struct Emitter {
     void shift_imm32(Reg reg, u8 subop, u8 amount) {
         rex(false, -1, -1, reg);
         emit(0xC1u); modrm(3u, subop, reg); emit(amount);
+    }
+    void shift_cl64(Reg reg, u8 subop) {
+        rex(true, -1, -1, reg);
+        emit(0xD3u); modrm(3u, subop, reg);
+    }
+    void shift_cl32(Reg reg, u8 subop) {
+        rex(false, -1, -1, reg);
+        emit(0xD3u); modrm(3u, subop, reg);
     }
     void sign_extend_eax() { emit(0x48u); emit(0x98u); }
 
@@ -1036,6 +1080,32 @@ bool emit_body(
             out.store_guest(rd, RAX);
             return true;
         }
+        case 0x04u: // SLLV
+        case 0x06u: // SRLV
+        case 0x07u: { // SRAV
+            out.load_guest(RAX, rt, true);
+            out.load_guest(RCX, rs, true);
+            out.shift_cl32(
+                RAX,
+                funct == 0x04u ? 4u :
+                funct == 0x06u ? 5u : 7u);
+            out.sign_extend_eax();
+            out.store_guest(rd, RAX);
+            return true;
+        }
+        case 0x0Au: // MOVZ
+        case 0x0Bu: { // MOVN
+            out.load_guest(RDX, rt);
+            out.test_rr64(RDX, RDX);
+            const std::size_t skip = out.jcc32(
+                funct == 0x0Au ? 0x5u : 0x4u); // MOVZ: JNE, MOVN: JE
+            out.load_guest(RAX, rs);
+            out.store_guest(rd, RAX);
+            out.patch(skip, out.bytes.size());
+            return true;
+        }
+        case 0x0Fu: // SYNC
+            return true;
         case 0x10u: // MFHI
             if (rd != 0u) {
                 if (out.cache_hi) out.mov_rr64(RAX, R8);
@@ -1077,6 +1147,31 @@ bool emit_body(
                     static_cast<u32>(offsetof(EeCpuState, lo)),
                     RAX);
             }
+            return true;
+        case 0x14u: // DSLLV
+        case 0x16u: // DSRLV
+        case 0x17u: { // DSRAV
+            out.load_guest(RAX, rt);
+            out.load_guest(RCX, rs, true);
+            out.shift_cl64(
+                RAX,
+                funct == 0x14u ? 4u :
+                funct == 0x16u ? 5u : 7u);
+            out.store_guest(rd, RAX);
+            return true;
+        }
+        case 0x28u: // MFSA
+            out.load32(
+                RAX, RBX,
+                static_cast<u32>(offsetof(EeCpuState, sa)));
+            out.store_guest(rd, RAX);
+            return true;
+        case 0x29u: // MTSA
+            out.load_guest(RAX, rs, true);
+            out.store32(
+                RBX,
+                static_cast<u32>(offsetof(EeCpuState, sa)),
+                RAX);
             return true;
         case 0x21u:
         case 0x23u: {
