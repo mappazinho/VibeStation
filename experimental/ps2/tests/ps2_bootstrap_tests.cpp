@@ -4217,6 +4217,88 @@ bool test_ee_second_gen_dynarec() {
             "EE second-gen successor link was not reused") && ok;
     }
 
+    // Not-taken conditional successor linking must reuse fallthrough.
+    {
+        const std::array<ps2::u32, 6> code = {
+            (0x09u << 26) | (1u << 16) | 1u,
+            (0x09u << 26) | (2u << 16) | 2u,
+            (0x04u << 26) | (1u << 21) | (2u << 16) | 2u, // BEQ false
+            (0x09u << 26) | (3u << 16) | 3u, // delay
+            (0x09u << 26) | (4u << 16) | 4u, // fallthrough
+            0x0000000Cu,
+        };
+        ps2::Ps2System exact;
+        ps2::Ps2System native;
+        for (ps2::u32 i = 0u; i < code.size(); ++i) {
+            ok = expect(
+                exact.bus().write32(pc + i * 4u, code[i]) &&
+                native.bus().write32(pc + i * 4u, code[i]),
+                "EE dynarec not-taken code setup failed") && ok;
+        }
+        exact.ee().reset(pc);
+        native.ee().reset(pc);
+        std::string error;
+        for (ps2::u32 i = 0u; i < 5u; ++i) {
+            ok = expect(
+                exact.ee().step(error),
+                "EE dynarec not-taken reference step failed") && ok;
+        }
+        native.ee().set_dynarec_enabled(true);
+        auto result = native.ee().run_dynarec(
+            32u,
+            native.ram().data(),
+            native.ram().page_generation_data(),
+            native.ram().code_page_tracked_data());
+        ok = expect(
+            result.retired == 5u &&
+            native.ee().state().pc == exact.ee().state().pc &&
+            native.ee().state().gpr[3].lo == exact.ee().state().gpr[3].lo &&
+            native.ee().state().gpr[4].lo == exact.ee().state().gpr[4].lo,
+            "EE second-gen not-taken branch diverged") && ok;
+        const ps2::u64 hits_before =
+            native.ee().dynarec().link_hits();
+        native.ee().reset(pc);
+        result = native.ee().run_dynarec(
+            32u,
+            native.ram().data(),
+            native.ram().page_generation_data(),
+            native.ram().code_page_tracked_data());
+        ok = expect(
+            result.retired == 5u &&
+            native.ee().dynarec().link_hits() > hits_before,
+            "EE second-gen fallthrough link was not reused") && ok;
+    }
+
+    // A first-instruction MMIO access must guard out without retirement.
+    {
+        const std::array<ps2::u32, 2> code = {
+            (0x23u << 26) | (1u << 21) | (2u << 16), // LW r2,0(r1)
+            (0x09u << 26) | (3u << 16) | 3u,
+        };
+        ps2::Ps2System native;
+        for (ps2::u32 i = 0u; i < code.size(); ++i) {
+            ok = expect(
+                native.bus().write32(pc + i * 4u, code[i]),
+                "EE dynarec MMIO guard code setup failed") && ok;
+        }
+        native.ee().reset(pc);
+        native.ee().state().gpr[1].lo = 0x10000000u;
+        native.ee().set_dynarec_enabled(true);
+        const auto result = native.ee().run_dynarec(
+            16u,
+            native.ram().data(),
+            native.ram().page_generation_data(),
+            native.ram().code_page_tracked_data());
+        ok = expect(
+            result.retired == 0u &&
+            result.reason == ps2::EeDynarec::ExitReason::Guard &&
+            native.ee().state().pc == pc &&
+            native.ee().state().instructions_executed == 0u &&
+            native.ee().state().gpr[2].lo == 0u &&
+            native.ee().state().gpr[3].lo == 0u,
+            "EE second-gen MMIO guard retired an unsafe load") && ok;
+    }
+
     // Guarded fastmem store/load and self-modifying-code invalidation.
     {
         constexpr ps2::u32 data = 0x9000u;
@@ -4266,6 +4348,34 @@ bool test_ee_second_gen_dynarec() {
             native.ee().dynarec().fastmem_loads() != 0u &&
             native.ee().dynarec().fastmem_stores() != 0u,
             "EE second-gen fastmem counters were not exercised") && ok;
+
+        ps2::Ps2System cross_page;
+        const ps2::u32 cross_code[2] = {
+            (0x3Fu << 26) | (1u << 21) | (2u << 16), // SD
+            (0x09u << 26) | (3u << 16) | 3u,
+        };
+        for (ps2::u32 i = 0u; i < 2u; ++i) {
+            ok = expect(
+                cross_page.bus().write32(pc + i * 4u, cross_code[i]),
+                "EE dynarec cross-page code setup failed") && ok;
+        }
+        cross_page.ee().reset(pc);
+        cross_page.ee().state().gpr[1].lo = 0x9FFCu;
+        cross_page.ee().state().gpr[2].lo = 0x1122334455667788ull;
+        cross_page.ee().set_dynarec_enabled(true);
+        const auto cross_result = cross_page.ee().run_dynarec(
+            16u,
+            cross_page.ram().data(),
+            cross_page.ram().page_generation_data(),
+            cross_page.ram().code_page_tracked_data());
+        ps2::u64 cross_value = 0u;
+        ok = expect(
+            cross_page.ram().read64(0x9FFCu, cross_value) &&
+            cross_result.retired == 0u &&
+            cross_result.reason == ps2::EeDynarec::ExitReason::Guard &&
+            cross_value == 0u &&
+            cross_page.ee().state().pc == pc,
+            "EE second-gen cross-page store bypassed its guard") && ok;
 
         ps2::Ps2System selfmod;
         const ps2::u32 self_code[3] = {
@@ -4334,6 +4444,42 @@ bool test_ee_second_gen_dynarec() {
             exact.ee().state().gpr[2].lo == native.ee().state().gpr[2].lo &&
             native.ee().state().gpr[5].lo == 0u,
             "EE second-gen COP0 exit diverged") && ok;
+    }
+
+    // MTC0 Status is native but must return immediately after retirement.
+    {
+        const std::array<ps2::u32, 3> code = {
+            (0x09u << 26) | (2u << 16) | 0x1234u,
+            (0x10u << 26) | (4u << 21) | (2u << 16) | (12u << 11),
+            (0x09u << 26) | (3u << 16) | 3u,
+        };
+        ps2::Ps2System exact;
+        ps2::Ps2System native;
+        for (ps2::u32 i = 0u; i < code.size(); ++i) {
+            ok = expect(
+                exact.bus().write32(pc + i * 4u, code[i]) &&
+                native.bus().write32(pc + i * 4u, code[i]),
+                "EE dynarec Status code setup failed") && ok;
+        }
+        exact.ee().reset(pc);
+        native.ee().reset(pc);
+        std::string error;
+        ok = expect(
+            exact.ee().step(error) && exact.ee().step(error),
+            "EE dynarec Status reference step failed") && ok;
+        native.ee().set_dynarec_enabled(true);
+        const auto result = native.ee().run_dynarec(
+            32u,
+            native.ram().data(),
+            native.ram().page_generation_data(),
+            native.ram().code_page_tracked_data());
+        ok = expect(
+            result.retired == 2u &&
+            result.reason == ps2::EeDynarec::ExitReason::Cop0Write &&
+            native.ee().state().pc == exact.ee().state().pc &&
+            native.ee().state().cop0[12] == exact.ee().state().cop0[12] &&
+            native.ee().state().gpr[3].lo == 0u,
+            "EE second-gen MTC0 Status did not exit precisely") && ok;
     }
 
     // A block larger than the current event deadline must not partially run.
