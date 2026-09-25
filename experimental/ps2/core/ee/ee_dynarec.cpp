@@ -1628,13 +1628,13 @@ EeDynarec::Block* EeDynarec::lookup_or_compile(
         if (cs.control == ControlKind::Jalr) {
             // JALR may legally use rd == rs. Preserve the target before the
             // link write so the architectural source value wins.
-            cs.out.load_guest(RCX, rs, true);
+            cs.out.load_guest(R10, rs, true);
             preserved_dynamic_target = true;
         }
         if (cs.control == ControlKind::Bltzal ||
             cs.control == ControlKind::Bgezal) {
             // Likewise BLTZAL/BGEZAL may test r31 while also writing r31.
-            cs.out.load_guest(RCX, rs);
+            cs.out.load_guest(R10, rs);
             preserved_link_branch_source = true;
         }
 
@@ -1681,10 +1681,10 @@ EeDynarec::Block* EeDynarec::lookup_or_compile(
         case ControlKind::Jr:
         case ControlKind::Jalr:
             if (!preserved_dynamic_target) {
-                cs.out.load_guest(RCX, rs, true);
+                cs.out.load_guest(R10, rs, true);
             }
             emit_commit_dynamic_pc(
-                cs.out, cs.count, RCX,
+                cs.out, cs.count, R10,
                 branch_pc + 4u, delay);
             break;
         case ControlKind::Beq:
@@ -1698,7 +1698,7 @@ EeDynarec::Block* EeDynarec::lookup_or_compile(
             conditional = true;
             taken_pc = branch_target(branch_pc, instruction);
             if (preserved_link_branch_source) {
-                cs.out.mov_rr64(RAX, RCX);
+                cs.out.mov_rr64(RAX, R10);
             } else {
                 cs.out.load_guest(RAX, rs);
             }
