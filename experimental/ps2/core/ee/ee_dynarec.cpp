@@ -1728,6 +1728,7 @@ void EeDynarec::clear() {
     register_cache_hits_ = 0;
     register_cache_flushes_ = 0;
     cache_flushes_ = 0;
+    fused_static_jumps_ = 0;
     dispatch_calls_ = 0;
     deadline_exits_ = 0;
     unsupported_exits_ = 0;
@@ -2250,6 +2251,7 @@ EeDynarec::Block* EeDynarec::lookup_or_compile(
         reinterpret_cast<NativeFunction>(destination);
     cached.code_page_owner = code_page.address;
 
+    fused_static_jumps_ += cs.fused_static_jumps;
     ++compiled_blocks_;
     return &cached;
 #endif
