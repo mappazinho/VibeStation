@@ -4372,6 +4372,96 @@ bool test_ee_second_gen_dynarec() {
             "EE second-gen fallthrough link was not reused") && ok;
     }
 
+    // Same-page static JAL edges are fused into one generated trace. The
+    // delay slot observes the architectural link value, target instructions
+    // execute without a C++ successor transition, and final state still
+    // matches the scalar interpreter.
+    {
+        constexpr ps2::u32 target = pc + 0x10u;
+        const std::array<ps2::u32, 7> code = {
+            (0x03u << 26) | ((target >> 2u) & 0x03FFFFFFu), // JAL target
+            (0x09u << 26) | (31u << 21) | (2u << 16),      // delay: r2=r31
+            (0x09u << 26) | (3u << 16) | 99u,              // skipped
+            0u,                                             // skipped
+            (0x09u << 26) | (3u << 16) | 3u,               // target
+            (0x09u << 26) | (31u << 21) | (4u << 16),      // r4=r31
+            0x0000000Cu,                                    // boundary
+        };
+        ps2::Ps2System exact;
+        ps2::Ps2System native;
+        for (ps2::u32 i = 0u; i < code.size(); ++i) {
+            ok = expect(
+                exact.bus().write32(pc + i * 4u, code[i]) &&
+                native.bus().write32(pc + i * 4u, code[i]),
+                "EE dynarec fused-JAL code setup failed") && ok;
+        }
+        exact.ee().reset(pc);
+        native.ee().reset(pc);
+        std::string error;
+        for (ps2::u32 i = 0u; i < 4u; ++i) {
+            ok = expect(
+                exact.ee().step(error),
+                "EE fused-JAL reference step failed") && ok;
+        }
+        native.ee().set_dynarec_enabled(true);
+        const auto result = native.ee().run_dynarec(
+            32u,
+            native.ram().data(),
+            native.ram().page_generation_data(),
+            native.ram().code_page_tracked_data());
+        const auto& a = exact.ee().state();
+        const auto& b = native.ee().state();
+        ok = expect(
+            result.retired == 4u &&
+            a.pc == b.pc &&
+            a.next_pc == b.next_pc &&
+            a.gpr[31].lo == b.gpr[31].lo &&
+            a.gpr[2].lo == b.gpr[2].lo &&
+            a.gpr[3].lo == b.gpr[3].lo &&
+            a.gpr[4].lo == b.gpr[4].lo &&
+            native.ee().dynarec().fused_static_jumps() != 0u &&
+            native.ee().dynarec().executed_blocks() == 1u,
+            "EE second-gen fused JAL trace diverged") && ok;
+    }
+
+    // A fastmem guard after a fused jump must expose the target PC and retire
+    // only the JAL plus its delay slot. This pins noncontiguous guard-state
+    // reconstruction.
+    {
+        constexpr ps2::u32 target = pc + 0x10u;
+        const std::array<ps2::u32, 6> code = {
+            (0x03u << 26) | ((target >> 2u) & 0x03FFFFFFu),
+            (0x09u << 26) | (2u << 16) | 2u,
+            0u,
+            0u,
+            (0x23u << 26) | (1u << 21) | (3u << 16), // guarded LW
+            0x0000000Cu,
+        };
+        ps2::Ps2System native;
+        for (ps2::u32 i = 0u; i < code.size(); ++i) {
+            ok = expect(
+                native.bus().write32(pc + i * 4u, code[i]),
+                "EE dynarec fused-guard code setup failed") && ok;
+        }
+        native.ee().reset(pc);
+        native.ee().state().gpr[1].lo = 0x10000000u; // MMIO -> guard
+        native.ee().set_dynarec_enabled(true);
+        const auto result = native.ee().run_dynarec(
+            32u,
+            native.ram().data(),
+            native.ram().page_generation_data(),
+            native.ram().code_page_tracked_data());
+        ok = expect(
+            result.retired == 2u &&
+            result.reason == ps2::EeDynarec::ExitReason::Guard &&
+            native.ee().state().pc == target &&
+            native.ee().state().next_pc == target + 4u &&
+            native.ee().state().gpr[2].lo == 2u &&
+            native.ee().state().gpr[31].lo == pc + 8u &&
+            native.ee().state().gpr[3].lo == 0u,
+            "EE second-gen fused trace guard state diverged") && ok;
+    }
+
     // Event-deadline variants for one PC must coexist. A short 8:1
     // deadline must not permanently poison the same PC with a tiny block.
     {
