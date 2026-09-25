@@ -1273,6 +1273,16 @@ void emit_store_generation_barrier(
     out.patch(untracked, out.bytes.size());
 }
 
+struct FusedConditionalEdge {
+    u32 branch_index = 0;
+    u32 delay_index = 0;
+    ControlKind control = ControlKind::None;
+    u32 taken_pc = 0;
+    u32 fallthrough_pc = 0;
+    u32 side_exit_pc = 0;
+    bool predicted_taken = false;
+};
+
 struct CompileState {
     Emitter out;
     u32 block_pc = 0;
@@ -1287,6 +1297,8 @@ struct CompileState {
     u32 control_index = 0;
     u32 trace_next_pc = 0;
     u32 fused_static_jumps = 0;
+    std::array<FusedConditionalEdge, 8> fused_conditionals{};
+    u32 fused_conditional_count = 0;
     bool ends_cop0_write = false;
     u32 fastmem_loads = 0;
     u32 fastmem_stores = 0;
