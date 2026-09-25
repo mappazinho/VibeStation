@@ -4404,6 +4404,179 @@ bool test_ee_second_gen_dynarec() {
             "EE second-gen self-modifying store did not exit") && ok;
     }
 
+    // EE-specific 128-bit, FPU and VU RAM transfers stay in fastmem.
+    {
+        constexpr ps2::u32 data = 0xA008u;
+        const std::array<ps2::u32, 7> code = {
+            (0x1Eu << 26) | (1u << 21) | (2u << 16),          // LQ r2,0(r1)
+            (0x1Fu << 26) | (1u << 21) | (2u << 16) | 0x18u, // SQ r2,0x18(r1)
+            (0x31u << 26) | (1u << 21) | (3u << 16) | 4u,    // LWC1 f3,4(r1)
+            (0x39u << 26) | (1u << 21) | (3u << 16) | 0x38u, // SWC1 f3,0x38(r1)
+            (0x36u << 26) | (1u << 21) | (4u << 16),          // LQC2 vf4,0(r1)
+            (0x3Eu << 26) | (1u << 21) | (4u << 16) | 0x48u, // SQC2 vf4,0x48(r1)
+            0x0000000Cu,
+        };
+        ps2::Ps2System exact;
+        ps2::Ps2System native;
+        for (ps2::u32 i = 0u; i < code.size(); ++i) {
+            ok = expect(
+                exact.bus().write32(pc + i * 4u, code[i]) &&
+                native.bus().write32(pc + i * 4u, code[i]),
+                "EE dynarec wide fastmem code setup failed") && ok;
+        }
+
+        constexpr ps2::u64 lo = 0x0123456789ABCDEFull;
+        constexpr ps2::u64 hi = 0xFEDCBA9876543210ull;
+        const ps2::u32 source = data & ~0xFu;
+        ok = expect(
+            exact.bus().write64(source, lo) &&
+            exact.bus().write64(source + 8u, hi) &&
+            native.bus().write64(source, lo) &&
+            native.bus().write64(source + 8u, hi),
+            "EE dynarec wide fastmem data setup failed") && ok;
+
+        exact.ee().reset(pc);
+        native.ee().reset(pc);
+        exact.ee().state().gpr[1].lo = data;
+        native.ee().state().gpr[1].lo = data;
+        std::string error;
+        for (ps2::u32 i = 0u; i < 6u; ++i) {
+            ok = expect(
+                exact.ee().step(error),
+                "EE dynarec wide fastmem reference step failed") && ok;
+        }
+
+        native.ee().set_dynarec_enabled(true);
+        const auto result = native.ee().run_dynarec(
+            64u,
+            native.ram().data(),
+            native.ram().page_generation_data(),
+            native.ram().code_page_tracked_data());
+
+        ps2::u64 exact_sq_lo = 0u;
+        ps2::u64 exact_sq_hi = 0u;
+        ps2::u64 native_sq_lo = 0u;
+        ps2::u64 native_sq_hi = 0u;
+        ps2::u32 exact_fpu = 0u;
+        ps2::u32 native_fpu = 0u;
+        const ps2::u32 sq_address = (data + 0x18u) & ~0xFu;
+        const ps2::u32 swc_address = data + 0x38u;
+        const ps2::u32 sqc_address = (data + 0x48u) & ~0xFu;
+        ps2::u64 exact_vu_lo = 0u;
+        ps2::u64 exact_vu_hi = 0u;
+        ps2::u64 native_vu_lo = 0u;
+        ps2::u64 native_vu_hi = 0u;
+
+        ok = expect(
+            exact.ram().read64(sq_address, exact_sq_lo) &&
+            exact.ram().read64(sq_address + 8u, exact_sq_hi) &&
+            native.ram().read64(sq_address, native_sq_lo) &&
+            native.ram().read64(sq_address + 8u, native_sq_hi) &&
+            exact.ram().read32(swc_address, exact_fpu) &&
+            native.ram().read32(swc_address, native_fpu) &&
+            exact.ram().read64(sqc_address, exact_vu_lo) &&
+            exact.ram().read64(sqc_address + 8u, exact_vu_hi) &&
+            native.ram().read64(sqc_address, native_vu_lo) &&
+            native.ram().read64(sqc_address + 8u, native_vu_hi),
+            "EE dynarec wide fastmem results could not be read") && ok;
+
+        ok = expect(
+            result.retired == 6u &&
+            exact.ee().state().gpr[2].lo == native.ee().state().gpr[2].lo &&
+            exact.ee().state().gpr[2].hi == native.ee().state().gpr[2].hi &&
+            exact.ee().state().fpr[3] == native.ee().state().fpr[3] &&
+            exact.ee().state().vu_vf[4].lo == native.ee().state().vu_vf[4].lo &&
+            exact.ee().state().vu_vf[4].hi == native.ee().state().vu_vf[4].hi &&
+            exact_sq_lo == native_sq_lo &&
+            exact_sq_hi == native_sq_hi &&
+            exact_fpu == native_fpu &&
+            exact_vu_lo == native_vu_lo &&
+            exact_vu_hi == native_vu_hi,
+            "EE second-gen wide fastmem transfer diverged") && ok;
+    }
+
+    // Link-register writes must not destroy the old branch source/target.
+    {
+        const std::array<ps2::u32, 5> jalr_code = {
+            (31u << 21) | (31u << 11) | 0x09u, // JALR r31,r31
+            (0x09u << 26) | (2u << 16) | 2u,    // delay
+            (0x09u << 26) | (3u << 16) | 99u,  // skipped
+            (0x09u << 26) | (3u << 16) | 3u,   // target
+            0x0000000Cu,
+        };
+        ps2::Ps2System exact;
+        ps2::Ps2System native;
+        for (ps2::u32 i = 0u; i < jalr_code.size(); ++i) {
+            ok = expect(
+                exact.bus().write32(pc + i * 4u, jalr_code[i]) &&
+                native.bus().write32(pc + i * 4u, jalr_code[i]),
+                "EE dynarec JALR edge code setup failed") && ok;
+        }
+        exact.ee().reset(pc);
+        native.ee().reset(pc);
+        exact.ee().state().gpr[31].lo = pc + 12u;
+        native.ee().state().gpr[31].lo = pc + 12u;
+        std::string error;
+        for (ps2::u32 i = 0u; i < 3u; ++i) {
+            ok = expect(
+                exact.ee().step(error),
+                "EE dynarec JALR edge reference step failed") && ok;
+        }
+        native.ee().set_dynarec_enabled(true);
+        const auto result = native.ee().run_dynarec(
+            32u,
+            native.ram().data(),
+            native.ram().page_generation_data(),
+            native.ram().code_page_tracked_data());
+        ok = expect(
+            result.retired == 3u &&
+            exact.ee().state().pc == native.ee().state().pc &&
+            exact.ee().state().gpr[31].lo == native.ee().state().gpr[31].lo &&
+            exact.ee().state().gpr[2].lo == native.ee().state().gpr[2].lo &&
+            exact.ee().state().gpr[3].lo == native.ee().state().gpr[3].lo,
+            "EE second-gen JALR rd=rs source ordering diverged") && ok;
+
+        const std::array<ps2::u32, 4> regimm_code = {
+            (0x01u << 26) | (31u << 21) | (0x10u << 16) | 1u, // BLTZAL r31
+            (0x09u << 26) | (2u << 16) | 5u, // delay
+            (0x09u << 26) | (3u << 16) | 7u, // target
+            0x0000000Cu,
+        };
+        ps2::Ps2System exact_regimm;
+        ps2::Ps2System native_regimm;
+        for (ps2::u32 i = 0u; i < regimm_code.size(); ++i) {
+            ok = expect(
+                exact_regimm.bus().write32(pc + i * 4u, regimm_code[i]) &&
+                native_regimm.bus().write32(pc + i * 4u, regimm_code[i]),
+                "EE dynarec REGIMM link code setup failed") && ok;
+        }
+        exact_regimm.ee().reset(pc);
+        native_regimm.ee().reset(pc);
+        exact_regimm.ee().state().gpr[31].lo = 0xFFFFFFFFFFFFFFFFull;
+        native_regimm.ee().state().gpr[31].lo = 0xFFFFFFFFFFFFFFFFull;
+        for (ps2::u32 i = 0u; i < 3u; ++i) {
+            ok = expect(
+                exact_regimm.ee().step(error),
+                "EE dynarec REGIMM link reference step failed") && ok;
+        }
+        native_regimm.ee().set_dynarec_enabled(true);
+        const auto regimm_result = native_regimm.ee().run_dynarec(
+            32u,
+            native_regimm.ram().data(),
+            native_regimm.ram().page_generation_data(),
+            native_regimm.ram().code_page_tracked_data());
+        ok = expect(
+            regimm_result.retired == 3u &&
+            exact_regimm.ee().state().pc == native_regimm.ee().state().pc &&
+            exact_regimm.ee().state().gpr[31].lo ==
+                native_regimm.ee().state().gpr[31].lo &&
+            exact_regimm.ee().state().gpr[2].lo ==
+                native_regimm.ee().state().gpr[2].lo &&
+            exact_regimm.ee().state().gpr[3].lo ==
+                native_regimm.ee().state().gpr[3].lo,
+            "EE second-gen BLTZAL rs=r31 ordering diverged") && ok;
+    }
+
     // COP0 reads stay native; state-changing writes are precise exits.
     {
         const std::array<ps2::u32, 4> code = {
