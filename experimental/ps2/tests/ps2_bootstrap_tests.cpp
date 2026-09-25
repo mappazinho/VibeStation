@@ -4223,6 +4223,52 @@ bool test_ee_second_gen_dynarec() {
             "EE second-gen extended integer block diverged") && ok;
     }
 
+    // COP1 register/control transfers stay native around FPU-heavy code.
+    {
+        const std::array<ps2::u32, 7> code = {
+            (0x0Fu << 26) | (1u << 16) | 0x3F80u, // LUI r1,0x3f80
+            (0x11u << 26) | (0x04u << 21) | (1u << 16) | (2u << 11), // MTC1 f2,r1
+            (0x11u << 26) | (0x00u << 21) | (3u << 16) | (2u << 11), // MFC1 r3,f2
+            (0x11u << 26) | (0x02u << 21) | (4u << 16) | (0u << 11), // CFC1 r4,f0
+            (0x11u << 26) | (0x06u << 21) | (1u << 16) | (31u << 11), // CTC1 r1,fcr31
+            (0x11u << 26) | (0x02u << 21) | (5u << 16) | (31u << 11), // CFC1 r5,fcr31
+            0x0000000Cu,
+        };
+        ps2::Ps2System exact;
+        ps2::Ps2System native;
+        for (ps2::u32 i = 0u; i < code.size(); ++i) {
+            ok = expect(
+                exact.bus().write32(pc + i * 4u, code[i]) &&
+                native.bus().write32(pc + i * 4u, code[i]),
+                "EE dynarec COP1 move code setup failed") && ok;
+        }
+        exact.ee().reset(pc);
+        native.ee().reset(pc);
+        std::string error;
+        for (ps2::u32 i = 0u; i + 1u < code.size(); ++i) {
+            ok = expect(
+                exact.ee().step_predecoded(code[i], error),
+                "EE dynarec COP1 move reference failed") && ok;
+        }
+        native.ee().set_dynarec_enabled(true);
+        const auto result = native.ee().run_dynarec(
+            64u,
+            native.ram().data(),
+            native.ram().page_generation_data(),
+            native.ram().code_page_tracked_data());
+        const auto& a = exact.ee().state();
+        const auto& b = native.ee().state();
+        ok = expect(
+            result.retired == code.size() - 1u &&
+            a.pc == b.pc &&
+            a.fpr[2] == b.fpr[2] &&
+            a.fcr[31] == b.fcr[31] &&
+            a.gpr[3].lo == b.gpr[3].lo &&
+            a.gpr[4].lo == b.gpr[4].lo &&
+            a.gpr[5].lo == b.gpr[5].lo,
+            "EE second-gen COP1 move block diverged") && ok;
+    }
+
     // Direct successor linking across a taken branch.
     {
         const std::array<ps2::u32, 6> code = {
