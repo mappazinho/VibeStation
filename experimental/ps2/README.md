@@ -80,25 +80,49 @@ UI capture in 58 seconds after these changes, versus roughly two minutes
 before. This is a measured host-runtime improvement, not a change to the
 emulated EE clock or a guarantee of full-speed emulation on other machines.
 
-## Experimental EE recompiler
+## EE execution backends
 
-The x64 EE recompiler is retained as an **opt-in research backend**. The
-normal PS2 BIOS path uses the cached/predecoded interpreter because current
-measurements show it is faster for sustained BIOS animation.
+The cached/predecoded interpreter remains the default and is the correctness
+baseline. The original `EeJit` is retained behind `--ee-jit` for historical
+comparison only.
 
-Run `VibeStationPS2Lab --ee-jit` or add `--ee-jit` to the headless trace
-only when testing the experimental native backend. The current emitter still
-synchronizes architectural state frequently and returns to the system layer
-after short blocks, so its dispatch and state-spill overhead can outweigh
-the native instruction execution benefit.
+A separate second-generation x64 backend is available with
+`--ee-dynarec`. It does not extend the original JIT. It builds
+multi-instruction RAM-resident basic blocks, keeps a small hot set of guest
+GPRs (plus HI/LO when used) in host registers for the lifetime of each block,
+uses guarded main-RAM fastmem, includes ordinary RAM stores with code-page
+generation barriers, and handles select-0 COP0 reads/writes. State-changing
+COP0 writes are explicit exits so the system layer can immediately resample
+interrupt/device state.
 
-The default interpreter now caches RAM-resident instruction blocks, reuses
-predecoded opcodes, batches device timing between event boundaries, and
-continues across ordinary data stores unless they invalidate the executing
-code page. Future recompiler work should use a second-generation design with
-persistent host-register allocation, dirty-register tracking, direct block
-linking, fastmem, and lazy architectural-state synchronization rather than
-continuing to extend the current first-stage emitter.
+Compiled successors are linked in the dynarec cache and followed inside one
+backend dispatch. The system still owns timing: video transitions, SIF
+completion, EE timers, COP0 Compare and the exact EE/IOP 8:1 boundary define
+the maximum retirement deadline passed to the backend. Deadline-capped block
+formation prevents a native block from crossing one of those boundaries.
+In dynarec mode repeated exact IOP sub-deadlines stay inside the existing
+quiet super-dispatch; the interpreter continues using its proven normal path.
+
+The two native modes are mutually exclusive:
+
+```text
+vibestation_ps2_bios_trace <bios> 400000000 --profile --gs-thread --ee-dynarec
+VibeStationPS2Lab --bios <bios> --ee-dynarec
+```
+
+Use the repeatable Windows comparison harness to validate both performance
+and output:
+
+```powershell
+.\experimental\ps2\scripts\benchmark-ee-dynarec.ps1 `
+    -BiosPath 'C:\path\to\your\bios.bin'
+```
+
+It runs three 400M Release traces for the cached interpreter and the
+second-generation dynarec, reports median field rate/run time, and fails if
+the dynarec changes the interpreter's final display hash or raster-pixel
+count. The dynarec remains opt-in until that comparison demonstrates a
+reliable sustained BIOS win.
 
 ## Verified retail BIOS startup visual
 
