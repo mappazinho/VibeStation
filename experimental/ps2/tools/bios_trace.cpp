@@ -1592,6 +1592,8 @@ int main(int argc, char** argv) {
         << " EE_DYNAREC_REGCACHE_FLUSHES="
         << dynarec.register_cache_flushes()
         << " EE_DYNAREC_CACHE_FLUSHES=" << dynarec.cache_flushes()
+        << " EE_DYNAREC_FUSED_STATIC_JUMPS="
+        << dynarec.fused_static_jumps()
         << " EE_DYNAREC_DISPATCH_CALLS=" << dynarec.dispatch_calls()
         << " EE_DYNAREC_DEADLINE_EXITS=" << dynarec.deadline_exits()
         << " EE_DYNAREC_UNSUPPORTED_EXITS=" << dynarec.unsupported_exits()
