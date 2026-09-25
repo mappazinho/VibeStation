@@ -31,6 +31,14 @@ constexpr std::size_t kCodePageSize = 64u * 1024u;
 constexpr std::size_t kMaxCodePages = 1024u;
 constexpr std::size_t kBlockCacheEntries = 65536u;
 
+u32 compile_budget_for_limit(u32 limit) {
+    limit = std::min(limit, kMaxBlockInstructions);
+    if (limit <= 16u) return limit;
+    if (limit < 32u) return 16u;
+    if (limit < 64u) return 32u;
+    return 64u;
+}
+
 u32 ram_physical(u32 address, bool& valid) {
     u32 physical = address;
     if (address >= 0x20000000u && address < 0x22000000u) {
@@ -1737,16 +1745,24 @@ EeDynarec::Block* EeDynarec::lookup_or_compile(
     const u32 page = physical / kPageSize;
     code_page_tracked[page] = 1u;
     const u32 generation = page_generations[page];
+    const u32 compile_budget =
+        compile_budget_for_limit(compile_limit);
 
+    // A PC can execute under very different event deadlines. Keep the
+    // 1-16 instruction exact-timing variants separate from the 16/32/64
+    // throughput variants so an 8:1 IOP deadline cannot permanently poison
+    // the cache with a tiny block.
+    const u64 key =
+        (static_cast<u64>(pc >> 2u) * 11400714819323198485ull) ^
+        (static_cast<u64>(compile_budget) * 0x9E3779B97F4A7C15ull);
     const std::size_t index =
-        ((static_cast<u64>(pc >> 2u) * 11400714819323198485ull) >>
-         (64u - 16u)) &
+        static_cast<std::size_t>(key ^ (key >> 32u)) &
         (blocks_.size() - 1u);
     Block& cached = blocks_[index];
     if (cached.function != nullptr &&
         cached.pc == pc &&
         cached.page_generation == generation &&
-        cached.instruction_count <= compile_limit) {
+        cached.compile_budget == compile_budget) {
         return &cached;
     }
 
@@ -1759,7 +1775,7 @@ EeDynarec::Block* EeDynarec::lookup_or_compile(
     const u32 available =
         std::min(
             std::min(kMaxBlockInstructions, page_remaining),
-            compile_limit);
+            compile_budget);
 
     for (u32 i = 0u; i < available; ++i) {
         const u32 instruction =
@@ -2142,6 +2158,7 @@ EeDynarec::Block* EeDynarec::lookup_or_compile(
     cached.taken_pc = taken_pc;
     cached.fallthrough_pc = fallthrough_pc;
     cached.code_page = page;
+    cached.compile_budget = compile_budget;
     cached.fastmem_loads = cs.fastmem_loads;
     cached.fastmem_stores = cs.fastmem_stores;
     cached.cached_register_uses = cs.out.register_cache_uses;
@@ -2173,10 +2190,13 @@ EeDynarec::Block* EeDynarec::resolve_link(
     const u32 generation =
         page_generations[physical / kPageSize];
 
+    const u32 requested_budget =
+        compile_budget_for_limit(compile_limit);
     if (slot != nullptr &&
         slot->pc == target_pc &&
         slot->page_generation == generation &&
         generation_slot == generation &&
+        slot->compile_budget == requested_budget &&
         slot->function != nullptr) {
         ++link_hits_;
         return slot;
