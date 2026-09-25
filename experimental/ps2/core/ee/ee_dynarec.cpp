@@ -2341,7 +2341,6 @@ EeDynarec::Block* EeDynarec::lookup_or_compile(
         const u32 fetch_physical =
             ram_physical(fetch_pc, fetch_valid);
         if (!fetch_valid || (fetch_physical & 3u) != 0u ||
-            already_in_trace(fetch_pc) ||
             !ensure_code_page(fetch_physical)) {
             break;
         }
@@ -2413,6 +2412,49 @@ EeDynarec::Block* EeDynarec::lookup_or_compile(
                   control == ControlKind::Bnel) &&
                  writes_gpr(delay, rt))) {
                 break;
+            }
+
+            // Keep the predicted direction of safe non-likely integer
+            // branches inside this native trace. Backward edges are normally
+            // loop back-edges and are predicted taken; forward edges are
+            // predicted fallthrough. The compile budget bounds unrolling, so
+            // repeated guest PCs are safe and retain the exact event deadline.
+            if (is_fusable_conditional(control) &&
+                cs.fused_conditional_count <
+                    cs.fused_conditionals.size() &&
+                cs.count + 3u <= available) {
+                const u32 target =
+                    branch_target(fetch_pc, instruction);
+                const u32 fallthrough = fetch_pc + 8u;
+                const bool predicted_taken =
+                    target <= fetch_pc;
+                const u32 predicted_pc =
+                    predicted_taken ? target : fallthrough;
+                const u32 side_exit_pc =
+                    predicted_taken ? fallthrough : target;
+
+                bool predicted_valid = false;
+                const u32 predicted_physical =
+                    ram_physical(predicted_pc, predicted_valid);
+                if (predicted_valid &&
+                    predicted_pc != delay_pc &&
+                    ensure_code_page(predicted_physical)) {
+                    FusedConditionalEdge& edge =
+                        cs.fused_conditionals[
+                            cs.fused_conditional_count++];
+                    edge.branch_index = cs.count;
+                    edge.delay_index = cs.count + 1u;
+                    edge.control = control;
+                    edge.taken_pc = target;
+                    edge.fallthrough_pc = fallthrough;
+                    edge.side_exit_pc = side_exit_pc;
+                    edge.predicted_taken = predicted_taken;
+
+                    append(fetch_pc, instruction);
+                    append(delay_pc, delay);
+                    fetch_pc = predicted_pc;
+                    continue;
+                }
             }
 
             cs.control_index = cs.count;
