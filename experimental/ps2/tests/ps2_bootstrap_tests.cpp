@@ -3,6 +3,7 @@
 #include <bit>
 #include <cstdlib>
 #include <iostream>
+#include <memory>
 #include <string>
 
 namespace {
@@ -4125,8 +4126,10 @@ bool test_ee_second_gen_dynarec() {
             (1u << 21) | (3u << 16) | (4u << 11) | 0x25u, // OR
             0x0000000Cu, // SYSCALL: explicit interpreter boundary
         };
-        ps2::Ps2System exact;
-        ps2::Ps2System native;
+        auto exact_storage = std::make_unique<ps2::Ps2System>();
+        auto& exact = *exact_storage;
+        auto native_storage = std::make_unique<ps2::Ps2System>();
+        auto& native = *native_storage;
         for (ps2::u32 i = 0u; i < code.size(); ++i) {
             ok = expect(
                 exact.bus().write32(pc + i * 4u, code[i]) &&
@@ -4189,8 +4192,10 @@ bool test_ee_second_gen_dynarec() {
             0x0000000Fu,                                   // SYNC
             0x0000000Cu,                                   // SYSCALL boundary
         };
-        ps2::Ps2System exact;
-        ps2::Ps2System native;
+        auto exact_storage = std::make_unique<ps2::Ps2System>();
+        auto& exact = *exact_storage;
+        auto native_storage = std::make_unique<ps2::Ps2System>();
+        auto& native = *native_storage;
         for (ps2::u32 i = 0u; i < code.size(); ++i) {
             ok = expect(
                 exact.bus().write32(pc + i * 4u, code[i]) &&
@@ -4242,8 +4247,10 @@ bool test_ee_second_gen_dynarec() {
             (7u << 11) | 0x10u,                            // MFHI r7
             0x0000000Cu,
         };
-        ps2::Ps2System exact;
-        ps2::Ps2System native;
+        auto exact_storage = std::make_unique<ps2::Ps2System>();
+        auto& exact = *exact_storage;
+        auto native_storage = std::make_unique<ps2::Ps2System>();
+        auto& native = *native_storage;
         for (ps2::u32 i = 0u; i < signed_code.size(); ++i) {
             ok = expect(
                 exact.bus().write32(pc + i * 4u, signed_code[i]) &&
@@ -4292,8 +4299,10 @@ bool test_ee_second_gen_dynarec() {
             (6u << 11) | 0x12u,
             0x0000000Cu,
         };
-        ps2::Ps2System exact_u;
-        ps2::Ps2System native_u;
+        auto exact_u_storage = std::make_unique<ps2::Ps2System>();
+        auto& exact_u = *exact_u_storage;
+        auto native_u_storage = std::make_unique<ps2::Ps2System>();
+        auto& native_u = *native_u_storage;
         for (ps2::u32 i = 0u; i < unsigned_code.size(); ++i) {
             ok = expect(
                 exact_u.bus().write32(pc + i * 4u, unsigned_code[i]) &&
@@ -4350,8 +4359,10 @@ bool test_ee_second_gen_dynarec() {
                 (4u << 11) | 0x10u, // MFHI
                 0x0000000Cu,
             };
-            ps2::Ps2System exact_edge;
-            ps2::Ps2System native_edge;
+            auto exact_edge_storage = std::make_unique<ps2::Ps2System>();
+        auto& exact_edge = *exact_edge_storage;
+            auto native_edge_storage = std::make_unique<ps2::Ps2System>();
+        auto& native_edge = *native_edge_storage;
             for (ps2::u32 i = 0u; i < code.size(); ++i) {
                 ok = expect(
                     exact_edge.bus().write32(pc + i * 4u, code[i]) &&
@@ -4410,8 +4421,10 @@ bool test_ee_second_gen_dynarec() {
                 (6u << 11) | (7u << 6) | 0x20u, // CVT.S.W f7,f6
             0x0000000Cu,
         };
-        ps2::Ps2System exact;
-        ps2::Ps2System native;
+        auto exact_storage = std::make_unique<ps2::Ps2System>();
+        auto& exact = *exact_storage;
+        auto native_storage = std::make_unique<ps2::Ps2System>();
+        auto& native = *native_storage;
         for (ps2::u32 i = 0u; i < code.size(); ++i) {
             ok = expect(
                 exact.bus().write32(pc + i * 4u, code[i]) &&
@@ -4475,8 +4488,10 @@ bool test_ee_second_gen_dynarec() {
         }};
 
         for (const auto& input : inputs) {
-            ps2::Ps2System exact;
-            ps2::Ps2System native;
+            auto exact_storage = std::make_unique<ps2::Ps2System>();
+        auto& exact = *exact_storage;
+            auto native_storage = std::make_unique<ps2::Ps2System>();
+        auto& native = *native_storage;
             for (ps2::u32 i = 0u; i < code.size(); ++i) {
                 ok = expect(
                     exact.bus().write32(pc + i * 4u, code[i]) &&
@@ -4524,8 +4539,10 @@ bool test_ee_second_gen_dynarec() {
                 (2u << 11) | (5u << 6) | 0x07u, // NEG.S f5,f2
             0x0000000Cu,
         };
-        ps2::Ps2System exact;
-        ps2::Ps2System native;
+        auto exact_storage = std::make_unique<ps2::Ps2System>();
+        auto& exact = *exact_storage;
+        auto native_storage = std::make_unique<ps2::Ps2System>();
+        auto& native = *native_storage;
         for (ps2::u32 i = 0u; i < code.size(); ++i) {
             ok = expect(
                 exact.bus().write32(pc + i * 4u, code[i]) &&
@@ -4568,8 +4585,10 @@ bool test_ee_second_gen_dynarec() {
             (0x11u << 26) | (0x02u << 21) | (5u << 16) | (31u << 11), // CFC1 r5,fcr31
             0x0000000Cu,
         };
-        ps2::Ps2System exact;
-        ps2::Ps2System native;
+        auto exact_storage = std::make_unique<ps2::Ps2System>();
+        auto& exact = *exact_storage;
+        auto native_storage = std::make_unique<ps2::Ps2System>();
+        auto& native = *native_storage;
         for (ps2::u32 i = 0u; i < code.size(); ++i) {
             ok = expect(
                 exact.bus().write32(pc + i * 4u, code[i]) &&
@@ -4613,8 +4632,10 @@ bool test_ee_second_gen_dynarec() {
             (0x09u << 26) | (3u << 16) | 3u,
             0x0000000Cu,
         };
-        ps2::Ps2System exact;
-        ps2::Ps2System native;
+        auto exact_storage = std::make_unique<ps2::Ps2System>();
+        auto& exact = *exact_storage;
+        auto native_storage = std::make_unique<ps2::Ps2System>();
+        auto& native = *native_storage;
         for (ps2::u32 i = 0u; i < code.size(); ++i) {
             ok = expect(
                 exact.bus().write32(pc + i * 4u, code[i]) &&
@@ -4667,8 +4688,10 @@ bool test_ee_second_gen_dynarec() {
             (0x09u << 26) | (4u << 16) | 4u, // fallthrough
             0x0000000Cu,
         };
-        ps2::Ps2System exact;
-        ps2::Ps2System native;
+        auto exact_storage = std::make_unique<ps2::Ps2System>();
+        auto& exact = *exact_storage;
+        auto native_storage = std::make_unique<ps2::Ps2System>();
+        auto& native = *native_storage;
         for (ps2::u32 i = 0u; i < code.size(); ++i) {
             ok = expect(
                 exact.bus().write32(pc + i * 4u, code[i]) &&
@@ -4724,8 +4747,10 @@ bool test_ee_second_gen_dynarec() {
             (0x09u << 26) | (31u << 21) | (4u << 16),      // r4=r31
             0x0000000Cu,                                    // boundary
         };
-        ps2::Ps2System exact;
-        ps2::Ps2System native;
+        auto exact_storage = std::make_unique<ps2::Ps2System>();
+        auto& exact = *exact_storage;
+        auto native_storage = std::make_unique<ps2::Ps2System>();
+        auto& native = *native_storage;
         for (ps2::u32 i = 0u; i < code.size(); ++i) {
             ok = expect(
                 exact.bus().write32(pc + i * 4u, code[i]) &&
@@ -4766,8 +4791,10 @@ bool test_ee_second_gen_dynarec() {
     // delay slot instead of falling through from the delay-slot address.
     {
         constexpr ps2::u32 target = pc + 0x20u;
-        ps2::Ps2System exact;
-        ps2::Ps2System native;
+        auto exact_storage = std::make_unique<ps2::Ps2System>();
+        auto& exact = *exact_storage;
+        auto native_storage = std::make_unique<ps2::Ps2System>();
+        auto& native = *native_storage;
         const ps2::u32 jump =
             (0x02u << 26) | ((target >> 2u) & 0x03FFFFFFu);
         const ps2::u32 delay =
@@ -4814,7 +4841,8 @@ bool test_ee_second_gen_dynarec() {
             (0x23u << 26) | (1u << 21) | (3u << 16), // guarded LW
             0x0000000Cu,
         };
-        ps2::Ps2System native;
+        auto native_storage = std::make_unique<ps2::Ps2System>();
+        auto& native = *native_storage;
         for (ps2::u32 i = 0u; i < code.size(); ++i) {
             ok = expect(
                 native.bus().write32(pc + i * 4u, code[i]),
@@ -4855,8 +4883,10 @@ bool test_ee_second_gen_dynarec() {
             (0x09u << 26) | (4u << 16) | 4u;
         const ps2::u32 syscall = 0x0000000Cu;
 
-        ps2::Ps2System exact;
-        ps2::Ps2System native;
+        auto exact_storage = std::make_unique<ps2::Ps2System>();
+        auto& exact = *exact_storage;
+        auto native_storage = std::make_unique<ps2::Ps2System>();
+        auto& native = *native_storage;
         for (auto* system : {&exact, &native}) {
             ok = expect(
                 system->bus().write32(cross_pc, jal) &&
@@ -4929,7 +4959,8 @@ bool test_ee_second_gen_dynarec() {
             (0x09u << 26) | (3u << 16) | 3u,               // must not run
             0x0000000Cu,
         };
-        ps2::Ps2System native;
+        auto native_storage = std::make_unique<ps2::Ps2System>();
+        auto& native = *native_storage;
         ok = expect(
             native.bus().write32(cross_pc, code[0]) &&
             native.bus().write32(cross_pc + 4u, code[1]) &&
@@ -4966,7 +4997,8 @@ bool test_ee_second_gen_dynarec() {
         }
         code[20] = 0x0000000Cu; // SYSCALL boundary
 
-        ps2::Ps2System native;
+        auto native_storage = std::make_unique<ps2::Ps2System>();
+        auto& native = *native_storage;
         for (ps2::u32 i = 0u; i < code.size(); ++i) {
             ok = expect(
                 native.bus().write32(pc + i * 4u, code[i]),
@@ -5025,7 +5057,8 @@ bool test_ee_second_gen_dynarec() {
             (0x23u << 26) | (1u << 21) | (2u << 16), // LW r2,0(r1)
             (0x09u << 26) | (3u << 16) | 3u,
         };
-        ps2::Ps2System native;
+        auto native_storage = std::make_unique<ps2::Ps2System>();
+        auto& native = *native_storage;
         for (ps2::u32 i = 0u; i < code.size(); ++i) {
             ok = expect(
                 native.bus().write32(pc + i * 4u, code[i]),
@@ -5058,8 +5091,10 @@ bool test_ee_second_gen_dynarec() {
             (0x09u << 26) | (4u << 16) | 4u,
             0x0000000Cu,
         };
-        ps2::Ps2System exact;
-        ps2::Ps2System native;
+        auto exact_storage = std::make_unique<ps2::Ps2System>();
+        auto& exact = *exact_storage;
+        auto native_storage = std::make_unique<ps2::Ps2System>();
+        auto& native = *native_storage;
         for (ps2::u32 i = 0u; i < code.size(); ++i) {
             ok = expect(
                 exact.bus().write32(pc + i * 4u, code[i]) &&
@@ -5099,7 +5134,8 @@ bool test_ee_second_gen_dynarec() {
             native.ee().dynarec().fastmem_stores() != 0u,
             "EE second-gen fastmem counters were not exercised") && ok;
 
-        ps2::Ps2System cross_page;
+        auto cross_page_storage = std::make_unique<ps2::Ps2System>();
+        auto& cross_page = *cross_page_storage;
         const ps2::u32 cross_code[2] = {
             (0x3Fu << 26) | (1u << 21) | (2u << 16), // SD
             (0x09u << 26) | (3u << 16) | 3u,
@@ -5127,7 +5163,8 @@ bool test_ee_second_gen_dynarec() {
             cross_page.ee().state().pc == pc,
             "EE second-gen cross-page store bypassed its guard") && ok;
 
-        ps2::Ps2System selfmod;
+        auto selfmod_storage = std::make_unique<ps2::Ps2System>();
+        auto& selfmod = *selfmod_storage;
         const ps2::u32 self_code[3] = {
             (0x2Bu << 26) | (1u << 21) | (2u << 16),
             (0x09u << 26) | (3u << 16) | 3u,
@@ -5166,8 +5203,10 @@ bool test_ee_second_gen_dynarec() {
             (0x3Eu << 26) | (1u << 21) | (4u << 16) | 0x48u, // SQC2 vf4,0x48(r1)
             0x0000000Cu,
         };
-        ps2::Ps2System exact;
-        ps2::Ps2System native;
+        auto exact_storage = std::make_unique<ps2::Ps2System>();
+        auto& exact = *exact_storage;
+        auto native_storage = std::make_unique<ps2::Ps2System>();
+        auto& native = *native_storage;
         for (ps2::u32 i = 0u; i < code.size(); ++i) {
             ok = expect(
                 exact.bus().write32(pc + i * 4u, code[i]) &&
@@ -5254,8 +5293,10 @@ bool test_ee_second_gen_dynarec() {
             (0x09u << 26) | (3u << 16) | 3u,   // target
             0x0000000Cu,
         };
-        ps2::Ps2System exact;
-        ps2::Ps2System native;
+        auto exact_storage = std::make_unique<ps2::Ps2System>();
+        auto& exact = *exact_storage;
+        auto native_storage = std::make_unique<ps2::Ps2System>();
+        auto& native = *native_storage;
         for (ps2::u32 i = 0u; i < jalr_code.size(); ++i) {
             ok = expect(
                 exact.bus().write32(pc + i * 4u, jalr_code[i]) &&
@@ -5300,8 +5341,10 @@ bool test_ee_second_gen_dynarec() {
             (0x09u << 26) | (3u << 16) | 7u, // target
             0x0000000Cu,
         };
-        ps2::Ps2System exact_regimm;
-        ps2::Ps2System native_regimm;
+        auto exact_regimm_storage = std::make_unique<ps2::Ps2System>();
+        auto& exact_regimm = *exact_regimm_storage;
+        auto native_regimm_storage = std::make_unique<ps2::Ps2System>();
+        auto& native_regimm = *native_regimm_storage;
         for (ps2::u32 i = 0u; i < regimm_code.size(); ++i) {
             ok = expect(
                 exact_regimm.bus().write32(pc + i * 4u, regimm_code[i]) &&
@@ -5344,8 +5387,10 @@ bool test_ee_second_gen_dynarec() {
             (0x09u << 26) | (2u << 16) | 99u, // annulled
             0x0000000Cu,
         };
-        ps2::Ps2System exact;
-        ps2::Ps2System native;
+        auto exact_storage = std::make_unique<ps2::Ps2System>();
+        auto& exact = *exact_storage;
+        auto native_storage = std::make_unique<ps2::Ps2System>();
+        auto& native = *native_storage;
         for (ps2::u32 i = 0u; i < not_taken_code.size(); ++i) {
             ok = expect(
                 exact.bus().write32(pc + i * 4u, not_taken_code[i]) &&
@@ -5377,8 +5422,10 @@ bool test_ee_second_gen_dynarec() {
             (0x09u << 26) | (2u << 16) | 7u, // delay
             0x0000000Cu,
         };
-        ps2::Ps2System exact_taken;
-        ps2::Ps2System native_taken;
+        auto exact_taken_storage = std::make_unique<ps2::Ps2System>();
+        auto& exact_taken = *exact_taken_storage;
+        auto native_taken_storage = std::make_unique<ps2::Ps2System>();
+        auto& native_taken = *native_taken_storage;
         for (ps2::u32 i = 0u; i < taken_code.size(); ++i) {
             ok = expect(
                 exact_taken.bus().write32(pc + i * 4u, taken_code[i]) &&
@@ -5410,8 +5457,10 @@ bool test_ee_second_gen_dynarec() {
             (0x09u << 26) | (2u << 16) | 8u,
             0x0000000Cu,
         };
-        ps2::Ps2System exact_link;
-        ps2::Ps2System native_link;
+        auto exact_link_storage = std::make_unique<ps2::Ps2System>();
+        auto& exact_link = *exact_link_storage;
+        auto native_link_storage = std::make_unique<ps2::Ps2System>();
+        auto& native_link = *native_link_storage;
         for (ps2::u32 i = 0u; i < link_likely_code.size(); ++i) {
             ok = expect(
                 exact_link.bus().write32(pc + i * 4u, link_likely_code[i]) &&
@@ -5448,8 +5497,10 @@ bool test_ee_second_gen_dynarec() {
             0x0000000Cu, // not-taken boundary
             0x0000000Cu, // taken boundary
         };
-        ps2::Ps2System exact_false;
-        ps2::Ps2System native_false;
+        auto exact_false_storage = std::make_unique<ps2::Ps2System>();
+        auto& exact_false = *exact_false_storage;
+        auto native_false_storage = std::make_unique<ps2::Ps2System>();
+        auto& native_false = *native_false_storage;
         for (ps2::u32 i = 0u; i < code.size(); ++i) {
             ok = expect(
                 exact_false.bus().write32(pc + i * 4u, code[i]) &&
@@ -5476,8 +5527,10 @@ bool test_ee_second_gen_dynarec() {
             native_false.ee().state().gpr[2].lo == 0u,
             "EE second-gen BC1TL annul path diverged") && ok;
 
-        ps2::Ps2System exact_true;
-        ps2::Ps2System native_true;
+        auto exact_true_storage = std::make_unique<ps2::Ps2System>();
+        auto& exact_true = *exact_true_storage;
+        auto native_true_storage = std::make_unique<ps2::Ps2System>();
+        auto& native_true = *native_true_storage;
         for (ps2::u32 i = 0u; i < code.size(); ++i) {
             ok = expect(
                 exact_true.bus().write32(pc + i * 4u, code[i]) &&
@@ -5510,8 +5563,10 @@ bool test_ee_second_gen_dynarec() {
             (0x09u << 26) | (4u << 16) | 4u,
             0x0000000Cu,
         };
-        ps2::Ps2System exact_normal;
-        ps2::Ps2System native_normal;
+        auto exact_normal_storage = std::make_unique<ps2::Ps2System>();
+        auto& exact_normal = *exact_normal_storage;
+        auto native_normal_storage = std::make_unique<ps2::Ps2System>();
+        auto& native_normal = *native_normal_storage;
         for (ps2::u32 i = 0u; i < normal_code.size(); ++i) {
             ok = expect(
                 exact_normal.bus().write32(pc + i * 4u, normal_code[i]) &&
@@ -5548,8 +5603,10 @@ bool test_ee_second_gen_dynarec() {
             (0x10u << 26) | (4u << 21) | (4u << 16) | (11u << 11), // MTC0 Compare
             (0x09u << 26) | (5u << 16) | 5u,
         };
-        ps2::Ps2System exact;
-        ps2::Ps2System native;
+        auto exact_storage = std::make_unique<ps2::Ps2System>();
+        auto& exact = *exact_storage;
+        auto native_storage = std::make_unique<ps2::Ps2System>();
+        auto& native = *native_storage;
         for (ps2::u32 i = 0u; i < code.size(); ++i) {
             ok = expect(
                 exact.bus().write32(pc + i * 4u, code[i]) &&
@@ -5589,8 +5646,10 @@ bool test_ee_second_gen_dynarec() {
             (0x10u << 26) | (4u << 21) | (2u << 16) | (12u << 11),
             (0x09u << 26) | (3u << 16) | 3u,
         };
-        ps2::Ps2System exact;
-        ps2::Ps2System native;
+        auto exact_storage = std::make_unique<ps2::Ps2System>();
+        auto& exact = *exact_storage;
+        auto native_storage = std::make_unique<ps2::Ps2System>();
+        auto& native = *native_storage;
         for (ps2::u32 i = 0u; i < code.size(); ++i) {
             ok = expect(
                 exact.bus().write32(pc + i * 4u, code[i]) &&
@@ -5625,8 +5684,10 @@ bool test_ee_second_gen_dynarec() {
             (0x10u << 26) | (0x10u << 21) | 0x39u, // DI
             0x0000000Cu,
         };
-        ps2::Ps2System exact;
-        ps2::Ps2System native;
+        auto exact_storage = std::make_unique<ps2::Ps2System>();
+        auto& exact = *exact_storage;
+        auto native_storage = std::make_unique<ps2::Ps2System>();
+        auto& native = *native_storage;
         for (ps2::u32 i = 0u; i < code.size(); ++i) {
             ok = expect(
                 exact.bus().write32(pc + i * 4u, code[i]) &&
@@ -5678,8 +5739,10 @@ bool test_ee_second_gen_dynarec() {
             (0x10u << 26) | (4u << 21) | (2u << 16) | (9u << 11),
             (0x09u << 26) | (3u << 16) | 3u,
         };
-        ps2::Ps2System exact;
-        ps2::Ps2System native;
+        auto exact_storage = std::make_unique<ps2::Ps2System>();
+        auto& exact = *exact_storage;
+        auto native_storage = std::make_unique<ps2::Ps2System>();
+        auto& native = *native_storage;
         for (ps2::u32 i = 0u; i < code.size(); ++i) {
             ok = expect(
                 exact.bus().write32(pc + i * 4u, code[i]) &&
@@ -5722,8 +5785,10 @@ bool test_ee_second_gen_dynarec() {
             (0x09u << 26) | (2u << 21) | (3u << 16), // r3=r2
             0x0000000Cu,                           // SYSCALL boundary
         };
-        ps2::Ps2System exact;
-        ps2::Ps2System native;
+        auto exact_storage = std::make_unique<ps2::Ps2System>();
+        auto& exact = *exact_storage;
+        auto native_storage = std::make_unique<ps2::Ps2System>();
+        auto& native = *native_storage;
         for (ps2::u32 i = 0u; i < code.size(); ++i) {
             ok = expect(
                 exact.bus().write32(pc + i * 4u, code[i]) &&
@@ -5774,8 +5839,10 @@ bool test_ee_second_gen_dynarec() {
             (0x09u << 26) | (4u << 16) | 4u, // taken target
             0x0000000Cu,
         };
-        ps2::Ps2System exact;
-        ps2::Ps2System native;
+        auto exact_storage = std::make_unique<ps2::Ps2System>();
+        auto& exact = *exact_storage;
+        auto native_storage = std::make_unique<ps2::Ps2System>();
+        auto& native = *native_storage;
         for (ps2::u32 i = 0u; i < code.size(); ++i) {
             ok = expect(
                 exact.bus().write32(pc + i * 4u, code[i]) &&
@@ -5818,8 +5885,10 @@ bool test_ee_second_gen_dynarec() {
             (0x09u << 26) | (3u << 16) | 3u,
             0x0000000Cu,
         };
-        ps2::Ps2System exact;
-        ps2::Ps2System system;
+        auto exact_storage = std::make_unique<ps2::Ps2System>();
+        auto& exact = *exact_storage;
+        auto system_storage = std::make_unique<ps2::Ps2System>();
+        auto& system = *system_storage;
         for (ps2::u32 i = 0u; i < code.size(); ++i) {
             ok = expect(
                 exact.bus().write32(pc + i * 4u, code[i]) &&
@@ -5850,7 +5919,8 @@ bool test_ee_second_gen_dynarec() {
             "EE second-gen did not stop exactly at its event deadline") && ok;
     }
 #else
-    ps2::Ps2System system;
+    auto system_storage = std::make_unique<ps2::Ps2System>();
+        auto& system = *system_storage;
     system.ee().set_dynarec_enabled(true);
     const auto result = system.ee().run_dynarec(
         16u,
