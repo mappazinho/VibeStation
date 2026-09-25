@@ -1235,22 +1235,64 @@ bool emit_body(
     if (is_load(instruction)) {
         u32 width = 0u;
         bool sign = false;
+        u32 alignment_mask = 0u;
         switch (opcode) {
+        case 0x1Eu: width = 16u; alignment_mask = 0xFu; break; // LQ
         case 0x20u: width = 1u; sign = true; break;
         case 0x24u: width = 1u; break;
         case 0x21u: width = 2u; sign = true; break;
         case 0x25u: width = 2u; break;
         case 0x23u:
         case 0x30u: width = 4u; sign = true; break;
-        case 0x27u: width = 4u; break;
+        case 0x27u:
+        case 0x31u: width = 4u; break; // LWU / LWC1
         case 0x34u:
         case 0x37u: width = 8u; break;
+        case 0x36u: width = 16u; alignment_mask = 0xFu; break; // LQC2
         default: return false;
         }
 
         std::vector<std::size_t> fail;
-        emit_fastmem_address(out, rs, imm, width, fail);
-        if (rt != 0u) {
+        emit_fastmem_address(
+            out, rs, imm, width, fail, false, alignment_mask);
+
+        if (opcode == 0x31u) { // LWC1
+            out.load_indexed(RDX, RBP, RAX, 4u, false);
+            out.store32(
+                RBX,
+                static_cast<u32>(
+                    offsetof(EeCpuState, fpr) + rt * sizeof(u32)),
+                RDX);
+        } else if (opcode == 0x36u) { // LQC2
+            if (rt != 0u) {
+                out.load_indexed(RDX, RBP, RAX, 8u, false);
+                out.store64(
+                    RBX,
+                    static_cast<u32>(
+                        offsetof(EeCpuState, vu_vf) +
+                        rt * sizeof(EeGpr)),
+                    RDX);
+                out.load_indexed(RDX, RBP, RAX, 8u, false, 8u);
+                out.store64(
+                    RBX,
+                    static_cast<u32>(
+                        offsetof(EeCpuState, vu_vf) +
+                        rt * sizeof(EeGpr) + sizeof(u64)),
+                    RDX);
+            }
+        } else if (opcode == 0x1Eu) { // LQ
+            if (rt != 0u) {
+                out.load_indexed(RDX, RBP, RAX, 8u, false);
+                out.store_guest(rt, RDX);
+                out.load_indexed(RDX, RBP, RAX, 8u, false, 8u);
+                out.store64(
+                    RBX,
+                    static_cast<u32>(
+                        offsetof(EeCpuState, gpr) +
+                        rt * sizeof(EeGpr) + sizeof(u64)),
+                    RDX);
+            }
+        } else if (rt != 0u) {
             out.load_indexed(RAX, RBP, RAX, width, sign);
             if (width == 4u && sign) {
                 // MOVSXD already sign-extended.
@@ -1290,21 +1332,61 @@ bool emit_body(
 
     if (is_store(instruction)) {
         u32 width = 0u;
+        u32 alignment_mask = 0u;
         switch (opcode) {
+        case 0x1Fu: width = 16u; alignment_mask = 0xFu; break; // SQ
         case 0x28u: width = 1u; break;
         case 0x29u: width = 2u; break;
         case 0x2Bu:
-        case 0x38u: width = 4u; break;
+        case 0x38u:
+        case 0x39u: width = 4u; break; // SW / SC / SWC1
         case 0x3Cu:
         case 0x3Fu: width = 8u; break;
+        case 0x3Eu: width = 16u; alignment_mask = 0xFu; break; // SQC2
         default: return false;
         }
 
         std::vector<std::size_t> fail;
         emit_fastmem_address(
-            out, rs, imm, width, fail, true);
-        out.load_guest(RDX, rt, width != 8u);
-        out.store_indexed(RBP, RAX, RDX, width);
+            out, rs, imm, width, fail, true, alignment_mask);
+
+        if (opcode == 0x39u) { // SWC1
+            out.load32(
+                RDX,
+                RBX,
+                static_cast<u32>(
+                    offsetof(EeCpuState, fpr) + rt * sizeof(u32)));
+            out.store_indexed(RBP, RAX, RDX, 4u);
+        } else if (opcode == 0x3Eu) { // SQC2
+            out.load64(
+                RDX,
+                RBX,
+                static_cast<u32>(
+                    offsetof(EeCpuState, vu_vf) +
+                    rt * sizeof(EeGpr)));
+            out.store_indexed(RBP, RAX, RDX, 8u);
+            out.load64(
+                RDX,
+                RBX,
+                static_cast<u32>(
+                    offsetof(EeCpuState, vu_vf) +
+                    rt * sizeof(EeGpr) + sizeof(u64)));
+            out.store_indexed(RBP, RAX, RDX, 8u, 8u);
+        } else if (opcode == 0x1Fu) { // SQ
+            out.load_guest(RDX, rt);
+            out.store_indexed(RBP, RAX, RDX, 8u);
+            out.load64(
+                RDX,
+                RBX,
+                static_cast<u32>(
+                    offsetof(EeCpuState, gpr) +
+                    rt * sizeof(EeGpr) + sizeof(u64)));
+            out.store_indexed(RBP, RAX, RDX, 8u, 8u);
+        } else {
+            out.load_guest(RDX, rt, width != 8u);
+            out.store_indexed(RBP, RAX, RDX, width);
+        }
+
         if ((opcode == 0x38u || opcode == 0x3Cu) && rt != 0u) {
             out.mov_r64_imm(RDX, 1u);
             out.store_guest(rt, RDX);
@@ -1312,7 +1394,10 @@ bool emit_body(
 
         std::vector<std::size_t> selfmod;
         emit_store_generation_barrier(
-            out, cs.code_page, selfmod);
+            out,
+            cs.code_page,
+            selfmod,
+            (opcode == 0x1Fu || opcode == 0x3Eu) ? 2u : 1u);
 
         const std::size_t skip_fail = out.jmp32();
         const std::size_t fail_label = out.bytes.size();
