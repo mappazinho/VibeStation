@@ -53,11 +53,14 @@ u32 read_word(const u8* ram, u32 physical) {
 
 bool is_store(u32 instruction) {
     switch (instruction >> 26) {
+    case 0x1Fu: // SQ
     case 0x28u: // SB
     case 0x29u: // SH
     case 0x2Bu: // SW
     case 0x38u: // SC
+    case 0x39u: // SWC1
     case 0x3Cu: // SCD
+    case 0x3Eu: // SQC2
     case 0x3Fu: // SD
         return true;
     default:
@@ -67,6 +70,7 @@ bool is_store(u32 instruction) {
 
 bool is_load(u32 instruction) {
     switch (instruction >> 26) {
+    case 0x1Eu: // LQ
     case 0x20u: // LB
     case 0x21u: // LH
     case 0x23u: // LW
@@ -74,7 +78,9 @@ bool is_load(u32 instruction) {
     case 0x25u: // LHU
     case 0x27u: // LWU
     case 0x30u: // LL
+    case 0x31u: // LWC1
     case 0x34u: // LLD
+    case 0x36u: // LQC2
     case 0x37u: // LD
         return true;
     default:
@@ -242,6 +248,7 @@ bool writes_gpr(u32 instruction, u32 reg) {
     if (is_store(instruction)) {
         return (opcode == 0x38u || opcode == 0x3Cu) && rt == reg;
     }
+    if (opcode == 0x31u || opcode == 0x36u) return false;
     if (is_mtc0(instruction)) return false;
     if (is_mfc0(instruction)) return rt == reg;
     switch (opcode) {
@@ -253,6 +260,7 @@ bool writes_gpr(u32 instruction, u32 reg) {
     case 0x0Eu:
     case 0x0Fu:
     case 0x19u:
+    case 0x1Eu:
     case 0x20u:
     case 0x21u:
     case 0x23u:
@@ -319,11 +327,13 @@ void score_registers(
     }
 
     if (is_store(instruction)) {
-        use(rs, 2u); use(rt);
+        use(rs, 2u);
+        if (opcode != 0x39u && opcode != 0x3Eu) use(rt);
         return;
     }
     if (is_load(instruction)) {
-        use(rs, 2u); use(rt, 2u);
+        use(rs, 2u);
+        if (opcode != 0x31u && opcode != 0x36u) use(rt, 2u);
         return;
     }
     if (is_mfc0(instruction)) {
@@ -453,7 +463,8 @@ struct Emitter {
     }
 
     void load_indexed(
-        Reg dst, Reg base, Reg index, u32 width, bool sign) {
+        Reg dst, Reg base, Reg index, u32 width, bool sign,
+        u32 displacement = 0u) {
         if (width == 1u) {
             rex(sign, dst, index, base);
             emit(0x0Fu); emit(sign ? 0xBEu : 0xB6u);
@@ -469,10 +480,12 @@ struct Emitter {
         }
         modrm(2u, dst, RSP);
         sib(0u, index, base);
-        emit32(0u);
+        emit32(displacement);
     }
 
-    void store_indexed(Reg base, Reg index, Reg src, u32 width) {
+    void store_indexed(
+        Reg base, Reg index, Reg src, u32 width,
+        u32 displacement = 0u) {
         if (width == 1u) {
             rex(false, src, index, base);
             emit(0x88u);
@@ -486,7 +499,7 @@ struct Emitter {
         }
         modrm(2u, src, RSP);
         sib(0u, index, base);
-        emit32(0u);
+        emit32(displacement);
     }
 
     void loadzx8_indexed(Reg dst, Reg base, Reg index) {
@@ -899,7 +912,8 @@ void emit_fastmem_address(
     s16 immediate,
     u32 width,
     std::vector<std::size_t>& fail_jumps,
-    bool require_single_page = false) {
+    bool require_single_page = false,
+    u32 alignment_mask = 0u) {
     out.load_guest(RAX, rs, true);
     out.add_r32_imm32(
         RAX,
@@ -944,6 +958,10 @@ void emit_fastmem_address(
     for (const auto jump : alias3) out.patch(jump, alias3_label);
     out.patch(alias3_jump, mapped);
 
+    if (alignment_mask != 0u) {
+        out.and_r32_imm32(RAX, ~alignment_mask);
+    }
+
     out.cmp_r32_imm32(RAX, kRamSize - width);
     fail_jumps.push_back(out.jcc32(0x7u)); // JA
 
@@ -958,7 +976,8 @@ void emit_fastmem_address(
 void emit_store_generation_barrier(
     Emitter& out,
     u32 code_page,
-    std::vector<std::size_t>& selfmod_jumps) {
+    std::vector<std::size_t>& selfmod_jumps,
+    u8 generation_increment = 1u) {
     out.mov_rr32(RCX, RAX);
     out.shift_imm32(RCX, 5u, 12u); // SHR ECX,12
 
@@ -966,7 +985,8 @@ void emit_store_generation_barrier(
     out.test_rr64(RDX, RDX);
     const std::size_t untracked = out.jcc32(0x4u); // JE
 
-    out.add_mem32_index_imm8(R10, RCX, 2u, 1u);
+    out.add_mem32_index_imm8(
+        R10, RCX, 2u, generation_increment);
     out.cmp_r32_imm32(RCX, code_page);
     selfmod_jumps.push_back(out.jcc32(0x4u)); // JE
 
