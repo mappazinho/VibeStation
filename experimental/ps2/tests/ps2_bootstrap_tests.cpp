@@ -4344,13 +4344,20 @@ bool test_ee_second_gen_dynarec() {
             (0x09u << 26) | (3u << 16) | 3u,
             0x0000000Cu,
         };
+        ps2::Ps2System exact;
         ps2::Ps2System system;
         for (ps2::u32 i = 0u; i < code.size(); ++i) {
             ok = expect(
+                exact.bus().write32(pc + i * 4u, code[i]) &&
                 system.bus().write32(pc + i * 4u, code[i]),
                 "EE dynarec deadline code setup failed") && ok;
         }
+        exact.ee().reset(pc);
         system.ee().reset(pc);
+        std::string error;
+        ok = expect(
+            exact.ee().step(error) && exact.ee().step(error),
+            "EE dynarec deadline reference step failed") && ok;
         system.ee().set_dynarec_enabled(true);
         const auto result = system.ee().run_dynarec(
             2u,
@@ -4358,11 +4365,15 @@ bool test_ee_second_gen_dynarec() {
             system.ram().page_generation_data(),
             system.ram().code_page_tracked_data());
         ok = expect(
-            result.retired == 0u &&
+            result.retired == 2u &&
             result.reason == ps2::EeDynarec::ExitReason::Deadline &&
-            system.ee().state().pc == pc &&
-            system.ee().state().instructions_executed == 0u,
-            "EE second-gen crossed its event deadline") && ok;
+            system.ee().state().pc == exact.ee().state().pc &&
+            system.ee().state().next_pc == exact.ee().state().next_pc &&
+            system.ee().state().instructions_executed == 2u &&
+            system.ee().state().gpr[1].lo == exact.ee().state().gpr[1].lo &&
+            system.ee().state().gpr[2].lo == exact.ee().state().gpr[2].lo &&
+            system.ee().state().gpr[3].lo == 0u,
+            "EE second-gen did not stop exactly at its event deadline") && ok;
     }
 #else
     ps2::Ps2System system;
