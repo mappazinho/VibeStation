@@ -898,7 +898,8 @@ void emit_fastmem_address(
     u32 rs,
     s16 immediate,
     u32 width,
-    std::vector<std::size_t>& fail_jumps) {
+    std::vector<std::size_t>& fail_jumps,
+    bool require_single_page = false) {
     out.load_guest(RAX, rs, true);
     out.add_r32_imm32(
         RAX,
@@ -945,6 +946,13 @@ void emit_fastmem_address(
 
     out.cmp_r32_imm32(RAX, kRamSize - width);
     fail_jumps.push_back(out.jcc32(0x7u)); // JA
+
+    if (require_single_page && width > 1u) {
+        out.mov_rr32(RCX, RAX);
+        out.and_r32_imm32(RCX, kPageSize - 1u);
+        out.cmp_r32_imm32(RCX, kPageSize - width);
+        fail_jumps.push_back(out.jcc32(0x7u)); // JA
+    }
 }
 
 void emit_store_generation_barrier(
@@ -1273,7 +1281,8 @@ bool emit_body(
         }
 
         std::vector<std::size_t> fail;
-        emit_fastmem_address(out, rs, imm, width, fail);
+        emit_fastmem_address(
+            out, rs, imm, width, fail, true);
         out.load_guest(RDX, rt, width != 8u);
         out.store_indexed(RBP, RAX, RDX, width);
         if ((opcode == 0x38u || opcode == 0x3Cu) && rt != 0u) {
