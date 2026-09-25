@@ -373,11 +373,15 @@ bool EeCpu::execute_special(
         state_.next_pc = static_cast<u32>(gpr_u64(rs));
         next_is_delay_slot_ = true;
         return true;
-    case 0x09: // JALR
+    case 0x09: { // JALR
+        // Source operands are read before the link write. This matters for
+        // the legal rd == rs case.
+        const u32 target = static_cast<u32>(gpr_u64(rs));
         write_gpr_word(rd, pc + 8u);
-        state_.next_pc = static_cast<u32>(gpr_u64(rs));
+        state_.next_pc = target;
         next_is_delay_slot_ = true;
         return true;
+    }
     case 0x0A: // MOVZ
         if (gpr_u64(rt) == 0) {
             write_gpr64(rd, gpr_u64(rs));
