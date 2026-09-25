@@ -4142,11 +4142,18 @@ bool test_ee_second_gen_dynarec() {
                 "EE dynarec linear reference step failed") && ok;
         }
         native.ee().set_dynarec_enabled(true);
+#ifdef _WIN32
+        std::cerr << "WIN_DYNAREC_FIRST_CALL=before" << '\n';
+#endif
         const auto result = native.ee().run_dynarec(
             64u,
             native.ram().data(),
             native.ram().page_generation_data(),
             native.ram().code_page_tracked_data());
+#ifdef _WIN32
+        std::cerr << "WIN_DYNAREC_FIRST_CALL=after RETIRED="
+                  << result.retired << '\n';
+#endif
         const auto& a = exact.ee().state();
         const auto& b = native.ee().state();
         ok = expect(
@@ -7094,6 +7101,10 @@ int main() {
     ok = test_vif1_reverse_dma() && ok;
 #ifdef _WIN32
     std::cerr << "WIN_BOOTSTRAP_PHASE=pre-second-gen OK=" << ok << '\n';
+    const bool legacy_native_probe = test_ee_native_linear_block();
+    std::cerr << "WIN_BOOTSTRAP_LEGACY_NATIVE_PROBE="
+              << legacy_native_probe << '\n';
+    ok = legacy_native_probe && ok;
 #endif
     const bool second_gen_ok = test_ee_second_gen_dynarec();
 #ifdef _WIN32
