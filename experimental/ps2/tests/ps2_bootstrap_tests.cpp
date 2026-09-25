@@ -4648,12 +4648,15 @@ bool test_ee_second_gen_dynarec() {
     }
 
     // Not-taken conditional successor linking must reuse fallthrough.
+    // Use a branch-likely here because ordinary safe forward BEQ/BNE edges
+    // are deliberately fused into the same native trace and therefore have
+    // no C++ successor transition to cache.
     {
         const std::array<ps2::u32, 6> code = {
             (0x09u << 26) | (1u << 16) | 1u,
             (0x09u << 26) | (2u << 16) | 2u,
-            (0x04u << 26) | (1u << 21) | (2u << 16) | 2u, // BEQ false
-            (0x09u << 26) | (3u << 16) | 3u, // delay
+            (0x14u << 26) | (1u << 21) | (2u << 16) | 2u, // BEQL false
+            (0x09u << 26) | (3u << 16) | 3u, // annulled delay
             (0x09u << 26) | (4u << 16) | 4u, // fallthrough
             0x0000000Cu,
         };
@@ -4668,7 +4671,7 @@ bool test_ee_second_gen_dynarec() {
         exact.ee().reset(pc);
         native.ee().reset(pc);
         std::string error;
-        for (ps2::u32 i = 0u; i < 5u; ++i) {
+        for (ps2::u32 i = 0u; i < 4u; ++i) {
             ok = expect(
                 exact.ee().step(error),
                 "EE dynarec not-taken reference step failed") && ok;
@@ -4680,7 +4683,7 @@ bool test_ee_second_gen_dynarec() {
             native.ram().page_generation_data(),
             native.ram().code_page_tracked_data());
         ok = expect(
-            result.retired == 5u &&
+            result.retired == 4u &&
             native.ee().state().pc == exact.ee().state().pc &&
             native.ee().state().gpr[3].lo == exact.ee().state().gpr[3].lo &&
             native.ee().state().gpr[4].lo == exact.ee().state().gpr[4].lo,
@@ -4694,7 +4697,7 @@ bool test_ee_second_gen_dynarec() {
             native.ram().page_generation_data(),
             native.ram().code_page_tracked_data());
         ok = expect(
-            result.retired == 5u &&
+            result.retired == 4u &&
             native.ee().dynarec().link_hits() > hits_before,
             "EE second-gen fallthrough link was not reused") && ok;
     }
