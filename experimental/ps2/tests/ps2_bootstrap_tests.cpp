@@ -4805,6 +4805,106 @@ bool test_ee_second_gen_dynarec() {
             "EE second-gen BLTZALL annul/link semantics diverged") && ok;
     }
 
+    // COP1 condition branches, including likely-annul variants, remain native.
+    {
+        const std::array<ps2::u32, 4> code = {
+            (0x11u << 26) | (0x08u << 21) | (0x03u << 16) | 1u, // BC1TL
+            (0x09u << 26) | (2u << 16) | 9u, // delay
+            (0x09u << 26) | (3u << 16) | 3u,
+            0x0000000Cu,
+        };
+        ps2::Ps2System exact_false;
+        ps2::Ps2System native_false;
+        for (ps2::u32 i = 0u; i < code.size(); ++i) {
+            ok = expect(
+                exact_false.bus().write32(pc + i * 4u, code[i]) &&
+                native_false.bus().write32(pc + i * 4u, code[i]),
+                "EE dynarec BC1TL code setup failed") && ok;
+        }
+        exact_false.ee().reset(pc);
+        native_false.ee().reset(pc);
+        exact_false.ee().state().fcr[31] &= ~0x00800000u;
+        native_false.ee().state().fcr[31] &= ~0x00800000u;
+        std::string error;
+        ok = expect(
+            exact_false.ee().step(error),
+            "EE dynarec BC1TL false reference failed") && ok;
+        native_false.ee().set_dynarec_enabled(true);
+        const auto false_result = native_false.ee().run_dynarec(
+            8u,
+            native_false.ram().data(),
+            native_false.ram().page_generation_data(),
+            native_false.ram().code_page_tracked_data());
+        ok = expect(
+            false_result.retired == 1u &&
+            native_false.ee().state().pc == exact_false.ee().state().pc &&
+            native_false.ee().state().gpr[2].lo == 0u,
+            "EE second-gen BC1TL annul path diverged") && ok;
+
+        ps2::Ps2System exact_true;
+        ps2::Ps2System native_true;
+        for (ps2::u32 i = 0u; i < code.size(); ++i) {
+            ok = expect(
+                exact_true.bus().write32(pc + i * 4u, code[i]) &&
+                native_true.bus().write32(pc + i * 4u, code[i]),
+                "EE dynarec BC1TL true code setup failed") && ok;
+        }
+        exact_true.ee().reset(pc);
+        native_true.ee().reset(pc);
+        exact_true.ee().state().fcr[31] |= 0x00800000u;
+        native_true.ee().state().fcr[31] |= 0x00800000u;
+        ok = expect(
+            exact_true.ee().step(error) &&
+            exact_true.ee().step(error),
+            "EE dynarec BC1TL true reference failed") && ok;
+        native_true.ee().set_dynarec_enabled(true);
+        const auto true_result = native_true.ee().run_dynarec(
+            8u,
+            native_true.ram().data(),
+            native_true.ram().page_generation_data(),
+            native_true.ram().code_page_tracked_data());
+        ok = expect(
+            true_result.retired == 2u &&
+            native_true.ee().state().pc == exact_true.ee().state().pc &&
+            native_true.ee().state().gpr[2].lo ==
+                exact_true.ee().state().gpr[2].lo,
+            "EE second-gen BC1TL taken path diverged") && ok;
+
+        const std::array<ps2::u32, 3> normal_code = {
+            (0x11u << 26) | (0x08u << 21) | (0x00u << 16) | 1u, // BC1F
+            (0x09u << 26) | (4u << 16) | 4u,
+            0x0000000Cu,
+        };
+        ps2::Ps2System exact_normal;
+        ps2::Ps2System native_normal;
+        for (ps2::u32 i = 0u; i < normal_code.size(); ++i) {
+            ok = expect(
+                exact_normal.bus().write32(pc + i * 4u, normal_code[i]) &&
+                native_normal.bus().write32(pc + i * 4u, normal_code[i]),
+                "EE dynarec BC1F code setup failed") && ok;
+        }
+        exact_normal.ee().reset(pc);
+        native_normal.ee().reset(pc);
+        exact_normal.ee().state().fcr[31] &= ~0x00800000u;
+        native_normal.ee().state().fcr[31] &= ~0x00800000u;
+        ok = expect(
+            exact_normal.ee().step(error) &&
+            exact_normal.ee().step(error),
+            "EE dynarec BC1F reference failed") && ok;
+        native_normal.ee().set_dynarec_enabled(true);
+        const auto normal_result = native_normal.ee().run_dynarec(
+            8u,
+            native_normal.ram().data(),
+            native_normal.ram().page_generation_data(),
+            native_normal.ram().code_page_tracked_data());
+        ok = expect(
+            normal_result.retired == 2u &&
+            native_normal.ee().state().pc == exact_normal.ee().state().pc &&
+            native_normal.ee().state().gpr[4].lo ==
+                exact_normal.ee().state().gpr[4].lo,
+            "EE second-gen BC1F path diverged") && ok;
+    }
+
     // COP0 reads stay native; state-changing writes are precise exits.
     {
         const std::array<ps2::u32, 4> code = {
