@@ -93,6 +93,9 @@ private:
         u32 fallthrough_pc = 0;
         u32 code_page = 0;
         u32 compile_budget = 0;
+        std::array<u32, 4> source_pages{};
+        std::array<u32, 4> source_generations{};
+        u8 source_page_count = 0;
         u32 fastmem_loads = 0;
         u32 fastmem_stores = 0;
         u32 cached_register_uses = 0;
