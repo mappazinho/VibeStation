@@ -1962,7 +1962,7 @@ EeDynarec::Block* EeDynarec::lookup_or_compile(
         const u32 delay_index = cs.count - 1u;
         const u32 instruction = cs.words[branch_index];
         const u32 delay = cs.words[delay_index];
-        const u32 branch_pc = pc + branch_index * 4u;
+        const u32 branch_pc = cs.pcs[branch_index];
         const u32 rs = (instruction >> 21) & 31u;
         const u32 rt = (instruction >> 16) & 31u;
 
@@ -2192,8 +2192,8 @@ EeDynarec::Block* EeDynarec::lookup_or_compile(
         emit_commit_sequential(
             cs.out,
             cs.count,
-            pc + cs.count * 4u,
-            pc + (cs.count - 1u) * 4u,
+            cs.pcs[cs.count - 1u] + 4u,
+            cs.pcs[cs.count - 1u],
             cs.words[cs.count - 1u]);
     }
 
@@ -2231,7 +2231,10 @@ EeDynarec::Block* EeDynarec::lookup_or_compile(
     cached.pc = pc;
     cached.page_generation = generation;
     cached.instruction_count = cs.count;
-    cached.sequential_pc = pc + cs.count * 4u;
+    cached.sequential_pc =
+        has_control
+            ? 0u
+            : cs.pcs[cs.count - 1u] + 4u;
     cached.taken_pc = taken_pc;
     cached.fallthrough_pc = fallthrough_pc;
     cached.code_page = page;
