@@ -1961,16 +1961,29 @@ EeDynarec::Block* EeDynarec::lookup_or_compile(
         static_cast<std::size_t>(key ^ (key >> 32u)) &
         (blocks_.size() - 1u);
     Block& cached = blocks_[index];
-    if (cached.function != nullptr &&
+    bool cached_pages_valid =
+        cached.function != nullptr &&
         cached.pc == pc &&
         cached.page_generation == generation &&
-        cached.compile_budget == compile_budget) {
+        cached.compile_budget == compile_budget;
+    if (cached_pages_valid) {
+        for (u32 i = 0u; i < cached.source_page_count; ++i) {
+            if (page_generations[cached.source_pages[i]] !=
+                cached.source_generations[i]) {
+                cached_pages_valid = false;
+                break;
+            }
+        }
+    }
+    if (cached_pages_valid) {
         return &cached;
     }
 
     CompileState cs;
     cs.block_pc = pc;
     cs.code_page = page;
+    cs.code_pages[0] = page;
+    cs.code_page_count = 1u;
 
     const u32 available =
         std::min(kMaxBlockInstructions, compile_budget);
@@ -1987,14 +2000,26 @@ EeDynarec::Block* EeDynarec::lookup_or_compile(
         cs.words[cs.count] = instruction;
         ++cs.count;
     };
+    auto ensure_code_page = [&](u32 physical_address) {
+        const u32 candidate = physical_address / kPageSize;
+        for (u32 i = 0u; i < cs.code_page_count; ++i) {
+            if (cs.code_pages[i] == candidate) return true;
+        }
+        if (cs.code_page_count >= cs.code_pages.size()) {
+            return false;
+        }
+        cs.code_pages[cs.code_page_count++] = candidate;
+        code_page_tracked[candidate] = 1u;
+        return true;
+    };
 
     while (cs.count < available) {
         bool fetch_valid = false;
         const u32 fetch_physical =
             ram_physical(fetch_pc, fetch_valid);
         if (!fetch_valid || (fetch_physical & 3u) != 0u ||
-            fetch_physical / kPageSize != page ||
-            already_in_trace(fetch_pc)) {
+            already_in_trace(fetch_pc) ||
+            !ensure_code_page(fetch_physical)) {
             break;
         }
 
@@ -2010,7 +2035,7 @@ EeDynarec::Block* EeDynarec::lookup_or_compile(
             const u32 delay_physical =
                 ram_physical(delay_pc, delay_valid);
             if (!delay_valid ||
-                delay_physical / kPageSize != page) {
+                !ensure_code_page(delay_physical)) {
                 break;
             }
             const u32 delay =
@@ -2022,11 +2047,10 @@ EeDynarec::Block* EeDynarec::lookup_or_compile(
                 break;
             }
 
-            // Static same-page J/JAL edges can be fused directly into this
-            // native trace. Their delay slot is emitted immediately after the
-            // jump and the next generated instruction comes from the target,
-            // so no C++ block dispatch or architectural-state flush occurs at
-            // this edge.
+            // Static J/JAL edges can be fused directly into this native
+            // trace while the source-page set remains small. Every source
+            // page is generation-tracked, so cross-page fusion retains the
+            // same self-modifying-code guarantees as a one-page block.
             if (control == ControlKind::J ||
                 control == ControlKind::Jal) {
                 const u32 target =
@@ -2040,8 +2064,8 @@ EeDynarec::Block* EeDynarec::lookup_or_compile(
                     target == delay_pc ||
                     already_in_trace(target);
                 if (target_valid &&
-                    target_physical / kPageSize == page &&
-                    !creates_cycle) {
+                    !creates_cycle &&
+                    ensure_code_page(target_physical)) {
                     append(fetch_pc, instruction);
                     append(delay_pc, delay);
                     ++cs.fused_static_jumps;
@@ -2428,6 +2452,13 @@ EeDynarec::Block* EeDynarec::lookup_or_compile(
     cached.fallthrough_pc = fallthrough_pc;
     cached.code_page = page;
     cached.compile_budget = compile_budget;
+    cached.source_page_count =
+        static_cast<u8>(cs.code_page_count);
+    for (u32 i = 0u; i < cs.code_page_count; ++i) {
+        cached.source_pages[i] = cs.code_pages[i];
+        cached.source_generations[i] =
+            page_generations[cs.code_pages[i]];
+    }
     cached.fastmem_loads = cs.fastmem_loads;
     cached.fastmem_stores = cs.fastmem_stores;
     cached.cached_register_uses = cs.out.register_cache_uses;
