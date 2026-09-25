@@ -124,6 +124,17 @@ bool is_cop1_move(u32 instruction) {
            rs == 0x04u || rs == 0x06u;
 }
 
+bool is_cop1_bitwise_unary(u32 instruction) {
+    if ((instruction >> 26) != 0x11u ||
+        ((instruction >> 21) & 31u) != 0x10u) {
+        return false;
+    }
+    const u32 funct = instruction & 63u;
+    return funct == 0x05u || // ABS.S
+           funct == 0x06u || // MOV.S
+           funct == 0x07u;   // NEG.S
+}
+
 bool supported_special(u32 instruction) {
     const u32 funct = instruction & 63u;
     const u32 rs = (instruction >> 21) & 31u;
@@ -199,7 +210,8 @@ bool supported_noncontrol(u32 instruction) {
         break;
     }
     if (is_load(instruction) || is_store(instruction)) return true;
-    if (is_cop1_move(instruction)) return true;
+    if (is_cop1_move(instruction) ||
+        is_cop1_bitwise_unary(instruction)) return true;
     if (is_mfc0(instruction)) return true;
     if (is_cop0_ei_di(instruction)) return true;
     if (is_mtc0(instruction)) {
@@ -325,6 +337,27 @@ bool writes_gpr(u32 instruction, u32 reg) {
         return (opcode == 0x38u || opcode == 0x3Cu) && rt == reg;
     }
     if (opcode == 0x31u || opcode == 0x36u) return false;
+    if (is_cop1_bitwise_unary(instruction)) {
+        const u32 fs = rd;
+        const u32 fd = (instruction >> 6) & 31u;
+        const u32 funct = instruction & 63u;
+        out.load32(
+            RAX, RBX,
+            static_cast<u32>(
+                offsetof(EeCpuState, fpr) + fs * sizeof(u32)));
+        if (funct == 0x05u) { // ABS.S
+            out.and_r32_imm32(RAX, 0x7FFFFFFFu);
+        } else if (funct == 0x07u) { // NEG.S
+            out.xor_r32_imm32(RAX, 0x80000000u);
+        }
+        out.store32(
+            RBX,
+            static_cast<u32>(
+                offsetof(EeCpuState, fpr) + fd * sizeof(u32)),
+            RAX);
+        return true;
+    }
+
     if (is_cop1_move(instruction)) {
         const u32 cop_rs = (instruction >> 21) & 31u;
         return (cop_rs == 0x00u || cop_rs == 0x02u) && rt == reg;
@@ -630,6 +663,10 @@ struct Emitter {
     }
     void xor_r64_imm32(Reg reg, u32 value) {
         rex(true, -1, -1, reg);
+        emit(0x81u); modrm(3u, 6u, reg); emit32(value);
+    }
+    void xor_r32_imm32(Reg reg, u32 value) {
+        rex(false, -1, -1, reg);
         emit(0x81u); modrm(3u, 6u, reg); emit32(value);
     }
 
