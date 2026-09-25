@@ -4110,6 +4110,276 @@ bool test_vif1_reverse_dma() {
     return ok;
 }
 
+bool test_ee_second_gen_dynarec() {
+    constexpr ps2::u32 pc = 0x7000u;
+    bool ok = true;
+
+#if defined(_M_X64) || defined(__x86_64__)
+    // Register-cached linear execution.
+    {
+        const std::array<ps2::u32, 6> code = {
+            (0x09u << 26) | (1u << 16) | 7u, // ADDIU r1,r0,7
+            (0x0Du << 26) | (1u << 21) | (2u << 16) | 0x100u,
+            (1u << 21) | (2u << 16) | (3u << 11) | 0x2Du, // DADDU
+            (0x09u << 26) | (1u << 21) | (1u << 16) | 1u,
+            (1u << 21) | (3u << 16) | (4u << 11) | 0x25u, // OR
+            0x0000000Cu, // SYSCALL: explicit interpreter boundary
+        };
+        ps2::Ps2System exact;
+        ps2::Ps2System native;
+        for (ps2::u32 i = 0u; i < code.size(); ++i) {
+            ok = expect(
+                exact.bus().write32(pc + i * 4u, code[i]) &&
+                native.bus().write32(pc + i * 4u, code[i]),
+                "EE dynarec linear code setup failed") && ok;
+        }
+        exact.ee().reset(pc);
+        native.ee().reset(pc);
+        std::string error;
+        for (ps2::u32 i = 0u; i < 5u; ++i) {
+            ok = expect(
+                exact.ee().step_predecoded(code[i], error),
+                "EE dynarec linear reference step failed") && ok;
+        }
+        native.ee().set_dynarec_enabled(true);
+        const auto result = native.ee().run_dynarec(
+            64u,
+            native.ram().data(),
+            native.ram().page_generation_data(),
+            native.ram().code_page_tracked_data());
+        const auto& a = exact.ee().state();
+        const auto& b = native.ee().state();
+        ok = expect(
+            result.retired == 5u &&
+            a.pc == b.pc &&
+            a.next_pc == b.next_pc &&
+            a.instructions_executed == b.instructions_executed &&
+            a.cop0[9] == b.cop0[9] &&
+            a.gpr[1].lo == b.gpr[1].lo &&
+            a.gpr[2].lo == b.gpr[2].lo &&
+            a.gpr[3].lo == b.gpr[3].lo &&
+            a.gpr[4].lo == b.gpr[4].lo,
+            "EE second-gen linear block diverged") && ok;
+        ok = expect(
+            native.ee().dynarec().compiled_blocks() != 0u &&
+            native.ee().dynarec().register_cache_hits() != 0u,
+            "EE second-gen register cache was not exercised") && ok;
+    }
+
+    // Direct successor linking across a taken branch.
+    {
+        const std::array<ps2::u32, 6> code = {
+            (0x09u << 26) | (1u << 16) | 1u,
+            (0x04u << 26) | (1u << 21) | (1u << 16) | 2u, // -> pc+16
+            (0x09u << 26) | (2u << 16) | 2u, // delay
+            (0x09u << 26) | (3u << 16) | 99u, // skipped
+            (0x09u << 26) | (3u << 16) | 3u,
+            0x0000000Cu,
+        };
+        ps2::Ps2System exact;
+        ps2::Ps2System native;
+        for (ps2::u32 i = 0u; i < code.size(); ++i) {
+            ok = expect(
+                exact.bus().write32(pc + i * 4u, code[i]) &&
+                native.bus().write32(pc + i * 4u, code[i]),
+                "EE dynarec branch code setup failed") && ok;
+        }
+        exact.ee().reset(pc);
+        native.ee().reset(pc);
+        std::string error;
+        for (ps2::u32 i = 0u; i < 4u; ++i) {
+            ok = expect(
+                exact.ee().step(error),
+                "EE dynarec branch reference step failed") && ok;
+        }
+        native.ee().set_dynarec_enabled(true);
+        auto result = native.ee().run_dynarec(
+            32u,
+            native.ram().data(),
+            native.ram().page_generation_data(),
+            native.ram().code_page_tracked_data());
+        ok = expect(
+            result.retired == 4u &&
+            native.ee().state().pc == exact.ee().state().pc &&
+            native.ee().state().gpr[2].lo == exact.ee().state().gpr[2].lo &&
+            native.ee().state().gpr[3].lo == exact.ee().state().gpr[3].lo,
+            "EE second-gen linked branch diverged") && ok;
+
+        native.ee().reset(pc);
+        result = native.ee().run_dynarec(
+            32u,
+            native.ram().data(),
+            native.ram().page_generation_data(),
+            native.ram().code_page_tracked_data());
+        ok = expect(
+            result.retired == 4u &&
+            native.ee().dynarec().link_hits() != 0u,
+            "EE second-gen successor link was not reused") && ok;
+    }
+
+    // Guarded fastmem store/load and self-modifying-code invalidation.
+    {
+        constexpr ps2::u32 data = 0x9000u;
+        const std::array<ps2::u32, 4> code = {
+            (0x2Bu << 26) | (1u << 21) | (2u << 16), // SW
+            (0x23u << 26) | (1u << 21) | (3u << 16), // LW
+            (0x09u << 26) | (4u << 16) | 4u,
+            0x0000000Cu,
+        };
+        ps2::Ps2System exact;
+        ps2::Ps2System native;
+        for (ps2::u32 i = 0u; i < code.size(); ++i) {
+            ok = expect(
+                exact.bus().write32(pc + i * 4u, code[i]) &&
+                native.bus().write32(pc + i * 4u, code[i]),
+                "EE dynarec fastmem code setup failed") && ok;
+        }
+        exact.ee().reset(pc);
+        native.ee().reset(pc);
+        exact.ee().state().gpr[1].lo = data;
+        native.ee().state().gpr[1].lo = data;
+        exact.ee().state().gpr[2].lo = 0x12345678u;
+        native.ee().state().gpr[2].lo = 0x12345678u;
+        std::string error;
+        for (ps2::u32 i = 0u; i < 3u; ++i) {
+            ok = expect(
+                exact.ee().step(error),
+                "EE dynarec fastmem reference step failed") && ok;
+        }
+        native.ee().set_dynarec_enabled(true);
+        const auto result = native.ee().run_dynarec(
+            32u,
+            native.ram().data(),
+            native.ram().page_generation_data(),
+            native.ram().code_page_tracked_data());
+        ps2::u32 a = 0u;
+        ps2::u32 b = 0u;
+        ok = expect(
+            exact.ram().read32(data, a) &&
+            native.ram().read32(data, b) &&
+            result.retired == 3u &&
+            a == b &&
+            exact.ee().state().gpr[3].lo ==
+                native.ee().state().gpr[3].lo,
+            "EE second-gen fastmem diverged") && ok;
+        ok = expect(
+            native.ee().dynarec().fastmem_loads() != 0u &&
+            native.ee().dynarec().fastmem_stores() != 0u,
+            "EE second-gen fastmem counters were not exercised") && ok;
+
+        ps2::Ps2System selfmod;
+        const ps2::u32 self_code[3] = {
+            (0x2Bu << 26) | (1u << 21) | (2u << 16),
+            (0x09u << 26) | (3u << 16) | 3u,
+            0x0000000Cu,
+        };
+        for (ps2::u32 i = 0u; i < 3u; ++i) {
+            ok = expect(
+                selfmod.bus().write32(pc + i * 4u, self_code[i]),
+                "EE dynarec selfmod code setup failed") && ok;
+        }
+        selfmod.ee().reset(pc);
+        selfmod.ee().state().gpr[1].lo = pc + 8u;
+        selfmod.ee().state().gpr[2].lo = 0x00000000u;
+        selfmod.ee().set_dynarec_enabled(true);
+        const auto self_result = selfmod.ee().run_dynarec(
+            32u,
+            selfmod.ram().data(),
+            selfmod.ram().page_generation_data(),
+            selfmod.ram().code_page_tracked_data());
+        ok = expect(
+            self_result.retired == 1u &&
+            selfmod.ee().state().pc == pc + 4u &&
+            selfmod.ee().dynarec().code_invalidation_exits() != 0u,
+            "EE second-gen self-modifying store did not exit") && ok;
+    }
+
+    // COP0 reads stay native; state-changing writes are precise exits.
+    {
+        const std::array<ps2::u32, 4> code = {
+            (0x10u << 26) | (2u << 16) | (9u << 11), // MFC0 r2,Count
+            (0x09u << 26) | (3u << 16) | 3u,
+            (0x10u << 26) | (4u << 21) | (4u << 16) | (11u << 11), // MTC0 Compare
+            (0x09u << 26) | (5u << 16) | 5u,
+        };
+        ps2::Ps2System exact;
+        ps2::Ps2System native;
+        for (ps2::u32 i = 0u; i < code.size(); ++i) {
+            ok = expect(
+                exact.bus().write32(pc + i * 4u, code[i]) &&
+                native.bus().write32(pc + i * 4u, code[i]),
+                "EE dynarec COP0 code setup failed") && ok;
+        }
+        exact.ee().reset(pc);
+        native.ee().reset(pc);
+        exact.ee().state().gpr[4].lo = 100u;
+        native.ee().state().gpr[4].lo = 100u;
+        std::string error;
+        for (ps2::u32 i = 0u; i < 3u; ++i) {
+            ok = expect(
+                exact.ee().step(error),
+                "EE dynarec COP0 reference step failed") && ok;
+        }
+        native.ee().set_dynarec_enabled(true);
+        const auto result = native.ee().run_dynarec(
+            32u,
+            native.ram().data(),
+            native.ram().page_generation_data(),
+            native.ram().code_page_tracked_data());
+        ok = expect(
+            result.retired == 3u &&
+            result.reason == ps2::EeDynarec::ExitReason::Cop0Write &&
+            exact.ee().state().cop0[11] == native.ee().state().cop0[11] &&
+            exact.ee().state().cop0[9] == native.ee().state().cop0[9] &&
+            exact.ee().state().gpr[2].lo == native.ee().state().gpr[2].lo &&
+            native.ee().state().gpr[5].lo == 0u,
+            "EE second-gen COP0 exit diverged") && ok;
+    }
+
+    // A block larger than the current event deadline must not partially run.
+    {
+        const std::array<ps2::u32, 4> code = {
+            (0x09u << 26) | (1u << 16) | 1u,
+            (0x09u << 26) | (2u << 16) | 2u,
+            (0x09u << 26) | (3u << 16) | 3u,
+            0x0000000Cu,
+        };
+        ps2::Ps2System system;
+        for (ps2::u32 i = 0u; i < code.size(); ++i) {
+            ok = expect(
+                system.bus().write32(pc + i * 4u, code[i]),
+                "EE dynarec deadline code setup failed") && ok;
+        }
+        system.ee().reset(pc);
+        system.ee().set_dynarec_enabled(true);
+        const auto result = system.ee().run_dynarec(
+            2u,
+            system.ram().data(),
+            system.ram().page_generation_data(),
+            system.ram().code_page_tracked_data());
+        ok = expect(
+            result.retired == 0u &&
+            result.reason == ps2::EeDynarec::ExitReason::Deadline &&
+            system.ee().state().pc == pc &&
+            system.ee().state().instructions_executed == 0u,
+            "EE second-gen crossed its event deadline") && ok;
+    }
+#else
+    ps2::Ps2System system;
+    system.ee().set_dynarec_enabled(true);
+    const auto result = system.ee().run_dynarec(
+        16u,
+        system.ram().data(),
+        system.ram().page_generation_data(),
+        system.ram().code_page_tracked_data());
+    ok = expect(
+        result.retired == 0u,
+        "EE second-gen unexpectedly ran on non-x64") && ok;
+#endif
+
+    return ok;
+}
+
 bool test_ee_native_linear_block() {
     constexpr ps2::u32 pc = 0x5000u;
     const std::array<ps2::u32, 4> code = {
@@ -5344,6 +5614,7 @@ int main() {
     ok = test_gs_signal_finish_label_and_imr() && ok;
     ok = test_gs_local_to_host_transfer() && ok;
     ok = test_vif1_reverse_dma() && ok;
+    ok = test_ee_second_gen_dynarec() && ok;
     ok = test_ee_native_linear_block() && ok;
     ok = test_ee_native_extended_integer_block() && ok;
     ok = test_ee_native_ram_loads() && ok;
