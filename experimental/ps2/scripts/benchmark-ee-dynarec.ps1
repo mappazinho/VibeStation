@@ -40,6 +40,15 @@ function Parse-Metric {
     return $match.Groups[1].Value
 }
 
+function Metric-OrZero {
+    param([string]$Text, [string]$Name)
+    $value = Parse-Metric $Text $Name
+    if ($null -eq $value -or $value -eq "") {
+        return "0"
+    }
+    return $value
+}
+
 function Run-Backend {
     param([string]$Name, [string[]]$ExtraArgs)
 
@@ -66,12 +75,12 @@ function Run-Backend {
             RunMs = [double](Parse-Metric $output "PROFILE_RUN_MS")
             DisplayHash = Parse-Metric $output "DISPLAY_HASH"
             RasterPixels = [UInt64](Parse-Metric $output "GS_RASTER_PIXELS")
-            DynarecInstructions = [UInt64]((Parse-Metric $output "EE_DYNAREC_INSTRUCTIONS") ?? "0")
-            DynarecBlocks = [UInt64]((Parse-Metric $output "EE_DYNAREC_BLOCKS_EXECUTED") ?? "0")
-            LinkHits = [UInt64]((Parse-Metric $output "EE_DYNAREC_LINK_HITS") ?? "0")
-            LinkMisses = [UInt64]((Parse-Metric $output "EE_DYNAREC_LINK_MISSES") ?? "0")
-            GuardExits = [UInt64]((Parse-Metric $output "EE_DYNAREC_GUARD_EXITS") ?? "0")
-            Cop0Exits = [UInt64]((Parse-Metric $output "EE_DYNAREC_COP0_WRITE_EXITS") ?? "0")
+            DynarecInstructions = [UInt64](Metric-OrZero $output "EE_DYNAREC_INSTRUCTIONS")
+            DynarecBlocks = [UInt64](Metric-OrZero $output "EE_DYNAREC_BLOCKS_EXECUTED")
+            LinkHits = [UInt64](Metric-OrZero $output "EE_DYNAREC_LINK_HITS")
+            LinkMisses = [UInt64](Metric-OrZero $output "EE_DYNAREC_LINK_MISSES")
+            GuardExits = [UInt64](Metric-OrZero $output "EE_DYNAREC_GUARD_EXITS")
+            Cop0Exits = [UInt64](Metric-OrZero $output "EE_DYNAREC_COP0_WRITE_EXITS")
         }
         $rows += $row
         $row | Format-List
