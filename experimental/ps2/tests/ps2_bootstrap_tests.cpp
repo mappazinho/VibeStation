@@ -4983,6 +4983,58 @@ bool test_ee_second_gen_dynarec() {
             "EE second-gen MTC0 Status did not exit precisely") && ok;
     }
 
+    // EI/DI update Status natively and immediately return to the system.
+    {
+        const std::array<ps2::u32, 3> code = {
+            (0x10u << 26) | (0x10u << 21) | 0x38u, // EI
+            (0x10u << 26) | (0x10u << 21) | 0x39u, // DI
+            0x0000000Cu,
+        };
+        ps2::Ps2System exact;
+        ps2::Ps2System native;
+        for (ps2::u32 i = 0u; i < code.size(); ++i) {
+            ok = expect(
+                exact.bus().write32(pc + i * 4u, code[i]) &&
+                native.bus().write32(pc + i * 4u, code[i]),
+                "EE dynarec EI/DI code setup failed") && ok;
+        }
+        exact.ee().reset(pc);
+        native.ee().reset(pc);
+        exact.ee().state().cop0[12] |= 0x00020000u;
+        native.ee().state().cop0[12] |= 0x00020000u;
+        std::string error;
+        ok = expect(
+            exact.ee().step(error),
+            "EE dynarec EI reference failed") && ok;
+        native.ee().set_dynarec_enabled(true);
+        auto result = native.ee().run_dynarec(
+            8u,
+            native.ram().data(),
+            native.ram().page_generation_data(),
+            native.ram().code_page_tracked_data());
+        ok = expect(
+            result.retired == 1u &&
+            result.reason == ps2::EeDynarec::ExitReason::Cop0Write &&
+            native.ee().state().pc == exact.ee().state().pc &&
+            native.ee().state().cop0[12] == exact.ee().state().cop0[12],
+            "EE second-gen EI precise exit diverged") && ok;
+
+        ok = expect(
+            exact.ee().step(error),
+            "EE dynarec DI reference failed") && ok;
+        result = native.ee().run_dynarec(
+            8u,
+            native.ram().data(),
+            native.ram().page_generation_data(),
+            native.ram().code_page_tracked_data());
+        ok = expect(
+            result.retired == 1u &&
+            result.reason == ps2::EeDynarec::ExitReason::Cop0Write &&
+            native.ee().state().pc == exact.ee().state().pc &&
+            native.ee().state().cop0[12] == exact.ee().state().cop0[12],
+            "EE second-gen DI precise exit diverged") && ok;
+    }
+
     // MTC0 Count is isolated so the write occurs after any native prefix but
     // before exactly one retirement increment for the Count-writing opcode.
     {
