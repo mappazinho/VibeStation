@@ -77,10 +77,19 @@ function Run-Backend {
             RasterPixels = [UInt64](Parse-Metric $output "GS_RASTER_PIXELS")
             DynarecInstructions = [UInt64](Metric-OrZero $output "EE_DYNAREC_INSTRUCTIONS")
             DynarecBlocks = [UInt64](Metric-OrZero $output "EE_DYNAREC_BLOCKS_EXECUTED")
+            DynarecCompiled = [UInt64](Metric-OrZero $output "EE_DYNAREC_BLOCKS_COMPILED")
+            DispatchCalls = [UInt64](Metric-OrZero $output "EE_DYNAREC_DISPATCH_CALLS")
             LinkHits = [UInt64](Metric-OrZero $output "EE_DYNAREC_LINK_HITS")
             LinkMisses = [UInt64](Metric-OrZero $output "EE_DYNAREC_LINK_MISSES")
             GuardExits = [UInt64](Metric-OrZero $output "EE_DYNAREC_GUARD_EXITS")
+            DeadlineExits = [UInt64](Metric-OrZero $output "EE_DYNAREC_DEADLINE_EXITS")
+            UnsupportedExits = [UInt64](Metric-OrZero $output "EE_DYNAREC_UNSUPPORTED_EXITS")
             Cop0Exits = [UInt64](Metric-OrZero $output "EE_DYNAREC_COP0_WRITE_EXITS")
+            FastmemLoads = [UInt64](Metric-OrZero $output "EE_DYNAREC_FASTMEM_LOADS")
+            FastmemStores = [UInt64](Metric-OrZero $output "EE_DYNAREC_FASTMEM_STORES")
+            RegisterCacheHits = [UInt64](Metric-OrZero $output "EE_DYNAREC_REGCACHE_HITS")
+            CacheFlushes = [UInt64](Metric-OrZero $output "EE_DYNAREC_CACHE_FLUSHES")
+            UnsupportedTop = [regex]::Match($output, "(?m)^EE_DYNAREC_UNSUPPORTED_TOP.*$").Value
         }
         $rows += $row
         $row | Format-List
@@ -138,3 +147,17 @@ $intMedian = Median @($interpreter.RunMs)
 $delta = (($intMedian - $dynMedian) / $intMedian) * 100.0
 Write-Host ("Dynarec wall-time delta vs interpreter: {0:N2}%" -f $delta)
 Write-Host ("Reference output: DISPLAY_HASH={0} GS_RASTER_PIXELS={1}" -f $referenceHash, $referencePixels)
+
+$lastDynarec = $dynarec[$dynarec.Count - 1]
+$avgBlock = if ($lastDynarec.DynarecBlocks -ne 0) { $lastDynarec.DynarecInstructions / [double]$lastDynarec.DynarecBlocks } else { 0.0 }
+$avgDispatch = if ($lastDynarec.DispatchCalls -ne 0) { $lastDynarec.DynarecInstructions / [double]$lastDynarec.DispatchCalls } else { 0.0 }
+$linkTotal = $lastDynarec.LinkHits + $lastDynarec.LinkMisses
+$linkRate = if ($linkTotal -ne 0) { 100.0 * $lastDynarec.LinkHits / [double]$linkTotal } else { 0.0 }
+
+Write-Host ""
+Write-Host ("Second-gen coverage: {0} native instructions, {1} blocks, {2:N2} instructions/block" -f $lastDynarec.DynarecInstructions, $lastDynarec.DynarecBlocks, $avgBlock)
+Write-Host ("Dispatch efficiency: {0} calls, {1:N2} native instructions/dispatch" -f $lastDynarec.DispatchCalls, $avgDispatch)
+Write-Host ("Successor links: {0} hits / {1} misses ({2:N1}% hit rate)" -f $lastDynarec.LinkHits, $lastDynarec.LinkMisses, $linkRate)
+Write-Host ("Exits: guard={0} deadline={1} unsupported={2} cop0={3}" -f $lastDynarec.GuardExits, $lastDynarec.DeadlineExits, $lastDynarec.UnsupportedExits, $lastDynarec.Cop0Exits)
+Write-Host ("Fastmem: loads={0} stores={1}; reg-cache hits={2}; cache flushes={3}" -f $lastDynarec.FastmemLoads, $lastDynarec.FastmemStores, $lastDynarec.RegisterCacheHits, $lastDynarec.CacheFlushes)
+if ($lastDynarec.UnsupportedTop -ne "") { Write-Host $lastDynarec.UnsupportedTop }
