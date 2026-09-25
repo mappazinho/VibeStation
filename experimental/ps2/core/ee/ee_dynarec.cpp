@@ -100,6 +100,13 @@ bool is_mtc0(u32 instruction) {
            (instruction & 7u) == 0u;
 }
 
+bool is_cop1_move(u32 instruction) {
+    if ((instruction >> 26) != 0x11u) return false;
+    const u32 rs = (instruction >> 21) & 31u;
+    return rs == 0x00u || rs == 0x02u ||
+           rs == 0x04u || rs == 0x06u;
+}
+
 bool supported_special(u32 instruction) {
     const u32 funct = instruction & 63u;
     const u32 rs = (instruction >> 21) & 31u;
@@ -171,6 +178,7 @@ bool supported_noncontrol(u32 instruction) {
         break;
     }
     if (is_load(instruction) || is_store(instruction)) return true;
+    if (is_cop1_move(instruction)) return true;
     if (is_mfc0(instruction)) return true;
     if (is_mtc0(instruction)) {
         // All select-0 MTC0 writes are native precise exits. Count is formed
@@ -263,6 +271,10 @@ bool writes_gpr(u32 instruction, u32 reg) {
         return (opcode == 0x38u || opcode == 0x3Cu) && rt == reg;
     }
     if (opcode == 0x31u || opcode == 0x36u) return false;
+    if (is_cop1_move(instruction)) {
+        const u32 cop_rs = (instruction >> 21) & 31u;
+        return (cop_rs == 0x00u || cop_rs == 0x02u) && rt == reg;
+    }
     if (is_mtc0(instruction)) return false;
     if (is_mfc0(instruction)) return rt == reg;
     switch (opcode) {
@@ -348,6 +360,12 @@ void score_registers(
     if (is_load(instruction)) {
         use(rs, 2u);
         if (opcode != 0x31u && opcode != 0x36u) use(rt, 2u);
+        return;
+    }
+    if (is_cop1_move(instruction)) {
+        const u32 cop_rs = (instruction >> 21) & 31u;
+        if (cop_rs == 0x00u || cop_rs == 0x02u) use(rt, 2u);
+        else use(rt);
         return;
     }
     if (is_mfc0(instruction)) {
@@ -1290,6 +1308,51 @@ bool emit_body(
         return true;
     default:
         break;
+    }
+
+    if (is_cop1_move(instruction)) {
+        const u32 cop_rs = (instruction >> 21) & 31u;
+        const u32 fs = rd;
+        if (cop_rs == 0x00u) { // MFC1
+            out.load32(
+                RAX, RBX,
+                static_cast<u32>(
+                    offsetof(EeCpuState, fpr) + fs * sizeof(u32)));
+            out.sign_extend_eax();
+            out.store_guest(rt, RAX);
+        } else if (cop_rs == 0x02u) { // CFC1
+            if (fs == 0u) {
+                out.mov_r32_imm(RAX, 0x00002E00u);
+            } else if (fs == 31u) {
+                out.load32(
+                    RAX, RBX,
+                    static_cast<u32>(
+                        offsetof(EeCpuState, fcr) +
+                        31u * sizeof(u32)));
+            } else {
+                out.mov_r32_imm(RAX, 0u);
+            }
+            out.sign_extend_eax();
+            out.store_guest(rt, RAX);
+        } else if (cop_rs == 0x04u) { // MTC1
+            out.load_guest(RAX, rt, true);
+            out.store32(
+                RBX,
+                static_cast<u32>(
+                    offsetof(EeCpuState, fpr) + fs * sizeof(u32)),
+                RAX);
+        } else { // CTC1
+            if (fs == 31u) {
+                out.load_guest(RAX, rt, true);
+                out.store32(
+                    RBX,
+                    static_cast<u32>(
+                        offsetof(EeCpuState, fcr) +
+                        31u * sizeof(u32)),
+                    RAX);
+            }
+        }
+        return true;
     }
 
     if (is_mfc0(instruction)) {
