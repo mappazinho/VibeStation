@@ -809,10 +809,10 @@ void App::panel_definitive_settings() {
             draw, layout, left_x, content_y, column_w, 326.0f, "CPU & PERFORMANCE");
 
         const char* cpu_backend_labels[] = {
-            "Interpreter", "Decoded Block", "x64 JIT"
+            "Interpreter", "Recompiler (Experimental)"
         };
         int cpu_backend =
-            cpu_execution_mode_to_config_value(g_cpu_execution_mode);
+            g_cpu_execution_mode == CpuExecutionMode::Interpreter ? 0 : 1;
         if (definitive_settings_combo(
             draw, layout, "system_cpu", "CPU Backend",
             left_x + 1.0f, content_y + 43.0f, column_w - 2.0f,
@@ -822,8 +822,9 @@ void App::panel_definitive_settings() {
             if (was_running) {
                 emu_runner_.pause_and_wait_idle();
             }
-            g_cpu_execution_mode =
-                cpu_execution_mode_from_config_value(cpu_backend);
+            g_cpu_execution_mode = cpu_backend == 0
+                ? CpuExecutionMode::Interpreter
+                : CpuExecutionMode::Recompiler;
             if (system_) {
                 system_->cpu().flush_cpu_backend();
             }
@@ -833,7 +834,7 @@ void App::panel_definitive_settings() {
             }
         }
         note(left_x + 1.0f, content_y + 43.0f,
-            "Selects interpreter, decoded blocks, or the x64 JIT CPU core.");
+            "Selects the instruction interpreter or unified experimental recompiler.");
 
         const char* turbo_modes[] = { "200%", "400%", "Unlimited" };
         int turbo_mode = 0;
