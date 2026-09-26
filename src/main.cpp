@@ -765,11 +765,15 @@ static bool parse_cpu_execution_mode(const std::string &s,
   }
   if (v == "decoded" || v == "decodedblock" || v == "blockinterpreter" ||
       v == "blockinterp" || v == "block") {
-    out = CpuExecutionMode::DecodedBlockInterpreter;
+    out = CpuExecutionMode::Interpreter;
     return true;
   }
-  if (v == "x64jit" || v == "jit" || v == "dynarec" || v == "recompiler") {
-    out = CpuExecutionMode::X64Jit;
+  if (v == "x64jit" || v == "jit" || v == "dynarec" || v == "recompiler" ||
+      v == "x64jitv2" || v == "jitv2" || v == "dynarecv2" ||
+      v == "recompilerv2" || v == "x64jitv3" || v == "jitv3" ||
+      v == "dynarecv3" || v == "recompilerv3" || v == "x64jitv4" ||
+      v == "jitv4" || v == "dynarecv4" || v == "recompilerv4") {
+    out = CpuExecutionMode::Recompiler;
     return true;
   }
   return false;
